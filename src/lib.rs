@@ -10,6 +10,7 @@
 //! - [`app`]     — windowing + event loop glue (winit `ApplicationHandler`).
 //! - [`renderer`] — the wgpu device/surface/pipeline plumbing.
 //! - [`camera`]  — a minimal perspective camera producing a view-projection matrix.
+//! - [`input`]   — per-frame keyboard/mouse state, decoupled from winit.
 //!
 //! To put something on screen, implement [`Application`] and pass it to [`run`],
 //! which opens a window and drives your consumer until it is closed. See the
@@ -18,11 +19,13 @@
 pub mod app;
 pub mod application;
 pub mod camera;
+pub mod input;
 pub mod renderer;
 
 pub use app::App;
 pub use application::Application;
 pub use camera::Camera;
+pub use input::{Input, Key, MouseButton};
 pub use renderer::{Mesh, Renderer, Vertex};
 
 use winit::event_loop::{ControlFlow, EventLoop};

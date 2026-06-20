@@ -25,7 +25,12 @@ src/
 │                     Renderer, and the boxed Application; routes events; drives
 │                     the redraw loop and calls the consumer's hooks.
 ├── camera.rs         Camera (perspective look-at) + CameraUniform (the GPU
-│                     payload, a single mat4x4 view-projection).
+│                     payload, a single mat4x4 view-projection). look_from_to
+│                     lets a consumer aim it with plain [f32; 3] arrays.
+├── input.rs          Input: per-frame keyboard/mouse state, decoupled from
+│                     winit. Exposes engine Key/MouseButton enums (never winit's);
+│                     the event loop feeds it, the consumer reads it via
+│                     Renderer::input().
 └── renderer/
     ├── mod.rs        Renderer: wgpu instance/adapter/device/queue/surface,
     │                 the render pipeline, the depth buffer, the consumer's mesh
@@ -41,10 +46,13 @@ examples/
 ├── cube.rs           Spinning solid cube: proves indexed meshes, depth testing,
 │                     and back-face culling. Rotates its corners on the CPU and
 │                     re-uploads the mesh each frame.
-└── gallery.rs        Multi-scene switcher and the default web build. Owns several
-                      scenes and swaps the draw-list between them; on the web it
-                      builds DOM buttons (web-sys) that drive the selection, on
-                      native it auto-cycles. Source of the web demo.
+├── gallery.rs        Multi-scene switcher and the default web build. Owns several
+│                     scenes and swaps the draw-list between them; on the web it
+│                     builds DOM buttons (web-sys) that drive the selection, on
+│                     native it auto-cycles. Source of the web demo.
+└── grid.rs           Orbitable height-mapped terrain grid: proves the input +
+                      camera seam (Slice 3). Keeps its own orbit state and aims
+                      the camera from Renderer::input() each frame.
 
 xtask/                Dev tooling (a separate workspace member, no deps). `cargo
 └── src/main.rs       xtask serve [example]` builds the example natively and for
@@ -64,14 +72,42 @@ xtask/                Dev tooling (a separate workspace member, no deps). `cargo
    via an `EventLoopProxy<Renderer>` user event. Both paths funnel through
    `App::on_renderer_ready`, which resyncs the surface and then calls the
    consumer's one-time `Application::init` (where it uploads geometry).
-4. Each `RedrawRequested`: `Application::update` advances the consumer's state,
+4. Between redraws, keyboard/mouse `WindowEvent`s are folded into the renderer's
+   `Input` snapshot (see *Input flow* below).
+5. Each `RedrawRequested`: `Application::update` advances the consumer's state
+   (reading `Renderer::input()` and driving the camera via `Renderer::camera_mut`),
    then `Renderer::update()` re-uploads the camera uniform, then
    `Renderer::render()` records one command encoder + render pass (clear color +
    depth → draw each mesh in the consumer's draw-list with `draw_indexed`, if any)
-   and presents. Depth testing and back-face culling are on, so overlapping 3D
-   geometry occludes correctly.
-5. `about_to_wait` requests another redraw, so we render continuously
+   and presents. Finally `Input::end_frame` clears the per-frame deltas. Depth
+   testing and back-face culling are on, so overlapping 3D geometry occludes
+   correctly.
+6. `about_to_wait` requests another redraw, so we render continuously
    (`ControlFlow::Poll`).
+
+## Input flow
+
+The engine owns the event loop, so a consumer never touches `winit` (roadmap
+principle 1). Input is funneled instead:
+
+1. `App::window_event` maps each keyboard/mouse `WindowEvent` onto the renderer's
+   `Input` via `pub(crate)` methods (`on_keyboard`, `on_mouse_button`,
+   `on_cursor_moved`, `on_scroll`). These do the winit→engine translation, so the
+   winit types stop at the engine boundary.
+2. `Input` keeps two kinds of state: **held** keys/buttons that persist across
+   frames, and **per-frame deltas** (mouse motion, scroll) that accumulate within
+   a frame. Its public getters speak only in engine `Key`/`MouseButton` enums.
+3. The consumer reads it in `update` via `Renderer::input()` and moves the camera
+   through `Renderer::camera_mut()`. The *control scheme lives in the consumer*
+   (e.g. `grid.rs`'s orbit math); the engine only exposes the input and the camera.
+4. After the frame is drawn, `Input::end_frame` zeroes the per-frame deltas (held
+   state survives), so the next `update` sees only that frame's motion.
+
+Deliberately deferred: a frame clock (delta-time). Mouse deltas are already
+per-frame; key-driven motion uses a fixed step (frame-rate dependent, like the
+cube's spin). A real clock waits until a demo needs frame-rate-independent
+simulation — and will need a wasm-safe `Instant` (`std::time::Instant` panics on
+wasm).
 
 ## Why the async/user-event dance
 
@@ -137,9 +173,8 @@ The scaffold leaves obvious seams:
 - A **material** abstraction beyond the single shared pipeline, and **per-mesh
   transforms** (meshes are uploaded in world space today; the demo rotates on the
   CPU and re-uploads).
-- **Camera controls** (orbit / fly) driven from `WindowEvent` input — see
-  `ROADMAP.md` Slice 3.
 - A small **render-graph** once there's more than one pass.
 
 Already in place (earlier seams now filled): an indexed `Mesh` + draw-list
-(Slice 1) and a **depth buffer + back-face culling** (Slice 2).
+(Slice 1), a **depth buffer + back-face culling** (Slice 2), and a **consumer-driven
+camera** fed by a winit-free `Input` (Slice 3).

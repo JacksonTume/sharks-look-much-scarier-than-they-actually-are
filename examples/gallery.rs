@@ -3,13 +3,18 @@
 //! Like the other examples this is a separate crate that only sees the public
 //! API, but it does two extra things worth noting:
 //!
-//! - **It owns several scenes** (a triangle, a quad, a spinning cube) and swaps
-//!   the engine's draw-list between them at runtime via [`Renderer::set_meshes`] —
-//!   no engine restart, no page reload.
-//! - **On the web it builds real buttons.** The engine has no input hook yet
-//!   (that's a later slice), so the demo creates DOM `<button>`s with `web-sys`
-//!   and shares an `Rc<Cell<usize>>` with its `update` loop: a click sets the
-//!   selected scene, and the next `update` notices and swaps geometry.
+//! - **It owns several scenes** (a triangle, a quad, a spinning cube, and an
+//!   orbitable terrain grid) and swaps the engine's draw-list between them at
+//!   runtime via [`Renderer::set_meshes`] — no engine restart, no page reload.
+//! - **The grid scene is camera-driven.** It reads the engine's winit-free input
+//!   via [`Renderer::input`] and aims the camera with [`Renderer::camera_mut`]:
+//!   drag the left mouse button to orbit, scroll to zoom (it drifts on its own
+//!   when idle). The flat scenes keep a fixed front-on view.
+//! - **On the web it builds real buttons** for *scene selection*. The engine now
+//!   exposes raw keyboard/mouse input but no UI-widget abstraction, so the demo
+//!   still creates DOM `<button>`s with `web-sys` and shares an `Rc<Cell<usize>>`
+//!   with its `update` loop: a click sets the selected scene, and the next
+//!   `update` notices and swaps geometry.
 //!
 //! On native there is no DOM, so the gallery instead **auto-cycles** through the
 //! scenes every few seconds — the example stays meaningful on both targets
@@ -23,10 +28,10 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use slmsttaa::{run, Application, Mesh, Renderer, Vertex};
+use slmsttaa::{run, Application, Mesh, MouseButton, Renderer, Vertex};
 
 /// The scenes the gallery can show, in button order.
-const SCENES: [Scene; 3] = [Scene::Triangle, Scene::Quad, Scene::Cube];
+const SCENES: [Scene; 4] = [Scene::Triangle, Scene::Quad, Scene::Cube, Scene::Grid];
 
 /// On native, advance to the next scene every this many frames (~3s at 60fps).
 #[cfg(not(target_arch = "wasm32"))]
@@ -39,6 +44,7 @@ enum Scene {
     Triangle,
     Quad,
     Cube,
+    Grid,
 }
 
 impl Scene {
@@ -49,12 +55,20 @@ impl Scene {
             Scene::Triangle => "Triangle",
             Scene::Quad => "Quad",
             Scene::Cube => "Cube",
+            Scene::Grid => "Grid",
         }
     }
 
-    /// Whether the scene animates and so must be re-uploaded every frame.
+    /// Whether the scene animates its *geometry* and so must be re-uploaded every
+    /// frame. (The grid moves only the camera, so it stays `false`.)
     fn spins(self) -> bool {
         matches!(self, Scene::Cube)
+    }
+
+    /// Whether the consumer drives the camera for this scene (orbit). Flat scenes
+    /// keep a fixed front-on view instead.
+    fn orbits(self) -> bool {
+        matches!(self, Scene::Grid)
     }
 
     /// Build the scene's geometry at rotation `angle` (ignored by static scenes).
@@ -100,6 +114,7 @@ impl Scene {
                 vec![0, 1, 2, 0, 2, 3],
             ),
             Scene::Cube => cube_mesh(angle),
+            Scene::Grid => grid_mesh(),
         }
     }
 }
@@ -146,6 +161,60 @@ fn cube_mesh(angle: f32) -> Mesh {
     Mesh::new(vertices, CUBE_INDICES.to_vec())
 }
 
+// --- Grid (mirrors `examples/grid.rs`; the orbit scene) ----------------------
+
+/// Vertices per side of the grid.
+const GRID_N: usize = 64;
+/// Half-extent of the grid in world units (spans `[-HALF, HALF]` on X and Z).
+const GRID_HALF: f32 = 2.0;
+
+/// Static terrain height at `(x, z)`: a broad central hill plus gentle ripples.
+fn grid_height(x: f32, z: f32) -> f32 {
+    let r2 = x * x + z * z;
+    let hill = 0.9 * (-r2 * 0.6).exp();
+    let ripple = 0.08 * (x * 3.0).sin() * (z * 3.0).cos();
+    hill + ripple
+}
+
+/// Build the static `GRID_N x GRID_N` terrain grid, colored low→high.
+fn grid_mesh() -> Mesh {
+    let step = (2.0 * GRID_HALF) / (GRID_N as f32 - 1.0);
+
+    let mut vertices = Vec::with_capacity(GRID_N * GRID_N);
+    for i in 0..GRID_N {
+        for j in 0..GRID_N {
+            let x = -GRID_HALF + j as f32 * step;
+            let z = -GRID_HALF + i as f32 * step;
+            let y = grid_height(x, z);
+            let t = y.clamp(0.0, 1.0);
+            let color = [
+                0.16 + (0.92 - 0.16) * t,
+                0.42 + (0.93 - 0.42) * t,
+                0.18 + (0.88 - 0.18) * t,
+            ];
+            vertices.push(Vertex {
+                position: [x, y, z],
+                color,
+            });
+        }
+    }
+
+    // Two triangles per cell, wound CCW from above so culling keeps the top.
+    let mut indices = Vec::with_capacity((GRID_N - 1) * (GRID_N - 1) * 6);
+    let idx = |i: usize, j: usize| (i * GRID_N + j) as u32;
+    for i in 0..GRID_N - 1 {
+        for j in 0..GRID_N - 1 {
+            let a = idx(i, j);
+            let b = idx(i, j + 1);
+            let c = idx(i + 1, j + 1);
+            let d = idx(i + 1, j);
+            indices.extend_from_slice(&[a, d, b, b, d, c]);
+        }
+    }
+
+    Mesh::new(vertices, indices)
+}
+
 /// The gallery consumer: tracks which scene is selected and re-uploads on change.
 struct GalleryDemo {
     /// Selected scene index. On the web, button clicks write to this; `update`
@@ -155,6 +224,10 @@ struct GalleryDemo {
     current: usize,
     /// Rotation accumulator for animated scenes.
     angle: f32,
+    /// Orbit state for the camera-driven grid scene (azimuth, elevation, range).
+    yaw: f32,
+    pitch: f32,
+    distance: f32,
     /// Native-only frame counter driving the auto-cycle.
     #[cfg(not(target_arch = "wasm32"))]
     frames: u32,
@@ -166,9 +239,50 @@ impl GalleryDemo {
             selected: Rc::new(Cell::new(0)),
             current: 0,
             angle: 0.0,
+            yaw: 0.7,
+            pitch: 0.6,
+            distance: 6.0,
             #[cfg(not(target_arch = "wasm32"))]
             frames: 0,
         }
+    }
+
+    /// Aim the camera for the current scene: orbit the grid (drag/scroll, with a
+    /// gentle idle drift), or sit at a fixed front-on view for the flat scenes.
+    fn drive_camera(&mut self, renderer: &mut Renderer) {
+        if !SCENES[self.current].orbits() {
+            // Matches the engine's default eye, so the flat scenes look unchanged.
+            renderer
+                .camera_mut()
+                .look_from_to([0.0, 1.0, 3.0], [0.0, 0.0, 0.0]);
+            return;
+        }
+
+        // Read input out first (ends the immutable borrow before `camera_mut`).
+        let input = renderer.input();
+        let dragging = input.is_mouse_held(MouseButton::Left);
+        let (mdx, mdy) = input.mouse_delta();
+        let scroll = input.scroll_delta();
+
+        if dragging {
+            self.yaw -= mdx * 0.005;
+            self.pitch -= mdy * 0.005;
+        } else {
+            // Idle: drift slowly so the grid stays lively on native too.
+            self.yaw += 0.004;
+        }
+        self.distance -= scroll * 0.5;
+        self.pitch = self.pitch.clamp(0.08, 1.5);
+        self.distance = self.distance.clamp(2.0, 20.0);
+
+        let (sp, cp) = self.pitch.sin_cos();
+        let (sy, cy) = self.yaw.sin_cos();
+        let eye = [
+            self.distance * cp * sy,
+            self.distance * sp,
+            self.distance * cp * cy,
+        ];
+        renderer.camera_mut().look_from_to(eye, [0.0, 0.0, 0.0]);
     }
 }
 
@@ -198,12 +312,19 @@ impl Application for GalleryDemo {
             // Scene changed (button click or auto-cycle): swap geometry.
             self.current = sel;
             self.angle = 0.0;
+            // Start the orbit scene from a pleasant three-quarter view.
+            self.yaw = 0.7;
+            self.pitch = 0.6;
+            self.distance = 6.0;
             renderer.set_meshes(&[SCENES[sel].build(0.0)]);
         } else if SCENES[self.current].spins() {
             // Same scene, but it animates: advance and re-upload.
             self.angle += 0.01;
             renderer.set_meshes(&[SCENES[self.current].build(self.angle)]);
         }
+
+        // Aim the camera (orbit the grid; fixed front view otherwise).
+        self.drive_camera(renderer);
     }
 }
 

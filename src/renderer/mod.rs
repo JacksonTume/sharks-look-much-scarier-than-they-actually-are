@@ -17,6 +17,7 @@ use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 use crate::camera::{Camera, CameraUniform};
+use crate::input::Input;
 
 /// Format of the depth buffer used for depth testing.
 ///
@@ -100,6 +101,10 @@ pub struct Renderer {
     camera_uniform: CameraUniform,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+
+    /// This frame's input snapshot. The event loop feeds it; the consumer reads
+    /// it via [`Renderer::input`] from `Application::update`.
+    input: Input,
 
     /// Keep the window alive for as long as the surface borrows it.
     _window: Arc<Window>,
@@ -300,6 +305,7 @@ impl Renderer {
             camera_uniform,
             camera_buffer,
             camera_bind_group,
+            input: Input::default(),
             _window: window,
         }
     }
@@ -336,6 +342,30 @@ impl Renderer {
             .map(|mesh| GpuMesh::upload(&self.device, mesh))
             .collect();
         self.meshes = gpu;
+    }
+
+    /// Mutable access to the camera so the consumer can drive the viewpoint.
+    ///
+    /// Move `eye`/`target` (or change `fov_y`) from `Application::update`; the
+    /// next [`Renderer::update`] re-uploads the view-projection matrix. The
+    /// aspect ratio is owned by the engine and resynced on resize — leave it be.
+    pub fn camera_mut(&mut self) -> &mut Camera {
+        &mut self.camera
+    }
+
+    /// This frame's input snapshot, for reading from `Application::update`.
+    ///
+    /// Held keys/buttons persist across frames; mouse and scroll deltas cover
+    /// only the current frame (see [`Input`]).
+    pub fn input(&self) -> &Input {
+        &self.input
+    }
+
+    /// Mutable access to the input snapshot, for the event loop to feed events
+    /// and to clear per-frame deltas. Engine-internal: consumers use
+    /// [`Renderer::input`].
+    pub(crate) fn input_mut(&mut self) -> &mut Input {
+        &mut self.input
     }
 
     /// Advance per-frame state (camera animation, etc.).

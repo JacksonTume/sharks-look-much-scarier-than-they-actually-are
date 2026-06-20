@@ -175,12 +175,30 @@ impl ApplicationHandler<Renderer> for App {
                 renderer.resize(new_size);
             }
 
+            // Forward input into the engine's per-frame snapshot. The consumer
+            // reads it via `renderer.input()` and never sees these winit events.
+            WindowEvent::KeyboardInput { event, .. } => {
+                renderer.input_mut().on_keyboard(&event);
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                renderer.input_mut().on_mouse_button(state, button);
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                renderer.input_mut().on_cursor_moved(position);
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                renderer.input_mut().on_scroll(delta);
+            }
+
             WindowEvent::RedrawRequested => {
                 // Let the consumer advance its state first, then draw.
                 // `render` handles recoverable surface conditions internally.
                 self.application.update(renderer);
                 renderer.update();
                 renderer.render();
+                // The frame consumed this frame's input; clear the per-frame
+                // deltas (held keys/buttons persist).
+                renderer.input_mut().end_frame();
             }
 
             _ => {}

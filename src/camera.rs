@@ -57,6 +57,17 @@ impl Camera {
         OPENGL_TO_WGPU_MATRIX * proj * view
     }
 
+    /// Aim the camera: place the eye at `eye`, looking at `target`.
+    ///
+    /// A convenience for consumers driving the viewpoint (e.g. an orbit camera)
+    /// that takes plain `[x, y, z]` arrays, so a demo never has to depend on
+    /// `glam` just to move the camera — matching how [`Vertex`](crate::Vertex)
+    /// stays array-based.
+    pub fn look_from_to(&mut self, eye: [f32; 3], target: [f32; 3]) {
+        self.eye = Vec3::from(eye);
+        self.target = Vec3::from(target);
+    }
+
     /// Update the aspect ratio, e.g. after a window resize.
     pub fn set_aspect(&mut self, width: u32, height: u32) {
         if height > 0 {
