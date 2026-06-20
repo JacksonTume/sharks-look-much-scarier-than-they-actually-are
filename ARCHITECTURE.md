@@ -12,7 +12,7 @@ platform windowing). The same source builds two ways:
 implement the `Application` trait and call `run(app)`; they live in `examples/`
 (Cargo compiles each as its own crate that can only see the public API, so the
 engine/consumer boundary is enforced by the build). `examples/triangle.rs` is the
-reference consumer and the source of the web build.
+smallest reference consumer; `examples/gallery.rs` is the source of the web build.
 
 ## Module map
 
@@ -28,14 +28,28 @@ src/
 │                     payload, a single mat4x4 view-projection).
 └── renderer/
     ├── mod.rs        Renderer: wgpu instance/adapter/device/queue/surface,
-    │                 the render pipeline, consumer-supplied vertices, and
-    │                 per-frame update()/render().
+    │                 the render pipeline, the depth buffer, the consumer's mesh
+    │                 draw-list, and per-frame update()/render().
+    ├── mesh.rs       Mesh (vertices + indices): the CPU-side geometry a consumer
+    │                 builds and hands over via Renderer::set_meshes.
     ├── vertex.rs     Vertex (position + color) and its buffer layout.
     └── shader.wgsl   Vertex/fragment shaders (WGSL).
 
 examples/
-└── triangle.rs       Reference consumer: implements Application and uploads one
-                      triangle. Native fn main + a #[wasm_bindgen(start)] hook.
+├── triangle.rs       Reference consumer: implements Application and uploads one
+│                     triangle. Native fn main + a #[wasm_bindgen(start)] hook.
+├── cube.rs           Spinning solid cube: proves indexed meshes, depth testing,
+│                     and back-face culling. Rotates its corners on the CPU and
+│                     re-uploads the mesh each frame.
+└── gallery.rs        Multi-scene switcher and the default web build. Owns several
+                      scenes and swaps the draw-list between them; on the web it
+                      builds DOM buttons (web-sys) that drive the selection, on
+                      native it auto-cycles. Source of the web demo.
+
+xtask/                Dev tooling (a separate workspace member, no deps). `cargo
+└── src/main.rs       xtask serve [example]` builds the example natively and for
+                      wasm, runs wasm-bindgen into web/pkg/ as app.js, and serves
+                      web/ from a built-in static server. No Python required.
 ```
 
 ## Frame lifecycle
@@ -52,8 +66,10 @@ examples/
    consumer's one-time `Application::init` (where it uploads geometry).
 4. Each `RedrawRequested`: `Application::update` advances the consumer's state,
    then `Renderer::update()` re-uploads the camera uniform, then
-   `Renderer::render()` records one command encoder + render pass (clear → draw
-   the consumer's vertices, if any) and presents.
+   `Renderer::render()` records one command encoder + render pass (clear color +
+   depth → draw each mesh in the consumer's draw-list with `draw_indexed`, if any)
+   and presents. Depth testing and back-face culling are on, so overlapping 3D
+   geometry occludes correctly.
 5. `about_to_wait` requests another redraw, so we render continuously
    (`ControlFlow::Poll`).
 
@@ -89,6 +105,15 @@ These are subtle and easy to reintroduce, so they're documented here:
   is actually available, and use `downlevel_webgl2_defaults` limits there so a GL
   adapter can satisfy the device request.
 
+- **The depth buffer must track the surface size.** Depth and color attachments
+  have to share dimensions, so the depth texture is recreated in `resize()`
+  alongside the surface reconfigure — and because the web's async-renderer resync
+  funnels through `resize()` too, that path is covered without a special case.
+  Forgetting it surfaces as a render-pass validation error after the first resize.
+  The depth format is `Depth32Float` (a render-attachment format on every backend,
+  including the WebGL2 fallback); both the texture and the pipeline read one
+  `DEPTH_FORMAT` constant, so swapping to `Depth24Plus` is a one-line change.
+
 - **Match the WebGPU spec; keep wgpu current.** Browsers track the live WebGPU
   spec and reject limits/fields they no longer recognize (e.g. a stale
   `maxInterStageShaderComponents` caused `requestDevice` to fail). Prefer a
@@ -108,10 +133,13 @@ These are subtle and easy to reintroduce, so they're documented here:
 
 The scaffold leaves obvious seams:
 
-- A **depth buffer** (`depth_stencil` is currently `None`) and back-face culling
-  once real geometry exists.
 - **MSAA** (`multisample` is currently the 1-sample default).
-- A **mesh/material** abstraction beyond the single consumer-supplied vertex
-  buffer (indexed `Mesh` + a draw list — see `ROADMAP.md` Slice 1).
-- **Camera controls** (orbit / fly) driven from `WindowEvent` input.
+- A **material** abstraction beyond the single shared pipeline, and **per-mesh
+  transforms** (meshes are uploaded in world space today; the demo rotates on the
+  CPU and re-uploads).
+- **Camera controls** (orbit / fly) driven from `WindowEvent` input — see
+  `ROADMAP.md` Slice 3.
 - A small **render-graph** once there's more than one pass.
+
+Already in place (earlier seams now filled): an indexed `Mesh` + draw-list
+(Slice 1) and a **depth buffer + back-face culling** (Slice 2).

@@ -1,0 +1,3 @@
+# `cargo xtask ...` runs the dev-tooling crate in `xtask/`. See `xtask/src/main.rs`.
+[alias]
+xtask = "run --package xtask --"

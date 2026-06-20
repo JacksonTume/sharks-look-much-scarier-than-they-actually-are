@@ -23,7 +23,7 @@ pub mod renderer;
 pub use app::App;
 pub use application::Application;
 pub use camera::Camera;
-pub use renderer::{Renderer, Vertex};
+pub use renderer::{Mesh, Renderer, Vertex};
 
 use winit::event_loop::{ControlFlow, EventLoop};
 

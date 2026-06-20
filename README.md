@@ -39,17 +39,23 @@ cross-platform gotchas that shaped them.
 | `src/application.rs`     | The `Application` trait a consumer implements (IoC seam).|
 | `src/app.rs`             | winit `ApplicationHandler`: window + event loop.         |
 | `src/renderer/mod.rs`    | wgpu device/surface/pipeline; per-frame render.          |
+| `src/renderer/mesh.rs`   | `Mesh` (vertices + indices) the consumer hands over.     |
 | `src/renderer/vertex.rs` | Vertex format + buffer layout.                           |
 | `src/renderer/shader.wgsl` | WGSL vertex/fragment shaders.                          |
 | `src/camera.rs`          | Perspective camera + GPU uniform.                        |
 | `examples/triangle.rs`   | Reference consumer: draws one triangle (native + web).   |
-| `web/index.html`         | Browser harness for the wasm build.                      |
+| `examples/cube.rs`       | Spinning solid cube: indexed mesh + depth + culling.     |
+| `examples/gallery.rs`    | Scene switcher: web buttons swap demos; native cycles.   |
+| `web/index.html`         | Browser harness for the wasm build (loads `pkg/app.js`). |
+| `xtask/`                 | `cargo xtask serve`: build native + web and host it.     |
 
 ## Run it (standalone)
 
 ```sh
 cargo run --example triangle            # debug
 cargo run --example triangle --release  # optimized
+cargo run --example cube                # spinning solid cube (depth + culling)
+cargo run --example gallery             # switch between scenes (auto-cycles on native)
 ```
 
 Press <kbd>Esc</kbd> or close the window to quit. Set `RUST_LOG=slmsttaa=debug`
@@ -57,36 +63,40 @@ for more output.
 
 ## Run it (browser / WebGPU)
 
-The web build compiles the example to wasm, runs `wasm-bindgen` to emit
-`web/pkg/`, and serves the `web/` directory:
+One command builds the example for the web and serves it — no Python, no manual
+`wasm-bindgen` step:
 
 ```sh
-# one-time — install the CLI at a version matching the wasm-bindgen dependency
+# one-time — install the wasm-bindgen CLI (matched to the wasm-bindgen dependency)
 cargo install wasm-bindgen-cli
 
-# build the example for wasm, then generate JS/wasm bindings into web/pkg/
-cargo build --example triangle --target wasm32-unknown-unknown
-wasm-bindgen target/wasm32-unknown-unknown/debug/examples/triangle.wasm \
-  --out-dir web/pkg --target web
-
-# serve (any static server works)
-python -m http.server -d web 8080
+cargo xtask serve              # builds + serves `gallery` at http://localhost:8080
+cargo xtask serve cube        # a different example
+cargo xtask serve --release   # optimized build
+cargo xtask serve --port 9000 # a different port
 ```
 
-Then open <http://localhost:8080>. A WebGPU-capable browser (recent
-Chrome/Edge) is recommended; the build also includes a WebGL2 fallback.
+Then open <http://localhost:8080> and **hard-refresh** if you rebuilt. A
+WebGPU-capable browser (recent Chrome/Edge) is recommended; the build also
+includes a WebGL2 fallback.
+
+Under the hood `cargo xtask serve` builds the example natively *and* for wasm,
+runs `wasm-bindgen` into `web/pkg/` (as `app.js`, so `web/index.html` is stable
+across examples), and hosts `web/` from a tiny built-in static server. See
+`xtask/src/main.rs`.
 
 ## Write your own
 
 Implement `Application` and hand it to `run`:
 
 ```rust
-use slmsttaa::{run, Application, Renderer, Vertex};
+use slmsttaa::{run, Application, Mesh, Renderer, Vertex};
 
 struct MyApp;
 impl Application for MyApp {
     fn init(&mut self, renderer: &mut Renderer) {
-        renderer.set_vertices(&[ /* your vertices */ ]);
+        let mesh = Mesh::new(vec![/* your vertices */], vec![/* your indices */]);
+        renderer.set_meshes(&[mesh]);
     }
     // `update(&mut self, renderer)` runs every frame (optional).
 }

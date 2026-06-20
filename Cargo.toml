@@ -10,6 +10,11 @@ readme = "README.md"
 keywords = ["graphics", "rendering", "wgpu", "3d", "engine"]
 categories = ["graphics", "rendering"]
 
+[workspace]
+# The engine is the root package; `xtask` is the dev-tooling crate behind
+# `cargo xtask` (build + serve the web demo). See `.cargo/config.toml`.
+members = ["xtask"]
+
 [lib]
 name = "slmsttaa"
 path = "src/lib.rs"
@@ -40,6 +45,21 @@ web-sys = { version = "0.3", features = ["Document", "Window", "Element"] }
 # On the web, wgpu uses the WebGPU backend by default; the `webgl` feature adds
 # a WebGL2 fallback for browsers without WebGPU yet.
 wgpu = { version = "29", features = ["webgl"] }
+
+# Web-only example dependencies. The `gallery` example builds its scene-switch
+# buttons as real DOM elements, which needs a few more `web-sys` features than the
+# engine itself uses. Kept in dev-dependencies so the engine's own dependency list
+# stays honest about what the library needs; Cargo unifies the features for the
+# example build.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Document",
+    "Element",
+    "Node",
+    "HtmlElement",
+    "EventTarget",
+] }
 
 [profile.release]
 lto = "thin"

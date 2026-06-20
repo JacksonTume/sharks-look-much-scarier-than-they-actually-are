@@ -1,0 +1,10 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition = "2021"
+publish = false
+# Dev tooling only: no dependencies, so it stays trivial to build and audit.
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"

@@ -117,7 +117,7 @@ and the triangle is baked into `renderer/mod.rs`.
 *Proof:* an example written against only the public API renders, on native and
 web.
 
-### Slice 1 — Mesh + indexed drawing
+### Slice 1 — Mesh + indexed drawing ✅ done
 
 *Roadblock:* a terrain grid is thousands of shared vertices; you cannot hard-code
 it, and the current pipeline has no index buffer.
@@ -126,16 +126,21 @@ it, and the current pipeline has no index buffer.
   over; the engine uploads it.
 - A scene / draw-list the renderer iterates, replacing the single baked buffer.
 
-*Proof:* the demo builds a quad (then a flat grid) via `Mesh`.
+*Proof:* `Mesh` (`src/renderer/mesh.rs`) + `Renderer::set_meshes` upload a vertex
++ index buffer per mesh; `render()` iterates the draw-list with `draw_indexed`.
+The cube demo (below) builds an indexed cube — 8 shared corners, not 36 vertices.
 
-### Slice 2 — Depth buffer + culling
+### Slice 2 — Depth buffer + culling ✅ done
 
 *Roadblock:* real 3D geometry renders with wrong occlusion — `depth_stencil` is
 currently `None`.
 
 - A depth texture, depth testing, and back-face culling once geometry is solid.
 
-*Proof:* the grid, tilted in 3D, occludes correctly.
+*Proof:* `cargo run --example cube` shows a tumbling solid cube whose near faces
+occlude far ones and whose inward back faces are culled. (A spinning cube was
+chosen over a tilted grid as the clearer combined proof of indexed drawing +
+depth + culling; the real procedural terrain grid still arrives in Slice 4.)
 
 ### Slice 3 — Camera the consumer can drive
 

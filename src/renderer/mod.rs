@@ -5,8 +5,10 @@
 //! camera-transformed mesh supplied by the consumer, with clear seams where a
 //! real engine would grow (material system, mesh registry, render graph, etc.).
 
+mod mesh;
 mod vertex;
 
+pub use mesh::Mesh;
 pub use vertex::Vertex;
 
 use std::sync::Arc;
@@ -15,6 +17,68 @@ use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 use crate::camera::{Camera, CameraUniform};
+
+/// Format of the depth buffer used for depth testing.
+///
+/// `Depth32Float` is a render-attachment format on every backend we target,
+/// including the WebGL2 fallback. (If a future GL adapter ever rejects it, switch
+/// to `Depth24Plus` — both the texture and the pipeline read this one constant.)
+const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+/// One mesh uploaded to the GPU: its vertex + index buffers and the index count
+/// to draw. Built from a public [`Mesh`] by [`GpuMesh::upload`].
+struct GpuMesh {
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+}
+
+impl GpuMesh {
+    /// Upload a CPU-side [`Mesh`] into fresh GPU buffers.
+    fn upload(device: &wgpu::Device, mesh: &Mesh) -> Self {
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mesh vertex buffer"),
+            contents: bytemuck::cast_slice(&mesh.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mesh index buffer"),
+            contents: bytemuck::cast_slice(&mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        Self {
+            vertex_buffer,
+            index_buffer,
+            index_count: mesh.indices.len() as u32,
+        }
+    }
+}
+
+/// Create a depth texture sized to the surface and return its default view.
+///
+/// Must be called whenever the surface is (re)configured: the depth attachment
+/// has to match the color target's dimensions exactly or the render pass fails.
+fn create_depth_view(
+    device: &wgpu::Device,
+    config: &wgpu::SurfaceConfiguration,
+) -> wgpu::TextureView {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("depth texture"),
+        size: wgpu::Extent3d {
+            width: config.width,
+            height: config.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        // Must match the pipeline's 1-sample `MultisampleState`.
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
 
 /// Holds all GPU state required to render a frame.
 pub struct Renderer {
@@ -25,10 +89,12 @@ pub struct Renderer {
     size: winit::dpi::PhysicalSize<u32>,
 
     pipeline: wgpu::RenderPipeline,
-    /// The geometry to draw, uploaded by the consumer via [`Renderer::set_vertices`].
-    /// `None` until set; the engine just clears the screen until then.
-    vertex_buffer: Option<wgpu::Buffer>,
-    vertex_count: u32,
+    /// The draw-list: every mesh the consumer has handed over via
+    /// [`Renderer::set_meshes`]. Empty until set; the engine just clears the
+    /// screen until then.
+    meshes: Vec<GpuMesh>,
+    /// Depth attachment for occlusion testing; resized with the surface.
+    depth_view: wgpu::TextureView,
 
     camera: Camera,
     camera_uniform: CameraUniform,
@@ -195,19 +261,30 @@ impl Renderer {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
+                // Front faces are wound counter-clockwise; cull the back faces so
+                // a closed solid doesn't paint its far, inward-facing triangles.
                 front_face: wgpu::FrontFace::Ccw,
-                // No culling for the demo: a single flat triangle should be
-                // visible from either side regardless of projected winding.
-                cull_mode: None,
+                cull_mode: Some(wgpu::Face::Back),
                 polygon_mode: wgpu::PolygonMode::Fill,
                 unclipped_depth: false,
                 conservative: false,
             },
-            depth_stencil: None,
+            // Depth testing so nearer fragments occlude farther ones. The depth
+            // value comes from the vertex `@builtin(position)`; the camera already
+            // remaps Z into wgpu's [0, 1] range, so `Less` is the right test.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
         });
+
+        let depth_view = create_depth_view(&device, &config);
 
         Self {
             surface,
@@ -217,8 +294,8 @@ impl Renderer {
             size,
             pipeline,
             // No geometry yet — the consumer supplies it in `Application::init`.
-            vertex_buffer: None,
-            vertex_count: 0,
+            meshes: Vec::new(),
+            depth_view,
             camera,
             camera_uniform,
             camera_buffer,
@@ -241,22 +318,24 @@ impl Renderer {
         self.config.width = new_size.width;
         self.config.height = new_size.height;
         self.surface.configure(&self.device, &self.config);
+        // The depth buffer must track the surface size or the render pass fails.
+        self.depth_view = create_depth_view(&self.device, &self.config);
         self.camera.set_aspect(new_size.width, new_size.height);
     }
 
-    /// Upload the geometry to draw, replacing any previously set vertices.
+    /// Replace the draw-list with `meshes`, uploading each to the GPU.
     ///
-    /// The consumer builds vertices CPU-side and hands them over; the engine
-    /// owns the GPU buffer. Vertices use the engine's [`Vertex`] format.
-    pub fn set_vertices(&mut self, vertices: &[Vertex]) {
-        self.vertex_buffer = Some(self.device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("consumer vertex buffer"),
-                contents: bytemuck::cast_slice(vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            },
-        ));
-        self.vertex_count = vertices.len() as u32;
+    /// The consumer builds [`Mesh`]es CPU-side and hands them over; the engine
+    /// owns the GPU buffers. This *replaces* the previous draw-list, so calling
+    /// it every frame (to animate geometry) re-uploads rather than accumulating.
+    pub fn set_meshes(&mut self, meshes: &[Mesh]) {
+        // Build into a local first so we aren't borrowing `self.device` while
+        // assigning into `self.meshes`.
+        let gpu: Vec<GpuMesh> = meshes
+            .iter()
+            .map(|mesh| GpuMesh::upload(&self.device, mesh))
+            .collect();
+        self.meshes = gpu;
     }
 
     /// Advance per-frame state (camera animation, etc.).
@@ -318,20 +397,29 @@ impl Renderer {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        // Clear to the far plane each frame before drawing.
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
                 occlusion_query_set: None,
                 timestamp_writes: None,
                 multiview_mask: None,
             });
 
-            // Draw the consumer's geometry if any has been uploaded; otherwise
-            // the pass above still clears the screen.
-            if let Some(vertex_buffer) = &self.vertex_buffer {
-                if self.vertex_count > 0 {
-                    pass.set_pipeline(&self.pipeline);
-                    pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                    pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                    pass.draw(0..self.vertex_count, 0..1);
+            // Draw every mesh in the consumer's draw-list; if it's empty the pass
+            // above still clears the screen.
+            if !self.meshes.is_empty() {
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                for mesh in &self.meshes {
+                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                    pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
                 }
             }
         }

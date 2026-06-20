@@ -34,10 +34,10 @@ cargo fmt                              # format
 
 # Web (wasm) — requires `cargo install wasm-bindgen-cli` once, at a version
 # matching the `wasm-bindgen` dependency in Cargo.lock.
-cargo build --example triangle --target wasm32-unknown-unknown
-wasm-bindgen target/wasm32-unknown-unknown/debug/examples/triangle.wasm \
-  --out-dir web/pkg --target web
-python -m http.server -d web 8080      # then open http://localhost:8080
+cargo xtask serve                      # build (native + wasm) + host gallery at :8080
+cargo xtask serve cube                 # a specific example; also --release / --port N
+# `cargo xtask serve` wraps: build the example for wasm, run wasm-bindgen into
+# web/pkg/ as app.js, and serve web/ from a built-in static server (xtask/).
 
 # Type-check the wasm target without packaging
 cargo build --target wasm32-unknown-unknown --lib

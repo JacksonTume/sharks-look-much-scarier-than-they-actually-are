@@ -28,10 +28,11 @@
     <noscript>This demo requires JavaScript.</noscript>
     <div id="error" hidden></div>
 
-    <!-- Built from the `triangle` example: `wasm-bindgen ... --out-dir web/pkg`
-         emits ./pkg/triangle.js (see README.md). -->
+    <!-- `cargo xtask serve [example]` builds the chosen example to ./pkg/app.js
+         (a stable name, so this file never changes per example) and serves it.
+         The default example, `gallery`, draws its own scene-switch buttons. -->
     <script type="module">
-      import init from "./pkg/triangle.js";
+      import init from "./pkg/app.js";
 
       // winit unwinds the wasm stack by throwing a sentinel exception once the
       // event loop is handed off to requestAnimationFrame. That is normal and
