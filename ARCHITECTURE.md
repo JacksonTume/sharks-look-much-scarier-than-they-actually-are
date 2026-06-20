@@ -8,38 +8,52 @@ platform windowing). The same source builds two ways:
 - **Web** — a `<canvas>` via winit's web backend, GPU via WebGPU (with a WebGL2
   fallback), shipped as a `wasm-bindgen` module.
 
-The crate is both a library (`slmsttaa`) and a demo binary (`slmsttaa-demo`).
+`slmsttaa` is a **library** (the engine). Consumers are separate programs that
+implement the `Application` trait and call `run(app)`; they live in `examples/`
+(Cargo compiles each as its own crate that can only see the public API, so the
+engine/consumer boundary is enforced by the build). `examples/triangle.rs` is the
+reference consumer and the source of the web build.
 
 ## Module map
 
 ```
 src/
-├── lib.rs            Crate root. Logging, the run() entry point, and the
-│                     #[wasm_bindgen(start)] hook for the web.
-├── main.rs           Native binary; just calls slmsttaa::run().
-├── app.rs            App: winit ApplicationHandler. Owns the window and the
-│                     Renderer; routes events; drives the redraw loop.
+├── lib.rs            Crate root. Logging and the run(app) entry point.
+├── application.rs    The Application trait (init/update) — the IoC seam a
+│                     consumer implements. The engine only sees dyn Application.
+├── app.rs            App: winit ApplicationHandler. Owns the window, the
+│                     Renderer, and the boxed Application; routes events; drives
+│                     the redraw loop and calls the consumer's hooks.
 ├── camera.rs         Camera (perspective look-at) + CameraUniform (the GPU
 │                     payload, a single mat4x4 view-projection).
 └── renderer/
     ├── mod.rs        Renderer: wgpu instance/adapter/device/queue/surface,
-    │                 the render pipeline, and per-frame update()/render().
+    │                 the render pipeline, consumer-supplied vertices, and
+    │                 per-frame update()/render().
     ├── vertex.rs     Vertex (position + color) and its buffer layout.
-    └── shader.wgsl   Demo vertex/fragment shaders (WGSL).
+    └── shader.wgsl   Vertex/fragment shaders (WGSL).
+
+examples/
+└── triangle.rs       Reference consumer: implements Application and uploads one
+                      triangle. Native fn main + a #[wasm_bindgen(start)] hook.
 ```
 
 ## Frame lifecycle
 
-1. `run()` builds a `winit` event loop **parameterized over `Renderer`** as its
-   user-event type, then hands control to the platform-appropriate runner.
+1. `run(app)` boxes the consumer as `dyn Application`, then builds a `winit`
+   event loop **parameterized over `Renderer`** as its user-event type and hands
+   control to the platform-appropriate runner.
 2. On `resumed`, `App` creates the window. On the web it also mounts the canvas
    and sizes it (see gotchas).
 3. The `Renderer` is built asynchronously (GPU init is async) and delivered back
    into the loop. Native blocks on it; the web spawns it and reports completion
-   via an `EventLoopProxy<Renderer>` user event.
-4. Each `RedrawRequested`: `Renderer::update()` re-uploads the camera uniform,
-   then `Renderer::render()` records one command encoder + render pass (clear →
-   draw) and presents.
+   via an `EventLoopProxy<Renderer>` user event. Both paths funnel through
+   `App::on_renderer_ready`, which resyncs the surface and then calls the
+   consumer's one-time `Application::init` (where it uploads geometry).
+4. Each `RedrawRequested`: `Application::update` advances the consumer's state,
+   then `Renderer::update()` re-uploads the camera uniform, then
+   `Renderer::render()` records one command encoder + render pass (clear → draw
+   the consumer's vertices, if any) and presents.
 5. `about_to_wait` requests another redraw, so we render continuously
    (`ControlFlow::Poll`).
 
@@ -97,6 +111,7 @@ The scaffold leaves obvious seams:
 - A **depth buffer** (`depth_stencil` is currently `None`) and back-face culling
   once real geometry exists.
 - **MSAA** (`multisample` is currently the 1-sample default).
-- A **mesh/material** abstraction beyond the single hard-coded vertex buffer.
+- A **mesh/material** abstraction beyond the single consumer-supplied vertex
+  buffer (indexed `Mesh` + a draw list — see `ROADMAP.md` Slice 1).
 - **Camera controls** (orbit / fly) driven from `WindowEvent` input.
 - A small **render-graph** once there's more than one pass.

@@ -13,14 +13,10 @@ categories = ["graphics", "rendering"]
 [lib]
 name = "slmsttaa"
 path = "src/lib.rs"
-# `cdylib` is required for the wasm-bindgen web build; `rlib` keeps the crate
-# usable as a normal Rust library dependency.
-crate-type = ["cdylib", "rlib"]
-
-# Distinct from the lib name so the cdylib and the exe don't collide on disk.
-[[bin]]
-name = "slmsttaa-demo"
-path = "src/main.rs"
+# `rlib` lets the `examples/` consumers (and any downstream crate) link the
+# engine. The web demo is built from an example compiled to wasm, not from a
+# library cdylib, so `cdylib` is no longer needed here.
+crate-type = ["rlib"]
 
 [dependencies]
 wgpu = "29"

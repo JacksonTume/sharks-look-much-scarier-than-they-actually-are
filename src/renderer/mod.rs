@@ -1,9 +1,9 @@
 //! The wgpu rendering backend.
 //!
-//! [`Renderer`] owns the GPU surface, device/queue, and the demo render
-//! pipeline. It is deliberately small: enough to clear the screen and draw a
-//! camera-transformed mesh, with clear seams where a real engine would grow
-//! (material system, mesh registry, render graph, etc.).
+//! [`Renderer`] owns the GPU surface, device/queue, and the render pipeline. It
+//! is deliberately small: enough to clear the screen and draw a
+//! camera-transformed mesh supplied by the consumer, with clear seams where a
+//! real engine would grow (material system, mesh registry, render graph, etc.).
 
 mod vertex;
 
@@ -16,22 +16,6 @@ use winit::window::Window;
 
 use crate::camera::{Camera, CameraUniform};
 
-/// A simple colored triangle, defined in counter-clockwise winding order.
-const DEMO_VERTICES: &[Vertex] = &[
-    Vertex {
-        position: [0.0, 0.5, 0.0],
-        color: [1.0, 0.2, 0.3],
-    },
-    Vertex {
-        position: [-0.5, -0.5, 0.0],
-        color: [0.2, 1.0, 0.4],
-    },
-    Vertex {
-        position: [0.5, -0.5, 0.0],
-        color: [0.3, 0.4, 1.0],
-    },
-];
-
 /// Holds all GPU state required to render a frame.
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
@@ -41,7 +25,9 @@ pub struct Renderer {
     size: winit::dpi::PhysicalSize<u32>,
 
     pipeline: wgpu::RenderPipeline,
-    vertex_buffer: wgpu::Buffer,
+    /// The geometry to draw, uploaded by the consumer via [`Renderer::set_vertices`].
+    /// `None` until set; the engine just clears the screen until then.
+    vertex_buffer: Option<wgpu::Buffer>,
     vertex_count: u32,
 
     camera: Camera,
@@ -223,12 +209,6 @@ impl Renderer {
             cache: None,
         });
 
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("demo vertex buffer"),
-            contents: bytemuck::cast_slice(DEMO_VERTICES),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
         Self {
             surface,
             device,
@@ -236,8 +216,9 @@ impl Renderer {
             config,
             size,
             pipeline,
-            vertex_buffer,
-            vertex_count: DEMO_VERTICES.len() as u32,
+            // No geometry yet — the consumer supplies it in `Application::init`.
+            vertex_buffer: None,
+            vertex_count: 0,
             camera,
             camera_uniform,
             camera_buffer,
@@ -261,6 +242,21 @@ impl Renderer {
         self.config.height = new_size.height;
         self.surface.configure(&self.device, &self.config);
         self.camera.set_aspect(new_size.width, new_size.height);
+    }
+
+    /// Upload the geometry to draw, replacing any previously set vertices.
+    ///
+    /// The consumer builds vertices CPU-side and hands them over; the engine
+    /// owns the GPU buffer. Vertices use the engine's [`Vertex`] format.
+    pub fn set_vertices(&mut self, vertices: &[Vertex]) {
+        self.vertex_buffer = Some(self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("consumer vertex buffer"),
+                contents: bytemuck::cast_slice(vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            },
+        ));
+        self.vertex_count = vertices.len() as u32;
     }
 
     /// Advance per-frame state (camera animation, etc.).
@@ -328,10 +324,16 @@ impl Renderer {
                 multiview_mask: None,
             });
 
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            pass.draw(0..self.vertex_count, 0..1);
+            // Draw the consumer's geometry if any has been uploaded; otherwise
+            // the pass above still clears the screen.
+            if let Some(vertex_buffer) = &self.vertex_buffer {
+                if self.vertex_count > 0 {
+                    pass.set_pipeline(&self.pipeline);
+                    pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                    pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                    pass.draw(0..self.vertex_count, 0..1);
+                }
+            }
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));

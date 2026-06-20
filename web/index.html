@@ -28,9 +28,10 @@
     <noscript>This demo requires JavaScript.</noscript>
     <div id="error" hidden></div>
 
-    <!-- `wasm-pack build --target web` emits ./pkg/slmsttaa.js -->
+    <!-- Built from the `triangle` example: `wasm-bindgen ... --out-dir web/pkg`
+         emits ./pkg/triangle.js (see README.md). -->
     <script type="module">
-      import init from "./pkg/slmsttaa.js";
+      import init from "./pkg/triangle.js";
 
       // winit unwinds the wasm stack by throwing a sentinel exception once the
       // event loop is handed off to requestAnimationFrame. That is normal and

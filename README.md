@@ -11,7 +11,9 @@ but up close it's mostly friendly little triangles.
 
 ## Status
 
-Early scaffold, but live on both targets: it opens a window and renders a
+Early scaffold, but live on both targets: a consumer implements the
+`Application` trait and calls `run(app)`; the engine owns the window, GPU, and
+event loop and calls into it. The `triangle` example renders a
 camera-transformed, vertex-colored triangle natively **and** in the browser. The
 structure is laid out so the scary parts (meshes, materials, a render graph) have
 obvious homes to grow into.
@@ -23,42 +25,49 @@ cross-platform gotchas that shaped them.
 
 - Rust 1.80+ (a `rust-toolchain.toml` pins `stable` with the `wasm32-unknown-unknown`
   target, `clippy`, and `rustfmt`).
-- For the browser build: [`wasm-pack`](https://rustwasm.github.io/wasm-pack/) and
-  a WebGPU-capable browser (recent Chrome/Edge); a WebGL2 fallback covers others.
+- For the browser build:
+  [`wasm-bindgen-cli`](https://crates.io/crates/wasm-bindgen-cli) (at a version
+  matching the `wasm-bindgen` dependency) and a WebGPU-capable browser (recent
+  Chrome/Edge); a WebGL2 fallback covers others.
 - GPU stack: [`wgpu`](https://wgpu.rs/) 29 (WebGPU), [`winit`](https://github.com/rust-windowing/winit) 0.30.
 
 ## Layout
 
 | Path                     | Purpose                                                  |
 | ------------------------ | -------------------------------------------------------- |
-| `src/lib.rs`             | Crate root, logging setup, `run()` / wasm entry point.   |
+| `src/lib.rs`             | Crate root, logging setup, the `run(app)` entry point.   |
+| `src/application.rs`     | The `Application` trait a consumer implements (IoC seam).|
 | `src/app.rs`             | winit `ApplicationHandler`: window + event loop.         |
 | `src/renderer/mod.rs`    | wgpu device/surface/pipeline; per-frame render.          |
 | `src/renderer/vertex.rs` | Vertex format + buffer layout.                           |
-| `src/renderer/shader.wgsl` | Demo WGSL vertex/fragment shaders.                     |
+| `src/renderer/shader.wgsl` | WGSL vertex/fragment shaders.                          |
 | `src/camera.rs`          | Perspective camera + GPU uniform.                        |
+| `examples/triangle.rs`   | Reference consumer: draws one triangle (native + web).   |
 | `web/index.html`         | Browser harness for the wasm build.                      |
 
 ## Run it (standalone)
 
 ```sh
-cargo run --bin slmsttaa-demo            # debug
-cargo run --bin slmsttaa-demo --release  # optimized
+cargo run --example triangle            # debug
+cargo run --example triangle --release  # optimized
 ```
 
-(`cargo run` works too — there's only one binary.) Press <kbd>Esc</kbd> or close
-the window to quit. Set `RUST_LOG=slmsttaa=debug` for more output.
+Press <kbd>Esc</kbd> or close the window to quit. Set `RUST_LOG=slmsttaa=debug`
+for more output.
 
 ## Run it (browser / WebGPU)
 
-Build the wasm package and serve the `web/` directory:
+The web build compiles the example to wasm, runs `wasm-bindgen` to emit
+`web/pkg/`, and serves the `web/` directory:
 
 ```sh
-# one-time
-cargo install wasm-pack
+# one-time — install the CLI at a version matching the wasm-bindgen dependency
+cargo install wasm-bindgen-cli
 
-# build → emits web/pkg/
-wasm-pack build --target web --out-dir web/pkg
+# build the example for wasm, then generate JS/wasm bindings into web/pkg/
+cargo build --example triangle --target wasm32-unknown-unknown
+wasm-bindgen target/wasm32-unknown-unknown/debug/examples/triangle.wasm \
+  --out-dir web/pkg --target web
 
 # serve (any static server works)
 python -m http.server -d web 8080
@@ -66,6 +75,26 @@ python -m http.server -d web 8080
 
 Then open <http://localhost:8080>. A WebGPU-capable browser (recent
 Chrome/Edge) is recommended; the build also includes a WebGL2 fallback.
+
+## Write your own
+
+Implement `Application` and hand it to `run`:
+
+```rust
+use slmsttaa::{run, Application, Renderer, Vertex};
+
+struct MyApp;
+impl Application for MyApp {
+    fn init(&mut self, renderer: &mut Renderer) {
+        renderer.set_vertices(&[ /* your vertices */ ]);
+    }
+    // `update(&mut self, renderer)` runs every frame (optional).
+}
+
+fn main() {
+    run(MyApp).unwrap();
+}
+```
 
 ## Performance notes
 

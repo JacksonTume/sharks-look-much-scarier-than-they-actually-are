@@ -6,20 +6,24 @@
 //!
 //! The crate is split into a few focused modules:
 //!
+//! - [`application`] — the [`Application`] trait a consumer implements.
 //! - [`app`]     — windowing + event loop glue (winit `ApplicationHandler`).
 //! - [`renderer`] — the wgpu device/surface/pipeline plumbing.
 //! - [`camera`]  — a minimal perspective camera producing a view-projection matrix.
 //!
-//! The simplest way to see something on screen is [`run`], which opens a window
-//! and renders the demo scene until you close it.
+//! To put something on screen, implement [`Application`] and pass it to [`run`],
+//! which opens a window and drives your consumer until it is closed. See the
+//! `triangle` example for the smallest possible consumer.
 
 pub mod app;
+pub mod application;
 pub mod camera;
 pub mod renderer;
 
 pub use app::App;
+pub use application::Application;
 pub use camera::Camera;
-pub use renderer::Renderer;
+pub use renderer::{Renderer, Vertex};
 
 use winit::event_loop::{ControlFlow, EventLoop};
 
@@ -42,15 +46,15 @@ fn init_logging() {
     }
 }
 
-/// Open a window and run the engine's demo scene until the user quits.
+/// Open a window and drive `app` until the user quits.
 ///
-/// This is a convenience entry point intended for examples and the bundled
-/// binary. Embedders who want more control can drive [`App`] against their own
-/// [`winit`] event loop instead.
+/// This is the engine's entry point: it owns the window, GPU, and event loop and
+/// calls into your [`Application`]'s `init`/`update` hooks. Embedders who want
+/// more control can drive [`App`] against their own [`winit`] event loop instead.
 ///
 /// The renderer is delivered to the loop as a user event, so the event loop is
 /// parameterized over [`Renderer`].
-pub fn run() -> Result<(), winit::error::EventLoopError> {
+pub fn run<A: Application + 'static>(app: A) -> Result<(), winit::error::EventLoopError> {
     init_logging();
 
     // `with_user_event` lets the async-built renderer be handed back into the
@@ -60,7 +64,8 @@ pub fn run() -> Result<(), winit::error::EventLoopError> {
     // engine. Switch to `Wait` for a GUI-style, redraw-on-demand app.
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let app = App::new(event_loop.create_proxy());
+    // The engine only ever sees `dyn Application`; it cannot know the consumer.
+    let app = App::new(event_loop.create_proxy(), Box::new(app));
 
     // Native blocks here until the loop exits. The web can't block the main
     // thread, so winit drives the loop off the browser's animation frames via
@@ -77,15 +82,5 @@ pub fn run() -> Result<(), winit::error::EventLoopError> {
         use winit::platform::web::EventLoopExtWebSys;
         event_loop.spawn_app(app);
         Ok(())
-    }
-}
-
-/// WASM entry point. Call this from JavaScript after loading the module.
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen::prelude::wasm_bindgen(start)]
-pub fn wasm_start() {
-    // Errors here can't be propagated to JS meaningfully; log and move on.
-    if let Err(err) = run() {
-        log::error!("slmsttaa failed to start: {err}");
     }
 }

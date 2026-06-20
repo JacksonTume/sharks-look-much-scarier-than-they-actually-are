@@ -14,6 +14,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
+use crate::application::Application;
 use crate::renderer::Renderer;
 
 /// Top-level application state driven by the winit event loop.
@@ -22,6 +23,8 @@ pub struct App {
     /// Only the web path consumes this; native init blocks instead.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     proxy: EventLoopProxy<Renderer>,
+    /// The consumer. The engine only ever sees it as `dyn Application`.
+    application: Box<dyn Application>,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     /// Guards against kicking off renderer creation more than once on the web.
@@ -30,10 +33,12 @@ pub struct App {
 
 impl App {
     /// Create the application. `proxy` is obtained from the event loop and is
-    /// how async GPU init reports completion.
-    pub fn new(proxy: EventLoopProxy<Renderer>) -> Self {
+    /// how async GPU init reports completion. `application` is the consumer the
+    /// engine drives.
+    pub fn new(proxy: EventLoopProxy<Renderer>, application: Box<dyn Application>) -> Self {
         Self {
             proxy,
+            application,
             window: None,
             renderer: None,
             renderer_pending: false,
@@ -49,10 +54,9 @@ impl App {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            // Native: just block on the GPU init and store the result.
+            // Native: just block on the GPU init and hand it straight back.
             let renderer = pollster::block_on(Renderer::new(window));
-            self.renderer_pending = false;
-            self.renderer = Some(renderer);
+            self.on_renderer_ready(renderer);
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -65,6 +69,26 @@ impl App {
                 // The loop may be gone if the page is tearing down; ignore that.
                 let _ = proxy.send_event(renderer);
             });
+        }
+    }
+
+    /// Funnel both platforms (native blocks, web delivers via `user_event`)
+    /// through one place once the renderer exists: resync the surface, run the
+    /// consumer's one-time `init`, then store it.
+    fn on_renderer_ready(&mut self, mut renderer: Renderer) {
+        self.renderer_pending = false;
+        // The window has likely been laid out by now; resync the surface to its
+        // real size in case the `Resized` event fired before the renderer
+        // existed (very common on the web, where init is async).
+        if let Some(window) = &self.window {
+            renderer.resize(window.inner_size());
+        }
+        // `renderer` is still an owned local here, so this borrows it
+        // independently of `self.application`.
+        self.application.init(&mut renderer);
+        self.renderer = Some(renderer);
+        if let Some(window) = &self.window {
+            window.request_redraw();
         }
     }
 }
@@ -124,16 +148,8 @@ impl ApplicationHandler<Renderer> for App {
     }
 
     /// Delivery point for the async-built renderer (used on the web).
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, mut renderer: Renderer) {
-        self.renderer_pending = false;
-        // The window has likely been laid out by now; resync the surface to its
-        // real size in case the `Resized` event fired before the renderer
-        // existed (very common on the web, where init is async).
-        if let Some(window) = &self.window {
-            renderer.resize(window.inner_size());
-            window.request_redraw();
-        }
-        self.renderer = Some(renderer);
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, renderer: Renderer) {
+        self.on_renderer_ready(renderer);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -160,7 +176,9 @@ impl ApplicationHandler<Renderer> for App {
             }
 
             WindowEvent::RedrawRequested => {
+                // Let the consumer advance its state first, then draw.
                 // `render` handles recoverable surface conditions internally.
+                self.application.update(renderer);
                 renderer.update();
                 renderer.render();
             }

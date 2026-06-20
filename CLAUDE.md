@@ -6,25 +6,37 @@ Guidance for working in this repository.
 
 **SLMSTTAA** ("Sharks Look Much Scarier Than They Actually Are") — a small Rust
 3D rendering engine on `wgpu` (WebGPU) + `winit`. Builds **native** (desktop) and
-**web** (wasm/WebGPU) from one codebase. Crate name `slmsttaa`; demo binary
-`slmsttaa-demo`.
+**web** (wasm/WebGPU) from one codebase. Crate name `slmsttaa`; consumers
+implement the `Application` trait and call `run(app)`. Demos live in `examples/`
+(separate crates that see only the public API) — the `triangle` example is the
+reference consumer.
 
 Read [`ARCHITECTURE.md`](ARCHITECTURE.md) before changing the init/render flow —
 it documents the cross-platform gotchas (web `spawn_app`, canvas sizing, backend
 selection, wgpu/spec drift) that are easy to reintroduce.
 
+Read [`ROADMAP.md`](ROADMAP.md) before adding features — it records the goal (an
+easy API for cool 3D, with the engine hiding all GPU/windowing plumbing), the
+guiding principles (engine decoupled from consumers via inversion of control;
+demo-first/outside-in; push only generic plumbing into the engine; KISS), and the
+demand-driven slice sequence. New work should be pulled into existence by a demo
+roadblock, never added speculatively.
+
 ## Commands
 
 ```sh
 # Native
-cargo run --bin slmsttaa-demo          # run the demo (Esc / close to quit)
+cargo run --example triangle           # run the demo (Esc / close to quit)
 cargo build                            # debug build
 cargo build --release                  # optimized
 cargo clippy --all-targets             # lint
 cargo fmt                              # format
 
-# Web (wasm) — requires `cargo install wasm-pack` once
-wasm-pack build --target web --out-dir web/pkg
+# Web (wasm) — requires `cargo install wasm-bindgen-cli` once, at a version
+# matching the `wasm-bindgen` dependency in Cargo.lock.
+cargo build --example triangle --target wasm32-unknown-unknown
+wasm-bindgen target/wasm32-unknown-unknown/debug/examples/triangle.wasm \
+  --out-dir web/pkg --target web
 python -m http.server -d web 8080      # then open http://localhost:8080
 
 # Type-check the wasm target without packaging
@@ -41,14 +53,14 @@ There are no tests yet. To confirm a change works:
 - **Always** `cargo build` (native) **and** `cargo build --target
   wasm32-unknown-unknown --lib` — the two targets diverge via `#[cfg]`, so one
   can break while the other compiles.
-- For visual changes, run the native binary and/or rebuild the wasm package and
-  hard-refresh the browser. The dev server serves `web/` live; no restart needed
-  after a rebuild.
+- For visual changes, run the native example (`cargo run --example triangle`)
+  and/or rebuild the wasm package and hard-refresh the browser. The dev server
+  serves `web/` live; no restart needed after a rebuild.
 
 ## Conventions
 
-- `web/pkg/` is a build artifact (wasm-pack writes its own `.gitignore` there) —
-  never edit or commit its contents.
+- `web/pkg/` is a build artifact (`web/pkg/.gitignore` ignores its contents) —
+  never edit or commit what `wasm-bindgen` emits there.
 - Keep native/web parity: anything touching instance/adapter/device/surface/event
   loop likely needs a matching `#[cfg(target_arch = "wasm32")]` branch.
 - Match the surrounding rustdoc style — modules and public items are documented;
