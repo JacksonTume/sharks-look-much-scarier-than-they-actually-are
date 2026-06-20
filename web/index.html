@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SLMSTTAA — WebGPU demo</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #05080d;
+        overflow: hidden;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #error {
+        color: #e6edf3;
+        font-family: system-ui, sans-serif;
+        padding: 2rem;
+      }
+    </style>
+  </head>
+  <body>
+    <noscript>This demo requires JavaScript.</noscript>
+    <div id="error" hidden></div>
+
+    <!-- `wasm-pack build --target web` emits ./pkg/slmsttaa.js -->
+    <script type="module">
+      import init from "./pkg/slmsttaa.js";
+
+      // winit unwinds the wasm stack by throwing a sentinel exception once the
+      // event loop is handed off to requestAnimationFrame. That is normal and
+      // must NOT be treated as a startup failure.
+      function isWinitControlFlow(err) {
+        const msg = String(err && err.message ? err.message : err);
+        return msg.includes("Using exceptions for control flow");
+      }
+
+      init().catch((err) => {
+        if (isWinitControlFlow(err)) return; // expected on the web
+        console.error(err);
+        const el = document.getElementById("error");
+        el.hidden = false;
+        el.textContent =
+          "Failed to start SLMSTTAA: " +
+          (err && err.message ? err.message : err) +
+          " — see the browser console for details.";
+      });
+    </script>
+  </body>
+</html>

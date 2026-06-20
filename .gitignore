@@ -1,0 +1,13 @@
+# Rust build artifacts
+/target
+
+# Cargo lockfile is kept for binaries (this crate ships a bin), so DO NOT ignore Cargo.lock.
+
+# Editor / OS noise
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json

@@ -1,0 +1,54 @@
+[package]
+name = "slmsttaa"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Sharks Look Much Scarier Than They Actually Are — a small Rust 3D rendering engine."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Jackson-Tume/sharks-look-much-scarier-than-they-actually-are"
+readme = "README.md"
+keywords = ["graphics", "rendering", "wgpu", "3d", "engine"]
+categories = ["graphics", "rendering"]
+
+[lib]
+name = "slmsttaa"
+path = "src/lib.rs"
+# `cdylib` is required for the wasm-bindgen web build; `rlib` keeps the crate
+# usable as a normal Rust library dependency.
+crate-type = ["cdylib", "rlib"]
+
+# Distinct from the lib name so the cdylib and the exe don't collide on disk.
+[[bin]]
+name = "slmsttaa-demo"
+path = "src/main.rs"
+
+[dependencies]
+wgpu = "29"
+winit = "0.30"
+bytemuck = { version = "1.16", features = ["derive"] }
+glam = { version = "0.28", features = ["bytemuck"] }
+log = "0.4"
+
+# Native-only dependencies.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = "0.3"
+env_logger = "0.11"
+
+# Web (WASM) dependencies.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+console_log = "1"
+web-sys = { version = "0.3", features = ["Document", "Window", "Element"] }
+# On the web, wgpu uses the WebGPU backend by default; the `webgl` feature adds
+# a WebGL2 fallback for browsers without WebGPU yet.
+wgpu = { version = "29", features = ["webgl"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Small, fast wasm binaries.
+[profile.release.package."*"]
+opt-level = "s"
