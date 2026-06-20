@@ -11,11 +11,11 @@ implement the `Application` trait and call `run(app)`. Demos live in `examples/`
 (separate crates that see only the public API) — the `triangle` example is the
 reference consumer.
 
-Read [`ARCHITECTURE.md`](ARCHITECTURE.md) before changing the init/render flow —
+Read [`ARCHITECTURE.md`](../ARCHITECTURE.md) before changing the init/render flow —
 it documents the cross-platform gotchas (web `spawn_app`, canvas sizing, backend
 selection, wgpu/spec drift) that are easy to reintroduce.
 
-Read [`ROADMAP.md`](ROADMAP.md) before adding features — it records the goal (an
+Read [`ROADMAP.md`](../ROADMAP.md) before adding features — it records the goal (an
 easy API for cool 3D, with the engine hiding all GPU/windowing plumbing), the
 guiding principles (engine decoupled from consumers via inversion of control;
 demo-first/outside-in; push only generic plumbing into the engine; KISS), and the
