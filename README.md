@@ -43,23 +43,32 @@ cross-platform gotchas that shaped them.
 | `src/renderer/vertex.rs` | Vertex format + buffer layout.                           |
 | `src/renderer/shader.wgsl` | WGSL vertex/fragment shaders.                          |
 | `src/camera.rs`          | Perspective camera + GPU uniform.                        |
+| `src/renderer/overlay.rs` | Screen-space 2D pass + glyph atlas (the UI/HUD layer).  |
+| `src/ui.rs`              | Decoupled immediate-mode UI framework (sliders, etc.).   |
+| `src/time.rs`            | Cross-platform frame clock (`Renderer::dt`).             |
 | `examples/triangle.rs`   | Reference consumer: draws one triangle (native + web).   |
 | `examples/cube.rs`       | Spinning solid cube: indexed mesh + depth + culling.     |
 | `examples/gallery.rs`    | Scene switcher: web buttons swap demos; native cycles.   |
+| `examples/grid.rs`       | Orbitable terrain grid: the input + camera seam.         |
+| `examples/terrain.rs`    | **Capstone**: Perlin + stream-power erosion, live panel.  |
 | `web/index.html`         | Browser harness for the wasm build (loads `pkg/app.js`). |
 | `xtask/`                 | `cargo xtask serve`: build native + web and host it.     |
 
 ## Run it (standalone)
 
 ```sh
-cargo run --example triangle            # debug
-cargo run --example triangle --release  # optimized
+cargo run --example terrain             # the capstone: layered Perlin + stream-power erosion
+cargo run --example triangle            # the smallest consumer
 cargo run --example cube                # spinning solid cube (depth + culling)
 cargo run --example gallery             # switch between scenes (auto-cycles on native)
 ```
 
-Press <kbd>Esc</kbd> or close the window to quit. Set `RUST_LOG=slmsttaa=debug`
-for more output.
+In the `terrain` demo, drag the left mouse button over the 3D view to orbit and
+scroll to zoom; the panel on the left edits the Perlin base shape and the
+stream-power erosion live (release a slider to rebuild), with a **wireframe**
+toggle to inspect the grid. Press
+<kbd>Esc</kbd> or close the window to quit. Set `RUST_LOG=slmsttaa=debug` for more
+output.
 
 ## Run it (browser / WebGPU)
 
@@ -70,7 +79,7 @@ One command builds the example for the web and serves it — no Python, no manua
 # one-time — install the wasm-bindgen CLI (matched to the wasm-bindgen dependency)
 cargo install wasm-bindgen-cli
 
-cargo xtask serve              # builds + serves `gallery` at http://localhost:8080
+cargo xtask serve              # builds + serves `terrain` at http://localhost:8080
 cargo xtask serve cube        # a different example
 cargo xtask serve --release   # optimized build
 cargo xtask serve --port 9000 # a different port

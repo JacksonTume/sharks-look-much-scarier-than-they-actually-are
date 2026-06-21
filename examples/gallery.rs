@@ -3,6 +3,9 @@
 //! Like the other examples this is a separate crate that only sees the public
 //! API, but it does two extra things worth noting:
 //!
+//! (The default web build is now `terrain`; this gallery stays as the example of
+//! runtime scene-switching and the DOM-button input hack.)
+//!
 //! - **It owns several scenes** (a triangle, a quad, a spinning cube, and an
 //!   orbitable terrain grid) and swaps the engine's draw-list between them at
 //!   runtime via [`Renderer::set_meshes`] — no engine restart, no page reload.

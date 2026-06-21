@@ -5,7 +5,9 @@
 //! camera-transformed mesh supplied by the consumer, with clear seams where a
 //! real engine would grow (material system, mesh registry, render graph, etc.).
 
+mod font;
 mod mesh;
+mod overlay;
 mod vertex;
 
 pub use mesh::Mesh;
@@ -18,6 +20,9 @@ use winit::window::Window;
 
 use crate::camera::{Camera, CameraUniform};
 use crate::input::Input;
+use crate::time::Clock;
+use crate::ui::{Ui, UiState};
+use overlay::Overlay;
 
 /// Format of the depth buffer used for depth testing.
 ///
@@ -26,12 +31,34 @@ use crate::input::Input;
 /// to `Depth24Plus` — both the texture and the pipeline read this one constant.)
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
+/// How the scene's meshes are rasterized.
+///
+/// Wireframe is drawn with portable line-list topology (a deduplicated edge
+/// buffer derived from each mesh's triangles), **not** `PolygonMode::Line`: that
+/// fill mode needs a wgpu feature WebGL2 doesn't expose, and the engine keeps
+/// strict native/web parity. Lines, by contrast, work on every backend we target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RenderMode {
+    /// Filled triangles with depth test and back-face culling (the default).
+    #[default]
+    Solid,
+    /// Mesh edges only, drawn as lines — handy for inspecting a terrain grid's
+    /// topology or seeing through geometry.
+    Wireframe,
+}
+
 /// One mesh uploaded to the GPU: its vertex + index buffers and the index count
 /// to draw. Built from a public [`Mesh`] by [`GpuMesh::upload`].
+///
+/// Two index buffers are kept: the consumer's triangle list for [`RenderMode::Solid`]
+/// and a derived edge list for [`RenderMode::Wireframe`], so toggling render mode
+/// never re-uploads geometry.
 struct GpuMesh {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
+    line_index_buffer: wgpu::Buffer,
+    line_index_count: u32,
 }
 
 impl GpuMesh {
@@ -47,12 +74,42 @@ impl GpuMesh {
             contents: bytemuck::cast_slice(&mesh.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
+        // Derive a deduplicated edge list once, so wireframe is a buffer swap.
+        let line_indices = edge_indices(&mesh.indices);
+        let line_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mesh line index buffer"),
+            contents: bytemuck::cast_slice(&line_indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
         Self {
             vertex_buffer,
             index_buffer,
             index_count: mesh.indices.len() as u32,
+            line_index_buffer,
+            line_index_count: line_indices.len() as u32,
         }
     }
+}
+
+/// Build a deduplicated line-list index buffer from a triangle-list one.
+///
+/// Each triangle contributes its three edges; an edge shared by two triangles
+/// (every interior edge of a grid) is emitted only once, roughly halving the line
+/// count versus drawing each triangle's edges independently.
+fn edge_indices(tris: &[u32]) -> Vec<u32> {
+    use std::collections::HashSet;
+    let mut seen: HashSet<(u32, u32)> = HashSet::new();
+    let mut edges = Vec::new();
+    for t in tris.chunks_exact(3) {
+        for &(a, b) in &[(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            let key = if a < b { (a, b) } else { (b, a) };
+            if seen.insert(key) {
+                edges.push(a);
+                edges.push(b);
+            }
+        }
+    }
+    edges
 }
 
 /// Create a depth texture sized to the surface and return its default view.
@@ -81,6 +138,67 @@ fn create_depth_view(
     texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
+/// Create a scene render pipeline for the given primitive `topology`.
+///
+/// The solid and wireframe pipelines are identical except for topology and
+/// culling: triangles cull their back faces, lines never cull. Both share the
+/// camera-transform shader, the color target, and depth testing, so wireframe
+/// edges occlude correctly against solid geometry.
+fn create_scene_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+    topology: wgpu::PrimitiveTopology,
+    cull_mode: Option<wgpu::Face>,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("slmsttaa scene pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            buffers: &[Vertex::layout()],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology,
+            strip_index_format: None,
+            // Front faces are wound counter-clockwise; cull the back faces so a
+            // closed solid doesn't paint its far, inward-facing triangles. Lines
+            // have no facing, so the wireframe pipeline passes `None`.
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        // Depth testing so nearer fragments occlude farther ones. The depth value
+        // comes from the vertex `@builtin(position)`; the camera already remaps Z
+        // into wgpu's [0, 1] range, so `Less` is the right test.
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 /// Holds all GPU state required to render a frame.
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
@@ -90,6 +208,11 @@ pub struct Renderer {
     size: winit::dpi::PhysicalSize<u32>,
 
     pipeline: wgpu::RenderPipeline,
+    /// Wireframe variant of [`Renderer::pipeline`] (line topology, no culling),
+    /// selected when the render mode is [`RenderMode::Wireframe`].
+    line_pipeline: wgpu::RenderPipeline,
+    /// Whether meshes draw filled or as edges. Defaults to [`RenderMode::Solid`].
+    render_mode: RenderMode,
     /// The draw-list: every mesh the consumer has handed over via
     /// [`Renderer::set_meshes`]. Empty until set; the engine just clears the
     /// screen until then.
@@ -105,6 +228,13 @@ pub struct Renderer {
     /// This frame's input snapshot. The event loop feeds it; the consumer reads
     /// it via [`Renderer::input`] from `Application::update`.
     input: Input,
+
+    /// The screen-space overlay pass (2D UI/HUD), drawn after the 3D scene.
+    overlay: Overlay,
+    /// Persistent immediate-mode UI state (active widget, panel height).
+    ui_state: UiState,
+    /// Frame clock for delta-time and the FPS readout.
+    clock: Clock,
 
     /// Keep the window alive for as long as the surface borrows it.
     _window: Arc<Window>,
@@ -244,52 +374,28 @@ impl Renderer {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("slmsttaa render pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Vertex::layout()],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                // Front faces are wound counter-clockwise; cull the back faces so
-                // a closed solid doesn't paint its far, inward-facing triangles.
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            // Depth testing so nearer fragments occlude farther ones. The depth
-            // value comes from the vertex `@builtin(position)`; the camera already
-            // remaps Z into wgpu's [0, 1] range, so `Less` is the right test.
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        // Two pipelines sharing one shader/layout: solid (culled triangles) and
+        // wireframe (lines, no culling). Render mode just selects between them.
+        let pipeline = create_scene_pipeline(
+            &device,
+            &pipeline_layout,
+            &shader,
+            config.format,
+            wgpu::PrimitiveTopology::TriangleList,
+            Some(wgpu::Face::Back),
+        );
+        let line_pipeline = create_scene_pipeline(
+            &device,
+            &pipeline_layout,
+            &shader,
+            config.format,
+            wgpu::PrimitiveTopology::LineList,
+            None,
+        );
 
         let depth_view = create_depth_view(&device, &config);
+
+        let overlay = Overlay::new(&device, &queue, config.format, width, height);
 
         Self {
             surface,
@@ -298,6 +404,8 @@ impl Renderer {
             config,
             size,
             pipeline,
+            line_pipeline,
+            render_mode: RenderMode::default(),
             // No geometry yet — the consumer supplies it in `Application::init`.
             meshes: Vec::new(),
             depth_view,
@@ -306,6 +414,9 @@ impl Renderer {
             camera_buffer,
             camera_bind_group,
             input: Input::default(),
+            overlay,
+            ui_state: UiState::default(),
+            clock: Clock::new(),
             _window: window,
         }
     }
@@ -327,6 +438,9 @@ impl Renderer {
         // The depth buffer must track the surface size or the render pass fails.
         self.depth_view = create_depth_view(&self.device, &self.config);
         self.camera.set_aspect(new_size.width, new_size.height);
+        // The overlay maps pixels to NDC using the surface size; keep it synced.
+        self.overlay
+            .resize(&self.queue, new_size.width, new_size.height);
     }
 
     /// Replace the draw-list with `meshes`, uploading each to the GPU.
@@ -344,6 +458,19 @@ impl Renderer {
         self.meshes = gpu;
     }
 
+    /// Choose whether meshes draw filled or as a wireframe (see [`RenderMode`]).
+    ///
+    /// Cheap to flip every frame: both pipelines and both index buffers already
+    /// exist, so this only changes which are bound — no geometry is re-uploaded.
+    pub fn set_render_mode(&mut self, mode: RenderMode) {
+        self.render_mode = mode;
+    }
+
+    /// The current [`RenderMode`].
+    pub fn render_mode(&self) -> RenderMode {
+        self.render_mode
+    }
+
     /// Mutable access to the camera so the consumer can drive the viewpoint.
     ///
     /// Move `eye`/`target` (or change `fov_y`) from `Application::update`; the
@@ -359,6 +486,33 @@ impl Renderer {
     /// only the current frame (see [`Input`]).
     pub fn input(&self) -> &Input {
         &self.input
+    }
+
+    /// Seconds elapsed since the previous frame (delta-time), for frame-rate-
+    /// independent animation. Updated once per frame by the engine before
+    /// `Application::update` runs; clamped to a sane maximum (see [`Clock`]).
+    pub fn dt(&self) -> f32 {
+        self.clock.dt()
+    }
+
+    /// Begin a UI frame and return the immediate-mode [`Ui`] builder.
+    ///
+    /// Call this from `Application::update`, declare your panel's widgets, then
+    /// read [`Ui::changed`]. The widgets draw into the overlay (composited over
+    /// the 3D scene by [`Renderer::render`]) and read this frame's [`Input`].
+    /// The returned `Ui` borrows the renderer mutably, so drive the camera first.
+    pub fn ui(&mut self) -> Ui<'_> {
+        Ui::new(&mut self.overlay, &self.input, &mut self.ui_state)
+    }
+
+    /// Advance the frame clock and reset per-frame overlay geometry.
+    ///
+    /// Engine-internal: the event loop calls this at the start of each frame,
+    /// before `Application::update`, so the consumer's `update` sees a fresh
+    /// [`Renderer::dt`] and an empty overlay to rebuild its UI into.
+    pub(crate) fn begin_frame(&mut self) {
+        self.clock.tick();
+        self.overlay.begin_frame();
     }
 
     /// Mutable access to the input snapshot, for the event loop to feed events
@@ -444,15 +598,31 @@ impl Renderer {
             // Draw every mesh in the consumer's draw-list; if it's empty the pass
             // above still clears the screen.
             if !self.meshes.is_empty() {
-                pass.set_pipeline(&self.pipeline);
+                let wireframe = self.render_mode == RenderMode::Wireframe;
+                pass.set_pipeline(if wireframe {
+                    &self.line_pipeline
+                } else {
+                    &self.pipeline
+                });
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
                 for mesh in &self.meshes {
                     pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                    pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                    let (buffer, count) = if wireframe {
+                        (&mesh.line_index_buffer, mesh.line_index_count)
+                    } else {
+                        (&mesh.index_buffer, mesh.index_count)
+                    };
+                    pass.set_index_buffer(buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..count, 0, 0..1);
                 }
             }
         }
+
+        // Second pass: composite the 2D overlay (UI/HUD) over the 3D scene. This
+        // records its own render pass that loads (rather than clears) the color
+        // target. It no-ops if the consumer drew no UI this frame.
+        self.overlay
+            .flush(&self.device, &self.queue, &mut encoder, &view);
 
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();

@@ -6,7 +6,7 @@
 //! cargo xtask serve [example] [--release] [--port <N>]
 //! ```
 //!
-//! It (1) builds `<example>` (default `gallery`) as a native standalone, (2) builds
+//! It (1) builds `<example>` (default `terrain`) as a native standalone, (2) builds
 //! it for wasm and runs `wasm-bindgen` into `web/pkg/` (as `app.js`, so
 //! `web/index.html` never has to change), then (3) serves `web/` from a tiny
 //! built-in static file server — no Python, no extra crates.
@@ -54,7 +54,7 @@ fn main() {
     let example = positional
         .into_iter()
         .find(|p| p != "serve")
-        .unwrap_or_else(|| "gallery".to_string());
+        .unwrap_or_else(|| "terrain".to_string());
 
     serve(&example, release, port);
 }
@@ -63,7 +63,7 @@ fn print_help() {
     println!("cargo xtask — SLMSTTAA dev tasks\n");
     println!("USAGE:");
     println!("  cargo xtask serve [example] [--release] [--port <N>]\n");
-    println!("Builds <example> (default: gallery) natively and for the web, then");
+    println!("Builds <example> (default: terrain) natively and for the web, then");
     println!("serves web/ at http://localhost:<port> (default 8080).");
 }
 

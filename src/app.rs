@@ -191,6 +191,10 @@ impl ApplicationHandler<Renderer> for App {
             }
 
             WindowEvent::RedrawRequested => {
+                // Start the frame: advance the clock and clear the overlay so the
+                // consumer's `update` sees a fresh delta-time and an empty UI to
+                // rebuild into.
+                renderer.begin_frame();
                 // Let the consumer advance its state first, then draw.
                 // `render` handles recoverable surface conditions internally.
                 self.application.update(renderer);

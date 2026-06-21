@@ -26,15 +26,16 @@ roadblock, never added speculatively.
 
 ```sh
 # Native
-cargo run --example triangle           # run the demo (Esc / close to quit)
+cargo run --example terrain            # the capstone: layered Perlin + stream-power erosion
+cargo run --example triangle           # the smallest consumer (Esc / close to quit)
 cargo build                            # debug build
 cargo build --release                  # optimized
 cargo clippy --all-targets             # lint
-cargo fmt                              # format
+cargo fmt --all                        # format (bare `cargo fmt` trips on examples/terrain/)
 
 # Web (wasm) — requires `cargo install wasm-bindgen-cli` once, at a version
 # matching the `wasm-bindgen` dependency in Cargo.lock.
-cargo xtask serve                      # build (native + wasm) + host gallery at :8080
+cargo xtask serve                      # build (native + wasm) + host terrain at :8080
 cargo xtask serve cube                 # a specific example; also --release / --port N
 # `cargo xtask serve` wraps: build the example for wasm, run wasm-bindgen into
 # web/pkg/ as app.js, and serve web/ from a built-in static server (xtask/).

@@ -17,6 +17,13 @@
 //! - **Per-frame deltas** ([`Input::mouse_delta`], [`Input::scroll_delta`]) are
 //!   accumulated during a frame and zeroed by [`Input::end_frame`] once the frame
 //!   has been drawn, so each `update` sees only that frame's motion.
+//! - **Press edges** ([`Input::is_mouse_pressed`]) fire only on the frame a button
+//!   went down, which is what point-and-click UI hit-testing wants — distinct from
+//!   the held state that drives a camera drag.
+//!
+//! The absolute [`Input::cursor_position`] is also exposed (not just the delta),
+//! because screen-space UI needs to know *where* the pointer is, not only how far
+//! it moved.
 
 /// A keyboard key the engine reports to the consumer.
 ///
@@ -73,6 +80,9 @@ pub struct Input {
     keys: [bool; Key::COUNT],
     /// Held state per [`MouseButton`], indexed by [`MouseButton::index`].
     buttons: [bool; MouseButton::COUNT],
+    /// Buttons that transitioned to pressed *this frame* (press edge). Cleared by
+    /// [`Input::end_frame`]; drives click hit-testing in the UI.
+    pressed: [bool; MouseButton::COUNT],
     /// Last cursor position seen, used to turn absolute moves into deltas.
     cursor: Option<(f32, f32)>,
     /// Net cursor motion accumulated this frame, in physical pixels.
@@ -90,6 +100,20 @@ impl Input {
     /// Whether `button` is currently held down.
     pub fn is_mouse_held(&self, button: MouseButton) -> bool {
         self.buttons[button.index()]
+    }
+
+    /// Whether `button` was pressed *this frame* (a press edge, true for one
+    /// frame only). Use this for click activation; use [`Input::is_mouse_held`]
+    /// for drags.
+    pub fn is_mouse_pressed(&self, button: MouseButton) -> bool {
+        self.pressed[button.index()]
+    }
+
+    /// The cursor's last-known position in physical pixels (`(x, y)`, origin
+    /// top-left), or `None` if it hasn't been seen yet. Screen-space UI hit-tests
+    /// against this.
+    pub fn cursor_position(&self) -> Option<(f32, f32)> {
+        self.cursor
     }
 
     /// Net cursor motion this frame, in physical pixels (`(dx, dy)`).
@@ -142,7 +166,12 @@ impl Input {
             winit::event::MouseButton::Middle => MouseButton::Middle,
             _ => return,
         };
-        self.buttons[button.index()] = state.is_pressed();
+        let pressed = state.is_pressed();
+        // A press edge is a release→press transition this frame.
+        if pressed && !self.buttons[button.index()] {
+            self.pressed[button.index()] = true;
+        }
+        self.buttons[button.index()] = pressed;
     }
 
     /// Record an absolute cursor position, accumulating the delta from the last.
@@ -169,5 +198,6 @@ impl Input {
     pub(crate) fn end_frame(&mut self) {
         self.mouse_delta = (0.0, 0.0);
         self.scroll_delta = 0.0;
+        self.pressed = [false; MouseButton::COUNT];
     }
 }

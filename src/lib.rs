@@ -11,6 +11,8 @@
 //! - [`renderer`] — the wgpu device/surface/pipeline plumbing.
 //! - [`camera`]  — a minimal perspective camera producing a view-projection matrix.
 //! - [`input`]   — per-frame keyboard/mouse state, decoupled from winit.
+//! - [`time`]    — a cross-platform frame clock (delta time).
+//! - [`ui`]      — a decoupled immediate-mode UI framework drawn by the overlay.
 //!
 //! To put something on screen, implement [`Application`] and pass it to [`run`],
 //! which opens a window and drives your consumer until it is closed. See the
@@ -21,12 +23,15 @@ pub mod application;
 pub mod camera;
 pub mod input;
 pub mod renderer;
+pub mod time;
+pub mod ui;
 
 pub use app::App;
 pub use application::Application;
 pub use camera::Camera;
 pub use input::{Input, Key, MouseButton};
-pub use renderer::{Mesh, Renderer, Vertex};
+pub use renderer::{Mesh, RenderMode, Renderer, Vertex};
+pub use ui::{Color, Painter, Ui};
 
 use winit::event_loop::{ControlFlow, EventLoop};
 

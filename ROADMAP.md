@@ -158,7 +158,7 @@ engine only exposes input and the camera. (No `OrbitController` was pushed into 
 engine: a single consumer doesn't justify one yet — demo-first / KISS.) Delta-time
 was deliberately deferred until a demo needs frame-rate-independent simulation.
 
-### Slice 4 — The terrain vertical (the thesis)
+### Slice 4 — The terrain vertical (the thesis) ✅ done
 
 *Roadblock:* none left — this is the payoff that proves the goal.
 
@@ -174,10 +174,19 @@ was deliberately deferred until a demo needs frame-rate-independent simulation.
   (KISS), and only add normals + simple diffuse lighting when "it looks flat"
   becomes the next roadblock.
 
-*Proof:* terrain visibly erodes over time, written as a handful of engine calls
-plus the consumer's own algorithm — `wgpu`/`winit` nowhere in sight.
+*Proof:* `cargo run --example terrain` erodes a procedural heightmap and lets you
+explore the time continuum with a slider (faint post-process → steady-state
+mountain range). The whole algorithm lives in the demo
+(`examples/terrain/erosion.rs`): a Priority-Flood river network with depression
+breaching, drainage-area accumulation, the 1D analytical stream-power solution
+evaluated down each river tree (advection origin `D` + uplift integral `S`),
+driven to a fixed point and accelerated by a multigrid V-ramp, plus the paper's
+hillslope (Eqn. 26) and thermal (Eqns. 28–29) terms and the §4.3 slope
+correction. Normals + diffuse lighting were indeed pulled in (it *did* look flat)
+— but **CPU-baked into vertex color in the demo**, so the engine's position+color
+pipeline stays untouched (principle 3). `wgpu`/`winit` are nowhere in the demo.
 
-### Slice 5 — On-screen UI: a debug/HUD text overlay
+### Slice 5 — On-screen UI: a debug/HUD text overlay ✅ done
 
 *Roadblock:* the scene now moves and changes — you orbit the camera (Slice 3) and
 the terrain erodes (Slice 4) — but you can't *see* any of it as numbers. There is
@@ -196,15 +205,75 @@ that **doesn't exist on native at all** (see the gallery's auto-cycle fallback).
 *Proof:* the grid/terrain demo shows a live HUD (e.g. FPS, camera
 yaw/pitch/distance, erosion iteration count) over the 3D scene, on both targets.
 
-*Why text first:* it's the smallest step that holds the boundary — text before
-interactive widgets. The engine gets the overlay pass + glyph plumbing (generic);
-the demo decides *what* to display (content). Clickable widgets — which would let
-us retire the gallery's DOM-button hack and give native a real scene-switcher —
-and any layout/widget model are **later** UI slices, each pulled by its own demo
-roadblock. The goal is never a general retained-mode toolkit (that's the "worse
-Bevy" trap, principle 2); it's the smallest UI each demo actually demands. This
-slice also opens the **render-graph** seam below (it's the first time there's more
-than one pass).
+*Proof:* the terrain demo shows a live HUD (FPS, grid size) **and** a full
+parameter panel over the 3D scene, on native and web. The engine gained: a
+screen-space overlay pass (`src/renderer/overlay.rs`) — the first *second pass*,
+loading rather than clearing the color target, depth off, alpha-blended; an
+embedded bitmap font baked into a glyph atlas (`src/renderer/font.rs`, the
+public-domain `font8x8`, no font file or rasterizer dependency); and a frame clock
+(`src/time.rs`, `Renderer::dt`, wasm-safe via `performance.now()`).
+
+*The interactive-UI step came with it.* The driving demo didn't just need to
+*display* numbers — it needed to *edit* erosion parameters, which is the natural
+"clickable widgets" roadblock. So this slice also delivered a small **modular,
+decoupled immediate-mode UI framework** (`src/ui.rs`): widgets (`slider`,
+`button`, `checkbox`, `label`, `title`) that edit a consumer's own `&mut`
+values. It is decoupled twice over: downward from the renderer via the [`Painter`]
+trait (the UI never sees `wgpu` — the overlay is just one `Painter` impl), and
+upward from the consumer (the UI knows nothing of erosion; parameters live in the
+demo). It stays immediate-mode with a tiny persistent `UiState` — deliberately
+*not* a retained-mode toolkit (the "worse Bevy" trap, principle 2); it's the
+smallest UI the demo actually demanded. Input grew an absolute cursor position and
+press-edge query to support hit-testing. This slice also opened the
+**render-graph** seam below (it's the first time there's more than one pass).
+
+### Slice 6 — Layered terrain rebuild + wireframe render mode ✅ done
+
+*Roadblock:* the analytical erosion from Slice 4 was impressive but a black box —
+one monolithic solver you couldn't peel apart, inspect, or extend a layer at a
+time, and its results "left a lot to be desired" without an obvious knob to fix.
+The lesson: terrain is better *composed* than solved. And to debug any of it you
+need to see the underlying grid, which the solid renderer can't show.
+
+This slice deliberately **replaces** the Slice 4 analytical solver with an
+explicit, demand-driven layer stack — same demo, rebuilt the way the principles
+say it should have been: smallest visible step at a time.
+
+- **Engine — a portable wireframe `RenderMode`.** The first roadblock was "I can't
+  see the mesh." The engine gained a `RenderMode` (solid / wireframe) toggled via
+  `Renderer::set_render_mode`. Crucially it is drawn with **line-list topology**
+  from a deduplicated edge buffer derived at upload — *not* `PolygonMode::Line`,
+  which needs a feature WebGL2 lacks and would break native/web parity. This is the
+  generic-plumbing half of the roadblock (principle 3): every consumer wants to
+  inspect geometry, so it belongs in the engine; what to draw stays in the demo.
+- **Demo — layer 1, the base shape.** A fractal Perlin-noise heightmap
+  (`terrain/heightmap.rs`). On its own: rolling hills, recognizable but lifeless.
+- **Demo — layer 2, erosion on top.** Iterative **stream-power** erosion
+  (`terrain/erosion.rs`): each timestep routes flow to every cell's lowest neighbor
+  (priority-flood, depressions filled), accumulates *drainage area* down the
+  network, and incises by the stream power `K·Aᵐ` (the stable implicit FastScape
+  update), with an optional thermal/talus pass. Because erosion scales with
+  accumulated area, water concentrates into shared trunk valleys — which is what
+  produces the **dendritic** ridge/valley networks the reference papers show.
+  (An earlier droplet-hydraulic attempt was abandoned: independent droplets never
+  pool into a connected network, so it just roughened the noise instead of carving
+  valleys. The flow-accumulation model is what both references actually use.)
+  Unlike Slice 4's time-as-a-parameter solve, this is an honest
+  accumulate-many-small-steps simulation — each layer independently tunable.
+
+The UI was improved *alongside* (not as a separate project): the parameter panel
+gained section headings and a titled header, grouping the per-layer knobs.
+
+*Proof:* `cargo run --example terrain` shows a Perlin terrain carved by live
+hydro-thermal erosion, every layer tunable from the panel, with a **wireframe**
+toggle to inspect the grid — on native and web. Both terrain layers live entirely
+in the demo; the engine only uploads the mesh, selects solid/wireframe, draws the
+UI, and runs the camera. `wgpu`/`winit` are nowhere in the demo.
+
+*On Slice 4:* its analytical solver is retired, not deleted from history — it
+proved the vertical worked end-to-end (the thing that mattered then). Slice 6 keeps
+that win and trades the algorithm for one that honors the "compose, don't solve"
+and "always something visible" principles.
 
 ## Beyond (seams, not commitments)
 
