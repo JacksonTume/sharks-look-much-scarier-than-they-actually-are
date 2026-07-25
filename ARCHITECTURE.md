@@ -81,15 +81,19 @@ slmsttaa-ui/          The UI toolkit, as its own zero-dependency workspace membe
 ├── ROADMAP.md        rule). The engine depends on it and re-exports it as
 ├── WISHLIST.md       `slmsttaa::ui`; it never depends on the engine, so it sees
 ├── src/              no wgpu and no winit. UI planning lives in its ROADMAP,
-│   ├── lib.rs        not the engine's.
-│   ├── painter.rs    Painter (the drawing seam) + RecordingPainter, the headless
-│   │                 test double that makes layout assertable without a GPU.
-│   ├── interact.rs   UiInput (this frame's pointer, filled in by the host) and
-│   │                 UiState (what survives between frames).
+│   ├── lib.rs        not the engine's. Ui: the id stack, the public
+│   │                 allocate/interact/painter seam, and the frame's layout.
+│   ├── painter.rs    Painter (the drawing seam), Layer (the four ordered draw
+│   │                 buckets), + RecordingPainter, the headless test double that
+│   │                 makes layout assertable without a GPU.
+│   ├── interact.rs   UiInput (this frame's pointer, filled in by the host),
+│   │                 UiState (hot/active/focused + collapsed sections), and the
+│   │                 Response every widget returns.
 │   ├── layout.rs     Rect + the vertical placement cursor.
-│   ├── theme.rs      Every metric and color in one place.
+│   ├── theme.rs      Every metric and color in one place — public, so a widget
+│   │                 written by a consumer can match the built-in ones.
 │   └── widgets/      One file per widget: text.rs, button.rs, slider.rs.
-└── tests/            The project's only tests — layout + hit-testing, driven
+└── tests/            The project's only tests — layout + ids + hit-testing, driven
                       against RecordingPainter. No GPU, no window, no async.
 
 xtask/                Dev tooling (a separate workspace member, no deps). `cargo
@@ -191,8 +195,25 @@ render graph will eventually grow. The design holds two boundaries at once:
   when the UI needs a capability the painter lacks — rounded corners, clipping,
   ordered draw layers — the work lands here, in `overlay.rs` / `overlay.wgsl` /
   `Vertex2D`, as a deliberate widening of the trait. That funnel is the point of
-  the crate split (see [UI roadmap](slmsttaa-ui/ROADMAP.md) Slices 1–2, which are
-  the ones that will move it).
+  the crate split, and UI Slice 1 was the first time it was used in anger.
+
+- **Draw layers cost one index vector, not one draw call.** `Painter::set_layer`
+  directs primitives into one of four buckets (base / panel / popup / tooltip).
+  Only *index* order decides what covers what, so every layer indexes the same
+  vertex vector and `Overlay::flush` simply concatenates the buckets back-to-front
+  before uploading — the whole overlay is still a single `draw_indexed`.
+
+  This is what lets the UI declare a panel background *last*, when its height is
+  finally known, and still have it painted *behind* the widgets above it.
+
+- **The UI is laid out in logical points, not physical pixels.** Nothing read
+  `scale_factor` before UI Slice 1, so on a 2× display the panel drew at half
+  size. The conversion happens at both ends of the seam and nowhere else:
+  `Renderer::ui()` divides the cursor by the scale factor on the way in, and
+  `Overlay` multiplies coordinates by it on the way to vertices. The toolkit
+  never learns the scale factor at all, which is what keeps its layout math (and
+  its tests) resolution-independent. Text runs are snapped to whole *physical*
+  pixels, since rounding in points still lands mid-pixel at 1.5×.
 
 ## Why the async/user-event dance
 

@@ -9,17 +9,27 @@ becoming a UI framework with a triangle demo attached.
 
 ## Status
 
-**Extracted** ([UI Slice 0](ROADMAP.md#slice-0--extraction-the-move) — done). The
-toolkit lives here now, with zero dependencies, and the engine re-exports it as
-`slmsttaa::ui`.
+Slices [0](ROADMAP.md#slice-0--extraction-the-move) (extraction) and
+[1](ROADMAP.md#slice-1--interaction-core--draw-layers) (interaction core) are
+done. The toolkit is a zero-dependency crate the engine re-exports as
+`slmsttaa::ui`, and it now has the machinery that separates a toolkit from a
+pile of sliders:
 
-What it can do is still exactly what the terrain demo demanded: one fixed
-left-anchored panel with `title` / `section` / `label` / `label_muted` /
-`separator` / `button` / `checkbox` / `slider`. The move was mechanical and
-changed no behavior — what it changed is that the boundary is now real.
+- **Ids** — `hash(scope, index, label)`, with `push_id`/`pop_id`, plus
+  `stable_id` for state that must survive layout edits.
+- **Interaction** — `hot` / `active` / `focused`, and a `Response` from every
+  widget.
+- **Draw layers** — base / panel / popup / tooltip, flushed in order, still one
+  draw call.
+- **A public seam** — `allocate` / `interact` / `painter` / `theme`, so a widget
+  written by a consumer is not second-class.
 
-Next is [Slice 1](ROADMAP.md#slice-1--interaction-core--draw-layers), the
-interaction core, which is where "some sliders" becomes a toolkit.
+Widgets: `title` / `section` (collapsible) / `label` / `label_muted` /
+`separator` / `button` / `checkbox` / `slider`.
+
+Next is [Slice 2](ROADMAP.md#slice-2--painter-capabilities-and-the-scroll-region):
+rounded rects, borders, and clipping — plus the scroll region that clipping
+unblocks.
 
 **New UI code and UI docs belong here, not in the engine.**
 

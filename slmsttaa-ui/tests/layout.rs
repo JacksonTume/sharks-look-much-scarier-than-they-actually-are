@@ -1,15 +1,15 @@
-//! Layout tests: where widgets actually land.
+//! Layout tests: where widgets actually land, and in what order they paint.
 //!
 //! These drive a real [`Ui`] against a [`RecordingPainter`] and assert on the
 //! primitives that come out — no GPU, no window. Everything here goes through
 //! the public API only, which doubles as a check that the API is usable from
 //! outside the crate.
 
-use slmsttaa_ui::{DrawCmd, Painter, RecordingPainter, Ui, UiInput, UiState};
+use slmsttaa_ui::{DrawCmd, Layer, Painter, RecordingPainter, Ui, UiInput, UiState};
 
-/// The panel's fixed geometry, restated here rather than imported: these are
-/// private constants, and a test that reads the same constant as the code can't
-/// catch it changing. Update deliberately if the panel is restyled.
+/// The panel's fixed geometry, restated here rather than imported: a test that
+/// reads the same constant as the code can't catch it changing. Update
+/// deliberately if the panel is restyled.
 const PANEL_X: f32 = 12.0;
 const PANEL_Y: f32 = 12.0;
 const PANEL_W: f32 = 340.0;
@@ -17,7 +17,7 @@ const PAD: f32 = 10.0;
 const ROW_H: f32 = 24.0;
 const CONTENT_X: f32 = PANEL_X + PAD;
 
-/// The recorded rectangles, as `(x, y, w, h)`.
+/// The recorded rectangles, as `(x, y, w, h)`, in call order.
 fn rects(p: &RecordingPainter) -> Vec<(f32, f32, f32, f32)> {
     p.cmds
         .iter()
@@ -28,7 +28,7 @@ fn rects(p: &RecordingPainter) -> Vec<(f32, f32, f32, f32)> {
         .collect()
 }
 
-/// The recorded text runs, as `(x, y, text)`.
+/// The recorded text runs, as `(x, y, text)`, in call order.
 fn texts(p: &RecordingPainter) -> Vec<(f32, f32, String)> {
     p.cmds
         .iter()
@@ -40,7 +40,7 @@ fn texts(p: &RecordingPainter) -> Vec<(f32, f32, String)> {
 }
 
 #[test]
-fn panel_background_is_drawn_before_any_widget() {
+fn panel_background_paints_behind_widgets_despite_being_declared_last() {
     let mut painter = RecordingPainter::default();
     let mut state = UiState::default();
     {
@@ -48,10 +48,41 @@ fn panel_background_is_drawn_before_any_widget() {
         ui.label("hello");
     }
 
-    // The background is the very first primitive, so widgets land on top of it.
-    let (x, y, w, _h) = rects(&painter)[0];
-    assert_eq!((x, y, w), (PANEL_X, PANEL_Y, PANEL_W));
-    assert!(matches!(painter.cmds[0], DrawCmd::Rect { .. }));
+    // Declared last — it is the only point at which the height is known...
+    let last = painter.cmds.last().unwrap();
+    assert_eq!(last.layer(), Layer::Base);
+
+    // ...but painted first, because Base flushes before Panel. This is the
+    // whole reason layers exist.
+    let ordered = painter.in_layer_order();
+    assert_eq!(ordered[0].layer(), Layer::Base);
+    match ordered[0] {
+        DrawCmd::Rect { x, y, w, .. } => assert_eq!((*x, *y, *w), (PANEL_X, PANEL_Y, PANEL_W)),
+        other => panic!("expected the panel background, got {other:?}"),
+    }
+    assert!(ordered[1..].iter().all(|c| c.layer() == Layer::Panel));
+}
+
+#[test]
+fn panel_height_fits_its_contents_on_the_very_first_frame() {
+    let mut painter = RecordingPainter::default();
+    let mut state = UiState::default();
+    {
+        let mut ui = Ui::new(&mut painter, UiInput::default(), &mut state);
+        for _ in 0..5 {
+            ui.label("row");
+        }
+    }
+
+    // No one-frame lag: the background is emitted after layout, so it is right
+    // immediately. (Before draw layers this was `ROW_H + PAD` on frame 1 and
+    // only correct from frame 2 on.)
+    let bg = painter.in_layer_order()[0];
+    match bg {
+        // Top pad, five rows, bottom pad.
+        DrawCmd::Rect { h, .. } => assert_eq!(*h, PAD + 5.0 * ROW_H + PAD),
+        other => panic!("expected the panel background, got {other:?}"),
+    }
 }
 
 #[test]
@@ -76,35 +107,6 @@ fn labels_stack_one_row_apart() {
 }
 
 #[test]
-fn panel_height_grows_to_fit_its_contents() {
-    let mut painter = RecordingPainter::default();
-    let mut state = UiState::default();
-
-    // Frame 1: nothing is known yet, so the background falls back to one row.
-    {
-        let mut ui = Ui::new(&mut painter, UiInput::default(), &mut state);
-        for _ in 0..5 {
-            ui.label("row");
-        }
-    }
-    let first_frame_bg = rects(&painter)[0].3;
-    assert_eq!(first_frame_bg, ROW_H + PAD);
-
-    // Frame 2: the background is sized from what frame 1 laid out. This is the
-    // deliberate one-frame lag the ordered draw layers of UI Slice 1 retire.
-    painter.clear();
-    {
-        let mut ui = Ui::new(&mut painter, UiInput::default(), &mut state);
-        for _ in 0..5 {
-            ui.label("row");
-        }
-    }
-    let second_frame_bg = rects(&painter)[0].3;
-    // Top pad, five rows, bottom pad.
-    assert_eq!(second_frame_bg, PAD + 5.0 * ROW_H + PAD);
-}
-
-#[test]
 fn slider_fill_tracks_the_value() {
     let mut painter = RecordingPainter::default();
     let mut state = UiState::default();
@@ -114,11 +116,58 @@ fn slider_fill_tracks_the_value() {
         ui.slider("half", &mut value, 0.0, 10.0);
     }
 
-    // Background, track, fill, knob — the fill is half the track's width.
+    // Track, fill, knob (the background is recorded after them, at drop).
     let r = rects(&painter);
-    let track_w = r[1].2;
-    let fill_w = r[2].2;
+    let track_w = r[0].2;
+    let fill_w = r[1].2;
     assert_eq!(fill_w, track_w * 0.5);
+}
+
+/// The height of the panel background — the only public read-out of how tall
+/// the panel came out, and exactly what a viewer sees.
+fn panel_height(p: &RecordingPainter) -> f32 {
+    match p.in_layer_order()[0] {
+        DrawCmd::Rect { h, .. } => *h,
+        other => panic!("expected the panel background first, got {other:?}"),
+    }
+}
+
+#[test]
+fn collapsing_a_section_shrinks_the_panel_to_its_heading() {
+    let mut painter = RecordingPainter::default();
+    let mut state = UiState::default();
+    let mut value = 0.0_f32;
+
+    // One section, expanded by default, with content inside it.
+    let mut frame = |input: UiInput, painter: &mut RecordingPainter, state: &mut UiState| {
+        painter.clear();
+        let mut ui = Ui::new(painter, input, state);
+        if ui.section("Shape").open {
+            ui.slider("frequency", &mut value, 0.0, 1.0);
+            ui.slider("octaves", &mut value, 0.0, 1.0);
+        }
+    };
+
+    frame(UiInput::default(), &mut painter, &mut state);
+    let expanded = panel_height(&painter);
+
+    // Click the heading. Its row starts at the top of the panel's padding.
+    let click = UiInput {
+        cursor: Some((CONTENT_X + 20.0, PANEL_Y + PAD + 8.0)),
+        primary_held: true,
+        primary_pressed: true,
+    };
+    frame(click, &mut painter, &mut state);
+    let collapsed = panel_height(&painter);
+
+    assert!(
+        collapsed < expanded,
+        "collapsed ({collapsed}) should be shorter than expanded ({expanded})"
+    );
+
+    // And it stays collapsed on later frames — the state outlives the frame.
+    frame(UiInput::default(), &mut painter, &mut state);
+    assert_eq!(panel_height(&painter), collapsed);
 }
 
 #[test]

@@ -1,6 +1,6 @@
 //! # slmsttaa-ui — a small, decoupled immediate-mode UI toolkit
 //!
-//! The controls half of [SLMSTTAA](https://github.com/Jackson-Tume/sharks-look-much-scarier-than-they-actually-are).
+//! The controls half of [SLMSTTAA](https://github.com/JacksonTume/sharks-look-much-scarier-than-they-actually-are).
 //! It lets a consumer expose knobs without touching a GPU — and it is a separate
 //! crate on purpose, because that turns "the UI never sees `wgpu`" from a
 //! comment into a compile error.
@@ -12,9 +12,9 @@
 //! ## The two seams
 //!
 //! - **Downward, from the renderer.** The UI draws through the [`Painter`]
-//!   trait — `rect` / `text` / `text_size` — and reads a [`UiInput`] snapshot
-//!   the host fills in. The engine's overlay is one `Painter`;
-//!   [`RecordingPainter`] is another.
+//!   trait — `rect` / `text` / `text_size` / `set_layer` — and reads a
+//!   [`UiInput`] snapshot the host fills in. The engine's overlay is one
+//!   `Painter`; [`RecordingPainter`] is another.
 //! - **Upward, from the consumer.** Widgets borrow the consumer's own
 //!   `&mut f32` / `&mut bool`, so the UI has no idea *what* it controls. Erosion
 //!   parameters live in the terrain demo, which is where they belong.
@@ -22,10 +22,34 @@
 //! ## Immediate mode
 //!
 //! The consumer re-declares the whole panel every frame from its current state.
-//! The only thing that survives between frames is a tiny [`UiState`] — which
-//! slider is being dragged, and last frame's panel height. There is no retained
-//! widget tree; that keeps the surface small and sidesteps the "accidentally
-//! rebuild a worse Bevy" trap.
+//! The only thing that survives between frames is a small [`UiState`] — the
+//! hot/active/focused ids, which sections are collapsed, and the panel's height.
+//! There is no retained widget tree; that keeps the surface small and sidesteps
+//! the "accidentally rebuild a worse Bevy" trap.
+//!
+//! ## Writing your own widget
+//!
+//! Everything the built-in widgets use is public: [`Ui::allocate`] claims space,
+//! [`Ui::interact`] hit-tests it and returns a [`Response`], [`Ui::painter`]
+//! draws it, and [`theme`] holds the metrics and colors that make it match. A
+//! widget this crate never shipped is therefore not second-class — if one ever
+//! needs private access, the seam is wrong and the seam gets fixed.
+//!
+//! ```
+//! use slmsttaa_ui::{theme, Response, Ui};
+//!
+//! /// A read-only bar. Nothing here is privileged.
+//! fn meter(ui: &mut Ui, label: &str, t: f32) -> Response {
+//!     let id = ui.next_id(label);
+//!     let row = ui.allocate([0.0, theme::ROW_H]);
+//!     let response = ui.interact(row, id);
+//!
+//!     let fill = if response.hovered { theme::COL_ACCENT_HOT } else { theme::COL_ACCENT };
+//!     ui.painter().rect(row.x, row.y, row.w, row.h, theme::COL_TRACK);
+//!     ui.painter().rect(row.x, row.y, row.w * t.clamp(0.0, 1.0), row.h, fill);
+//!     response
+//! }
+//! ```
 //!
 //! ## Using it
 //!
@@ -43,8 +67,10 @@
 //! let mut ui = Ui::new(&mut painter, UiInput::default(), &mut state);
 //! ui.title("Erosion");
 //! ui.label("60 fps");
-//! ui.slider_fmt("erodibility", &mut erodibility, 0.0, 0.006, 4);
-//! if ui.button("new seed") { /* reseed */ }
+//! if ui.section("Fluvial").open {
+//!     ui.slider_fmt("erodibility", &mut erodibility, 0.0, 0.006, 4);
+//! }
+//! if ui.button("new seed").clicked { /* reseed */ }
 //! let recompute = ui.changed();
 //! # let _ = recompute;
 //! ```
@@ -54,27 +80,37 @@
 mod interact;
 mod layout;
 mod painter;
-mod theme;
+pub mod theme;
 mod widgets;
 
-pub use interact::{UiInput, UiState};
+pub use interact::{Response, UiInput, UiState};
 pub use layout::Rect;
-pub use painter::{Color, DrawCmd, Painter, RecordingPainter};
+pub use painter::{Color, DrawCmd, Layer, Painter, RecordingPainter};
 
 use layout::Layout;
+
+/// One scope on the id stack: what it is, and how many widgets it has seen.
+///
+/// Ids are `hash(parent scope, index in that scope, label)`, which is why the
+/// per-scope counter lives here rather than on [`Ui`] — a widget's id depends on
+/// its position *within its section*, not within the whole panel.
+struct Scope {
+    id: u64,
+    seq: u64,
+}
 
 /// One frame of the immediate-mode UI: a single left-anchored panel.
 ///
 /// Construct it at the top of your update (via `Renderer::ui` when you are using
 /// the engine), declare widgets top-to-bottom, then read [`Ui::changed`].
-/// Dropping it records the laid-out height so next frame's background fits.
+/// Dropping it paints the panel background behind everything that was declared.
 pub struct Ui<'a> {
     painter: &'a mut dyn Painter,
     input: UiInput,
     state: &'a mut UiState,
     layout: Layout,
-    /// Monotonic widget counter, hashed into stable per-widget ids.
-    seq: u64,
+    /// The id scope stack; never empty (the root scope is pushed on construction).
+    scopes: Vec<Scope>,
     /// Whether any value-editing widget changed a bound value this frame.
     changed: bool,
 }
@@ -83,64 +119,206 @@ impl<'a> Ui<'a> {
     /// Begin a UI frame against `painter`, this frame's `input`, and the host's
     /// persistent `state`.
     ///
-    /// Drawing starts immediately: the panel background goes down first, sized
-    /// from last frame's height (the contents are laid out top-down, so this
-    /// frame's height isn't known yet). Layout is stable frame-to-frame, so it
-    /// is correct from the second frame on — and the ordered draw layers that
-    /// retire this trick are UI Slice 1.
+    /// Nothing is drawn yet — not even the panel background, which is painted
+    /// into [`Layer::Base`] when this is dropped and its final height is known.
+    /// That is what retired the old "size the background from *last* frame's
+    /// height" hack: with ordered layers, declaration order and paint order stop
+    /// being the same thing.
     pub fn new(painter: &'a mut dyn Painter, input: UiInput, state: &'a mut UiState) -> Self {
-        let bg = panel_rect(state.panel_height);
-        painter.rect(bg.x, bg.y, bg.w, bg.h, theme::COL_PANEL);
+        // `hot` is recomputed from scratch every frame; `active` and `focused`
+        // deliberately persist.
+        state.hot = None;
+        painter.set_layer(Layer::Panel);
 
         Self {
             painter,
             input,
             state,
             layout: Layout::new(theme::PANEL_Y, theme::PAD),
-            seq: 0,
+            scopes: vec![Scope { id: 0, seq: 0 }],
             changed: false,
         }
     }
 
     /// Whether the pointer is over the panel (or actively dragging a widget), so
     /// the consumer can suppress world interactions like a camera drag.
+    ///
+    /// Call it after declaring your widgets: it measures the panel laid out so
+    /// far, falling back to last frame's height so an early call is never
+    /// *smaller* than the panel really is.
     pub fn wants_pointer(&self) -> bool {
-        self.state.active.is_some() || self.input.hits(panel_rect(self.state.panel_height))
+        if self.state.active.is_some() {
+            return true;
+        }
+        let height = self.layout.height().max(self.state.panel_height);
+        self.input.hits(panel_rect(height))
     }
 
-    /// Whether any slider or checkbox edited its bound value this frame — the
+    /// Whether any value-editing widget changed a bound value this frame — the
     /// signal a consumer uses to recompute derived state (e.g. re-run erosion).
     pub fn changed(&self) -> bool {
         self.changed
     }
 
-    // --- Widget-facing internals -------------------------------------------
-    // Private, but visible to the `widgets` submodules, which are descendants of
-    // this module. UI Slice 1 promotes the allocate/interact/painter trio to
-    // public API so a consumer can write a widget this crate never shipped.
+    // --- The unprivileged seam ---------------------------------------------
+    //
+    // `allocate` / `interact` / `painter` / `next_id` are public *together*,
+    // because a widget needs all four. Anything this crate's own widgets can do,
+    // a consumer's can too (UI roadmap Slice 1).
 
-    /// The next unused widget id for `label`.
-    fn next_id(&mut self, label: &str) -> u64 {
-        let id = interact::hash_id(self.seq, label);
-        self.seq += 1;
+    /// Claim the next `[width, height]` of panel space and return its rectangle.
+    ///
+    /// A non-positive width means "the full content width", which is what every
+    /// built-in widget passes — real horizontal layout is UI Slice 3. The layout
+    /// cursor advances by `height` whether or not you draw anything there, so
+    /// include a widget's trailing gap in what you ask for.
+    pub fn allocate(&mut self, [width, height]: [f32; 2]) -> Rect {
+        let w = if width > 0.0 { width } else { theme::CONTENT_W };
+        let rect = Rect::new(theme::CONTENT_X, self.layout.y(), w, height);
+        self.layout.advance(height);
+        rect
+    }
+
+    /// Hit-test `rect` for the widget `id` and update the interaction state.
+    ///
+    /// This is where hot / active / focused are maintained:
+    ///
+    /// - **hot** is set while the pointer is inside `rect`.
+    /// - **active** is claimed on the press edge and released when the button
+    ///   comes up — *wherever the pointer has moved to by then*. That is what
+    ///   lets a slider keep tracking a cursor dragged off its track.
+    /// - **focused** follows clicks, so a click elsewhere takes focus away.
+    ///
+    /// The returned [`Response`] has `changed: false`; a widget that edits a
+    /// value sets that itself (and should also call [`Ui::mark_changed`]).
+    pub fn interact(&mut self, rect: Rect, id: u64) -> Response {
+        let hovered = self.input.hits(rect);
+        if hovered {
+            self.state.hot = Some(id);
+        }
+
+        let clicked = hovered && self.input.primary_pressed;
+        if clicked {
+            self.state.active = Some(id);
+            self.state.focused = Some(id);
+        } else if self.input.primary_pressed {
+            // A press that landed somewhere else takes focus away from us.
+            if self.state.focused == Some(id) {
+                self.state.focused = None;
+            }
+        }
+        if self.state.active == Some(id) && !self.input.primary_held {
+            self.state.active = None;
+        }
+
+        Response {
+            id,
+            rect,
+            hovered,
+            held: self.state.active == Some(id),
+            clicked,
+            changed: false,
+            open: true,
+        }
+    }
+
+    /// The painter this frame draws through, for widgets that need to draw
+    /// something the built-ins don't.
+    pub fn painter(&mut self) -> &mut dyn Painter {
+        self.painter
+    }
+
+    /// The next unused widget id for `label`, scoped to the enclosing section.
+    ///
+    /// Call this **once** per widget, before laying it out — it advances the
+    /// scope's counter, so calling it twice gives two different ids.
+    pub fn next_id(&mut self, label: &str) -> u64 {
+        let scope = self.scopes.last_mut().expect("root scope is never popped");
+        let id = interact::hash_id(scope.id, scope.seq, label);
+        scope.seq += 1;
         id
     }
 
-    /// Claim a full-width row `h` tall and return its rectangle.
-    fn row(&mut self, h: f32) -> Rect {
-        Rect::new(theme::CONTENT_X, self.layout.y(), theme::CONTENT_W, h)
+    /// Open a nested id scope, so ids inside it are stable against edits
+    /// outside it. Pair with [`Ui::pop_id`].
+    ///
+    /// [`Ui::section`] does this for you; reach for it directly when generating
+    /// widgets in a loop, where the loop index is the only thing distinguishing
+    /// one iteration's widgets from the next's.
+    pub fn push_id(&mut self, label: &str) {
+        let id = self.next_id(label);
+        self.scopes.push(Scope { id, seq: 0 });
     }
 
-    /// Whether the pointer is inside `rect` this frame.
-    fn hovered(&self, rect: Rect) -> bool {
+    /// Close the scope opened by [`Ui::push_id`].
+    pub fn pop_id(&mut self) {
+        // The root scope stays: ids must keep working even if a consumer's
+        // push/pop pairing is off.
+        if self.scopes.len() > 1 {
+            self.scopes.pop();
+        }
+    }
+
+    /// Report that a widget edited its bound value, so [`Ui::changed`] sees it.
+    pub fn mark_changed(&mut self) {
+        self.changed = true;
+    }
+
+    /// Add `points` of vertical space.
+    pub fn spacing(&mut self, points: f32) {
+        self.layout.advance(points);
+    }
+
+    /// Whether the pointer is over `rect` this frame.
+    ///
+    /// Prefer [`Ui::interact`] — this is for a widget that wants to test a
+    /// sub-rectangle (a slider's grab band, say) without claiming interaction
+    /// state for it.
+    pub fn hovered(&self, rect: Rect) -> bool {
         self.input.hits(rect)
+    }
+
+    /// This frame's pointer state, for a widget that needs the raw cursor —
+    /// a slider mapping the cursor's x onto its track, for instance.
+    pub fn input(&self) -> UiInput {
+        self.input
+    }
+
+    /// Whether this widget is currently capturing the pointer.
+    pub fn is_active(&self, id: u64) -> bool {
+        self.state.active == Some(id)
+    }
+
+    /// An id derived from `label` and the enclosing scope **only** — not from
+    /// declaration order, and it doesn't advance the scope's counter.
+    ///
+    /// Use this for a widget whose state has to outlive layout edits.
+    /// [`Ui::section`] does: a section's collapsed state is keyed by its id, and
+    /// with an order-dependent id, adding one row above a section would make it
+    /// forget it was collapsed. The cost is that two same-labelled widgets in
+    /// one scope share an id — wrap them in [`Ui::push_id`] to separate them.
+    pub fn stable_id(&self, label: &str) -> u64 {
+        let scope = self.scopes.last().expect("root scope is never popped");
+        // A sentinel in the sequence slot keeps these from ever colliding with
+        // an ordinary `next_id`, whose counter starts at 0 and counts up.
+        interact::hash_id(scope.id, u64::MAX, label)
     }
 }
 
 impl Drop for Ui<'_> {
     fn drop(&mut self) {
-        // Record the laid-out height so next frame's background fits.
-        self.state.panel_height = self.layout.height();
+        let height = self.layout.height();
+        // Paint the background *now*, at the height the contents actually came
+        // out to, but into the layer that flushes first — so it lands behind
+        // everything declared above it. This is the whole reason layers exist.
+        self.painter.set_layer(Layer::Base);
+        let bg = panel_rect(height);
+        self.painter.rect(bg.x, bg.y, bg.w, bg.h, theme::COL_PANEL);
+        self.painter.set_layer(Layer::Panel);
+
+        // Still recorded, but only so `wants_pointer` has an answer before this
+        // frame's widgets have been declared.
+        self.state.panel_height = height;
     }
 }
 

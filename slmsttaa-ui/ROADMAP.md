@@ -88,7 +88,7 @@ of them need a GPU, a window, or an event loop.
 
 *Also fixed along the way:* nothing. That is the point of a mechanical slice.
 
-## Slice 1 — Interaction core + draw layers
+## Slice 1 — Interaction core + draw layers ✅ done
 
 *Roadblock:* the terrain panel now runs off the bottom of the window at modest
 heights, and the obvious fixes — collapsible sections, a scroll region — are both
@@ -114,15 +114,56 @@ This is the keystone slice — the difference between "some sliders" and a toolk
   renders at half size on a 2× display, and the fix touches the same input
   translation this slice is already rewriting.
 
-*Proof:* the terrain panel's sections collapse and the panel scrolls; the demo
-also ships **one widget written in the demo** from public API, proving the
-unprivileged rule.
+*Proof:* the terrain panel's sections collapse — click a heading and it folds to
+a `+` caret, which is what puts the panel back inside the window — and the demo
+ships **`log_slider`, written in `examples/terrain.rs`** from public API alone,
+proving the unprivileged rule. It exists for a real reason, not as a
+demonstration: erodibility spans four orders of magnitude, so the linear track it
+used to have spent most of its length on indistinguishable values.
 
-## Slice 2 — Painter capabilities
+**What shipped, and what it cost:**
 
-*Roadblock:* Slice 1's scroll region needs clipping, which the painter cannot do
-— it draws axis-aligned solid rectangles and nothing else. The same gap is why
-everything has square corners and no borders.
+- **Ids** are `hash(enclosing scope, index in that scope, label)`, with
+  `push_id`/`pop_id` for explicit scoping. Sections are the exception: their id
+  comes from `stable_id` (label + scope, *no* index), because a section's
+  collapsed state is keyed by its id and an order-dependent id would make it
+  silently re-expand the moment a row was added above it. The trade is that two
+  same-labelled sections in one scope share state, which `push_id` separates.
+- **`Response { id, rect, hovered, held, clicked, changed, open }`** is returned
+  by every widget, labels included — a label's rectangle is how a consumer will
+  hang a tooltip on one. `open` is only ever `false` for a section.
+- **Layers** landed as one index bucket per `Layer`, sharing a single vertex
+  vector, concatenated in order at flush. The overlay is **still one draw call**.
+  The promised side win is real and tested: the panel background is now emitted
+  *last* (the only point at which its height is known) and painted *first*, so
+  it is correct on frame one instead of lagging a frame.
+- **DPI** is fixed by making the toolkit speak **logical points** and converting
+  at both ends of the seam — `Renderer::ui()` divides the cursor by the scale
+  factor, `Overlay` multiplies coordinates on the way to vertices. The toolkit
+  never learns the scale factor, which is why `theme`'s numbers still mean one
+  thing on every display.
+- **The seam went public** as `allocate` / `interact` / `painter` / `next_id` /
+  `stable_id` / `input` / `mark_changed` — *and `theme` with it*. That last one
+  was not in the plan: a consumer's widget cannot look like a built-in one while
+  the metrics and colors are private, so the unprivileged rule forced the
+  constants public. Slice 4 replaces them with a `Theme` of semantic tokens.
+
+**Deliberately not shipped: the scroll region.** It was in this slice's proof,
+and it is moved to Slice 2 rather than quietly dropped. Scrolling without
+clipping means content bleeding out over the 3D scene — visibly broken, not
+merely unpolished — and clipping is precisely what Slice 2 adds. Collapsible
+sections solve the stated roadblock (the panel running off the bottom) on their
+own, so nothing is blocked by waiting.
+
+## Slice 2 — Painter capabilities (and the scroll region)
+
+*Roadblock:* the scroll region deferred out of Slice 1 needs clipping, which the
+painter cannot do — it draws axis-aligned solid rectangles and nothing else. The
+same gap is why everything has square corners and no borders.
+
+Collapsible sections bought the panel enough room that scrolling is no longer
+urgent, but it is still the thing clipping is *for*, so the two ship together:
+add the capability, then the widget that needed it.
 
 The highest visual return per line in the whole sequence, and cheaper than it
 looks: rounded rects **and** clipping both fit in the shader without splitting
@@ -131,12 +172,15 @@ rectangle, evaluate a rounded-box SDF in the fragment shader for shapes, discard
 outside the clip. One extra attribute pair; the single-draw-call design survives.
 
 - `Painter` grows: rounded rects, strokes/borders, clip rects, soft shadows.
+- A scrollable panel body built on the clip rect, which is the widget Slice 1
+  stopped short of.
 - **Engine-side:** `overlay.wgsl` and the `Vertex2D` layout. This is the one
   piece of the sequence with real native/web parity risk, which is an argument
   for doing it while the surface is still small.
 
 *Proof:* rounded panels, 1px borders, focus rings, and a genuinely clipped scroll
-region — identical on native and web.
+region — identical on native and web. The focus ring is also the first thing to
+*read* the `focused` id Slice 1 already tracks.
 
 ## Slice 3 — Layout
 

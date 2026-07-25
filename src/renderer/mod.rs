@@ -236,8 +236,9 @@ pub struct Renderer {
     /// Frame clock for delta-time and the FPS readout.
     clock: Clock,
 
-    /// Keep the window alive for as long as the surface borrows it.
-    _window: Arc<Window>,
+    /// Keeps the window alive for as long as the surface borrows it, and is read
+    /// for its scale factor so the UI can be laid out in logical points.
+    window: Arc<Window>,
 }
 
 impl Renderer {
@@ -417,8 +418,16 @@ impl Renderer {
             overlay,
             ui_state: UiState::default(),
             clock: Clock::new(),
-            _window: window,
+            window,
         }
+    }
+
+    /// Physical pixels per logical point, from the window.
+    ///
+    /// The UI works in points so it looks the same size on every display; this
+    /// is the conversion, and the only place the scale factor is consulted.
+    fn scale_factor(&self) -> f32 {
+        self.window.scale_factor() as f32
     }
 
     /// Current surface size in physical pixels.
@@ -508,11 +517,19 @@ impl Renderer {
     /// into the toolkit's own [`UiInput`] snapshot. Three assignments, in
     /// exchange for a UI crate that has no dependencies at all.
     pub fn ui(&mut self) -> Ui<'_> {
+        // The toolkit works in logical points, so the cursor is converted on the
+        // way in and the overlay converts back on the way out. Without this the
+        // UI is half-size (and mis-hit) on a 2× display.
+        let scale = self.scale_factor();
         let input = UiInput {
-            cursor: self.input.cursor_position(),
+            cursor: self
+                .input
+                .cursor_position()
+                .map(|(x, y)| (x / scale, y / scale)),
             primary_held: self.input.is_mouse_held(MouseButton::Left),
             primary_pressed: self.input.is_mouse_pressed(MouseButton::Left),
         };
+        self.overlay.set_scale(scale);
         Ui::new(&mut self.overlay, input, &mut self.ui_state)
     }
 

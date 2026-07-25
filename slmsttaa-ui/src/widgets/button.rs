@@ -1,52 +1,54 @@
 //! Click widgets: a push button and a toggle.
 //!
-//! Both activate on the press *edge* rather than the held state, so holding the
-//! mouse down doesn't fire every frame. True press-inside-release-inside click
-//! semantics need the hot/active tracking that arrives in UI Slice 1.
+//! Both fire on the press *edge* rather than the held state, so holding the
+//! mouse down doesn't retrigger every frame. True press-inside-release-inside
+//! semantics would use the `active` id [`Ui::interact`] now maintains; the
+//! button doesn't yet, because nothing has asked to cancel a click by dragging
+//! off it.
 
 use crate::theme::*;
-use crate::Ui;
+use crate::{Rect, Response, Ui};
 
 impl Ui<'_> {
-    /// A clickable button. Returns `true` on the frame it is clicked.
-    pub fn button(&mut self, label: &str) -> bool {
-        // Consumed but unused: it keeps the id sequence in step with the widget
-        // order, so ids stay stable when a button is added above a slider. UI
-        // Slice 1 gives it a real use (hot/active state).
-        let _id = self.next_id(label);
+    /// A clickable button. Read [`Response::clicked`].
+    pub fn button(&mut self, label: &str) -> Response {
+        let id = self.next_id(label);
+        // The row owns the trailing gap; the button face is the top of it.
+        let row = self.allocate([0.0, ROW_H]);
+        let face = Rect::new(row.x, row.y, row.w, ROW_H - 4.0);
+        let response = self.interact(face, id);
 
-        let rect = self.row(ROW_H - 4.0);
-        let hovered = self.hovered(rect);
-        let clicked = hovered && self.input.primary_pressed;
-
-        let bg = if hovered { COL_BTN_HOT } else { COL_BTN };
-        self.painter.rect(rect.x, rect.y, rect.w, rect.h, bg);
+        let bg = if response.held {
+            COL_ACCENT
+        } else if response.hovered {
+            COL_BTN_HOT
+        } else {
+            COL_BTN
+        };
+        self.painter.rect(face.x, face.y, face.w, face.h, bg);
 
         // Center the label within the button.
         let tw = self.painter.text_size(label, TEXT_PX)[0];
-        let tx = rect.x + (rect.w - tw) * 0.5;
-        let ty = rect.y + (rect.h - TEXT_PX) * 0.5;
+        let tx = face.x + (face.w - tw) * 0.5;
+        let ty = face.y + (face.h - TEXT_PX) * 0.5;
         self.painter.text(tx, ty, label, TEXT_PX, COL_TEXT);
 
-        self.layout.advance(ROW_H);
-        clicked
+        response
     }
 
-    /// A labeled toggle. Edits `value` in place; returns `true` if it changed.
+    /// A labeled toggle. Edits `value` in place; read [`Response::changed`].
     ///
-    /// The whole row is the hit target, not just the box — a 16px square is a
-    /// mean thing to ask anyone to hit.
-    pub fn checkbox(&mut self, label: &str, value: &mut bool) -> bool {
-        let _id = self.next_id(label);
-
-        let row = self.row(ROW_H);
-        let hovered = self.hovered(row);
+    /// The whole row is the hit target, not just the box — a 16-point square is
+    /// a mean thing to ask anyone to hit.
+    pub fn checkbox(&mut self, label: &str, value: &mut bool) -> Response {
+        let id = self.next_id(label);
+        let row = self.allocate([0.0, ROW_H]);
+        let mut response = self.interact(row, id);
         let box_sz = TEXT_PX;
 
-        let mut changed = false;
-        if hovered && self.input.primary_pressed {
+        if response.clicked {
             *value = !*value;
-            changed = true;
+            response.changed = true;
             self.changed = true;
         }
 
@@ -59,13 +61,16 @@ impl Ui<'_> {
                 row.y + inset,
                 box_sz - 2.0 * inset,
                 box_sz - 2.0 * inset,
-                if hovered { COL_ACCENT_HOT } else { COL_ACCENT },
+                if response.hovered {
+                    COL_ACCENT_HOT
+                } else {
+                    COL_ACCENT
+                },
             );
         }
         self.painter
             .text(row.x + box_sz + 8.0, row.y, label, TEXT_PX, COL_TEXT);
 
-        self.layout.advance(ROW_H);
-        changed
+        response
     }
 }

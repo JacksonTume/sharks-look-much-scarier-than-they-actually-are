@@ -18,7 +18,7 @@
 use wgpu::util::DeviceExt;
 
 use super::font;
-use slmsttaa_ui::{Color, Painter};
+use slmsttaa_ui::{Color, Layer, Painter};
 
 /// A 2D overlay vertex: pixel position, atlas UV, and RGBA tint.
 #[repr(C)]
@@ -134,9 +134,20 @@ pub struct Overlay {
     vertex_capacity: usize,
     index_capacity: usize,
 
-    /// CPU-side accumulation, rebuilt every frame.
+    /// CPU-side accumulation, rebuilt every frame. Vertices are shared across
+    /// layers — only *index* order decides what covers what — so layering costs
+    /// one index vector per [`Layer`] and still resolves to a single draw call.
     vertices: Vec<Vertex2D>,
-    indices: Vec<u32>,
+    indices: [Vec<u32>; Layer::COUNT],
+    /// Concatenation of `indices` in layer order, rebuilt at flush time.
+    flat_indices: Vec<u32>,
+    /// Which bucket [`Painter::rect`]/[`Painter::text`] currently fill.
+    layer: usize,
+
+    /// Physical pixels per logical point. The UI lays out in points; this is
+    /// where they become pixels, which is the only place the display's scale
+    /// factor is allowed to matter.
+    scale: f32,
 }
 
 impl Overlay {
@@ -326,8 +337,20 @@ impl Overlay {
             vertex_capacity,
             index_capacity,
             vertices: Vec::new(),
-            indices: Vec::new(),
+            indices: Default::default(),
+            flat_indices: Vec::new(),
+            layer: Layer::default().index(),
+            scale: 1.0,
         }
+    }
+
+    /// Set how many physical pixels one logical point is worth.
+    ///
+    /// Called by the renderer from the window's scale factor. Without this the
+    /// UI is laid out in points but drawn as though they were pixels, which is
+    /// why it rendered at half size on a 2× display.
+    pub fn set_scale(&mut self, scale: f32) {
+        self.scale = if scale > 0.0 { scale } else { 1.0 };
     }
 
     /// Update the screen-size uniform after a surface resize.
@@ -346,11 +369,24 @@ impl Overlay {
     /// frame, before the consumer rebuilds the UI.
     pub fn begin_frame(&mut self) {
         self.vertices.clear();
-        self.indices.clear();
+        for bucket in &mut self.indices {
+            bucket.clear();
+        }
+        self.flat_indices.clear();
+        self.layer = Layer::default().index();
     }
 
     /// Push one quad (two triangles) with a per-vertex UV rectangle.
+    ///
+    /// Takes logical points and emits physical pixels; the indices go into the
+    /// current layer's bucket, which is what decides draw order at flush time.
     fn push_quad(&mut self, x: f32, y: f32, w: f32, h: f32, uv: [f32; 4], color: Color) {
+        let (x, y, w, h) = (
+            x * self.scale,
+            y * self.scale,
+            w * self.scale,
+            h * self.scale,
+        );
         let base = self.vertices.len() as u32;
         let [u0, v0, u1, v1] = uv;
         self.vertices.extend_from_slice(&[
@@ -375,8 +411,14 @@ impl Overlay {
                 color,
             },
         ]);
-        self.indices
-            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        self.indices[self.layer].extend_from_slice(&[
+            base,
+            base + 1,
+            base + 2,
+            base,
+            base + 2,
+            base + 3,
+        ]);
     }
 
     /// Upload this frame's geometry and record the overlay render pass on top of
@@ -388,7 +430,16 @@ impl Overlay {
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
     ) {
-        if self.indices.is_empty() {
+        // Flatten the per-layer buckets back-to-front. Because every layer
+        // indexes the same vertex vector, the whole overlay — background,
+        // widgets, and any popup above them — is still one draw call; only the
+        // order the triangles are listed in changed.
+        self.flat_indices.clear();
+        for layer in Layer::ALL {
+            self.flat_indices
+                .extend_from_slice(&self.indices[layer.index()]);
+        }
+        if self.flat_indices.is_empty() {
             return;
         }
 
@@ -402,8 +453,8 @@ impl Overlay {
                 mapped_at_creation: false,
             });
         }
-        if self.indices.len() > self.index_capacity {
-            self.index_capacity = self.indices.len().next_power_of_two();
+        if self.flat_indices.len() > self.index_capacity {
+            self.index_capacity = self.flat_indices.len().next_power_of_two();
             self.index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("overlay index buffer"),
                 size: (self.index_capacity * std::mem::size_of::<u32>()) as u64,
@@ -413,7 +464,11 @@ impl Overlay {
         }
 
         queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
-        queue.write_buffer(&self.index_buffer, 0, bytemuck::cast_slice(&self.indices));
+        queue.write_buffer(
+            &self.index_buffer,
+            0,
+            bytemuck::cast_slice(&self.flat_indices),
+        );
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("overlay pass"),
@@ -437,7 +492,7 @@ impl Overlay {
         pass.set_bind_group(1, &self.atlas_bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..self.indices.len() as u32, 0, 0..1);
+        pass.draw_indexed(0..self.flat_indices.len() as u32, 0, 0..1);
     }
 }
 
@@ -448,9 +503,10 @@ impl Painter for Overlay {
     }
 
     fn text(&mut self, x: f32, y: f32, text: &str, px: f32, color: Color) {
-        // Snap the run origin to whole pixels so the bitmap font stays crisp.
-        let mut pen_x = x.round();
-        let pen_y = y.round();
+        // Snap the run origin to whole *physical* pixels so the bitmap font
+        // stays crisp — rounding in points would still land mid-pixel at 1.5×.
+        let mut pen_x = (x * self.scale).round() / self.scale;
+        let pen_y = (y * self.scale).round() / self.scale;
         for ch in text.chars() {
             if let Some(uv) = glyph_uv(ch) {
                 self.push_quad(pen_x, pen_y, px, px, uv, color);
@@ -461,6 +517,11 @@ impl Painter for Overlay {
     }
 
     fn text_size(&self, text: &str, px: f32) -> [f32; 2] {
+        // In points: the UI lays out in points and never learns the scale.
         [text.chars().count() as f32 * px, px]
+    }
+
+    fn set_layer(&mut self, layer: Layer) {
+        self.layer = layer.index();
     }
 }

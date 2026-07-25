@@ -46,28 +46,23 @@ fn button_fires_only_on_a_press_inside_it() {
 
     // The first widget's row starts one pad below the panel top.
     let inside = (CONTENT_X + 40.0, PANEL_Y + PAD + 8.0);
-    let below_the_panel = (inside.0, 900.0);
 
     let click_inside = {
         let mut ui = Ui::new(&mut painter, clicking(inside.0, inside.1), &mut state);
-        ui.button("go")
+        ui.button("go").clicked
     };
     let click_outside = {
-        let mut ui = Ui::new(
-            &mut painter,
-            clicking(below_the_panel.0, below_the_panel.1),
-            &mut state,
-        );
-        ui.button("go")
+        let mut ui = Ui::new(&mut painter, clicking(inside.0, 900.0), &mut state);
+        ui.button("go").clicked
     };
     let hover_only = {
         let mut ui = Ui::new(&mut painter, hovering(inside.0, inside.1), &mut state);
-        ui.button("go")
+        ui.button("go").clicked
     };
     // A held-over button from a previous frame is not a new click.
     let still_held = {
         let mut ui = Ui::new(&mut painter, dragging(inside.0, inside.1), &mut state);
-        ui.button("go")
+        ui.button("go").clicked
     };
 
     assert!(click_inside, "a press inside the button should click it");
@@ -85,7 +80,7 @@ fn checkbox_toggles_on_press_and_reports_changed() {
 
     {
         let mut ui = Ui::new(&mut painter, clicking(CONTENT_X + 4.0, row_y), &mut state);
-        assert!(ui.checkbox("wireframe", &mut flag));
+        assert!(ui.checkbox("wireframe", &mut flag).changed);
         assert!(ui.changed(), "a toggle is a value change");
     }
     assert!(flag);
@@ -94,21 +89,23 @@ fn checkbox_toggles_on_press_and_reports_changed() {
     // the hit target.
     {
         let mut ui = Ui::new(&mut painter, clicking(CONTENT_X + 200.0, row_y), &mut state);
-        assert!(ui.checkbox("wireframe", &mut flag));
+        assert!(ui.checkbox("wireframe", &mut flag).changed);
     }
     assert!(!flag);
 
     // Hovering leaves it alone.
     {
         let mut ui = Ui::new(&mut painter, hovering(CONTENT_X + 4.0, row_y), &mut state);
-        assert!(!ui.checkbox("wireframe", &mut flag));
+        let r = ui.checkbox("wireframe", &mut flag);
+        assert!(!r.changed);
+        assert!(r.hovered, "it should still report the hover");
         assert!(!ui.changed());
     }
     assert!(!flag);
 }
 
 /// A point inside the first slider's grab band: the header line sits at the top
-/// of the row, the track five pixels under it.
+/// of the row, the track five points under it.
 fn slider_band_y() -> f32 {
     PANEL_Y + PAD + TEXT_PX + 5.0 + 2.0
 }
@@ -125,7 +122,7 @@ fn slider_jumps_to_the_pressed_position() {
             clicking(CONTENT_X + CONTENT_W * 0.5, slider_band_y()),
             &mut state,
         );
-        assert!(ui.slider("t", &mut value, 0.0, 100.0));
+        assert!(ui.slider("t", &mut value, 0.0, 100.0).changed);
         assert!(ui.changed());
     }
     assert!((value - 50.0).abs() < 0.01, "value was {value}");
@@ -151,7 +148,9 @@ fn slider_drag_survives_the_cursor_leaving_the_track() {
     // so the slider keeps following it — clamped to the track's range.
     {
         let mut ui = Ui::new(&mut painter, dragging(2000.0, 900.0), &mut state);
-        ui.slider("t", &mut value, 0.0, 100.0);
+        let r = ui.slider("t", &mut value, 0.0, 100.0);
+        assert!(r.held, "the slider still owns the pointer");
+        assert!(!r.hovered, "even though the cursor is nowhere near it");
         assert!(ui.wants_pointer(), "an active drag must hold the pointer");
     }
     assert_eq!(value, 100.0);
@@ -180,8 +179,8 @@ fn sliders_with_the_same_label_do_not_share_a_drag() {
     let mut state = UiState::default();
     let (mut first, mut second) = (0.0_f32, 0.0_f32);
 
-    // Press on the *second* slider's band. Ids are label + call index, so the
-    // duplicate label must not hand the drag to the first one.
+    // Press on the *second* slider's band. Ids mix in the widget's index within
+    // its scope, so the duplicate label must not hand the drag to the first one.
     let second_band = slider_band_y() + 40.0;
     {
         let mut ui = Ui::new(
@@ -202,7 +201,7 @@ fn wants_pointer_covers_the_panel_and_nothing_else() {
     let mut painter = RecordingPainter::default();
     let mut state = UiState::default();
 
-    // Lay out a few rows so the panel has a real height for the next frame.
+    // Lay out a few rows so the panel has a real height.
     {
         let mut ui = Ui::new(&mut painter, UiInput::default(), &mut state);
         for _ in 0..4 {
@@ -230,4 +229,28 @@ fn wants_pointer_covers_the_panel_and_nothing_else() {
     assert!(over_panel, "the camera must not orbit while over the panel");
     assert!(!over_scene, "the scene keeps the pointer everywhere else");
     assert!(!no_cursor, "an unseen cursor hits nothing");
+}
+
+#[test]
+fn every_widget_reports_where_it_landed() {
+    let mut painter = RecordingPainter::default();
+    let mut state = UiState::default();
+    let mut flag = false;
+    let mut value = 0.5_f32;
+
+    let mut ui = Ui::new(&mut painter, UiInput::default(), &mut state);
+    // Even a label: a consumer needs its rectangle to hang a tooltip on it.
+    let label = ui.label("read only");
+    let button = ui.button("go");
+    let check = ui.checkbox("on", &mut flag);
+    let slider = ui.slider("t", &mut value, 0.0, 1.0);
+
+    for r in [label, button, check, slider] {
+        assert!(r.rect.w > 0.0 && r.rect.h > 0.0, "{r:?} has no area");
+        assert!(r.open, "only sections ever report open == false");
+    }
+    // Laid out top to bottom, without overlapping.
+    assert!(label.rect.max_y() <= button.rect.y);
+    assert!(button.rect.max_y() <= check.rect.y);
+    assert!(check.rect.max_y() <= slider.rect.y);
 }
