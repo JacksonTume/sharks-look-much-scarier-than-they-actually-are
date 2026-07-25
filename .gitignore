@@ -4,6 +4,9 @@
 # Cargo.lock is kept (the examples are binaries, and it pins the wasm-bindgen
 # version the CLI must match), so DO NOT ignore Cargo.lock.
 
+# Reference papers / PDFs consulted while building (not redistributable)
+/reference
+
 # Editor / OS noise
 *.swp
 *.swo
