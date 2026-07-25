@@ -22,6 +22,11 @@ demo-first/outside-in; push only generic plumbing into the engine; KISS), and th
 demand-driven slice sequence. New work should be pulled into existence by a demo
 roadblock, never added speculatively.
 
+**UI work is a separate track.** The immediate-mode toolkit lives in its own
+zero-dependency crate, [`slmsttaa-ui`](../slmsttaa-ui/README.md), with its own
+[`ROADMAP.md`](../slmsttaa-ui/ROADMAP.md). Read those before touching anything
+UI-shaped — and see the placement rule under *Conventions*.
+
 ## Commands
 
 ```sh
@@ -32,6 +37,7 @@ cargo build                            # debug build
 cargo build --release                  # optimized
 cargo clippy --all-targets             # lint
 cargo fmt --all                        # format (bare `cargo fmt` trips on examples/terrain/)
+cargo test -p slmsttaa-ui              # the tests (UI layout + hit-testing; see below)
 
 # Web (wasm) — requires `cargo install wasm-bindgen-cli` once, at a version
 # matching the `wasm-bindgen` dependency in Cargo.lock.
@@ -49,11 +55,15 @@ the browser console.
 
 ## Verifying changes
 
-There are no tests yet. To confirm a change works:
+The only tests live in `slmsttaa-ui/tests/` — the zero-dependency toolkit is the
+one part of the repo testable without a GPU, via the `RecordingPainter` double.
+The engine half is still verified by building and looking at it. To confirm a
+change works:
 
 - **Always** `cargo build` (native) **and** `cargo build --target
   wasm32-unknown-unknown --lib` — the two targets diverge via `#[cfg]`, so one
   can break while the other compiles.
+- `cargo test -p slmsttaa-ui` for anything touching UI layout or hit-testing.
 - For visual changes, run the native example (`cargo run --example triangle`)
   and/or rebuild the wasm package and hard-refresh the browser. The dev server
   serves `web/` live; no restart needed after a rebuild.
@@ -67,6 +77,16 @@ There are no tests yet. To confirm a change works:
 - Match the surrounding rustdoc style — modules and public items are documented;
   keep that up.
 - Prefer keeping `wgpu` reasonably current (browsers track the live WebGPU spec).
+- **Where UI goes.** Widgets, layout, theming, and interaction belong in
+  `slmsttaa-ui/`, and so do their docs — do not add them to `ARCHITECTURE.md` or
+  the engine `ROADMAP.md`, which keep only the engine half (the overlay pass, the
+  glyph atlas, the `Painter` seam). `slmsttaa-ui` must stay **zero-dependency**:
+  it never imports `wgpu`, `winit`, or the engine crate. When the toolkit needs
+  something the painter can't draw, widen the `Painter` trait and implement it in
+  `renderer/overlay.rs` — never reach through to renderer internals.
+- Anything the engine ships as a widget must be re-implementable by a demo from
+  public API alone. A widget with no demo roadblock behind it is polish; label it
+  as such rather than filing it as infrastructure.
 
 ## Gotchas (quick reference)
 

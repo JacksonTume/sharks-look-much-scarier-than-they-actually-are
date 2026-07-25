@@ -10,7 +10,7 @@
 //!
 //! The overlay owns a glyph atlas baked from the embedded [`font`](super::font)
 //! bitmap and exposes a tiny CPU draw API ([`Painter`]); the
-//! [`Ui`](crate::ui::Ui) immediate-mode layer is built on top of it, but a
+//! [`Ui`](slmsttaa_ui::Ui) immediate-mode layer is built on top of it, but a
 //! consumer could also drive it directly. Primitives are accumulated into CPU
 //! vectors each frame (cleared by [`Overlay::begin_frame`]) and uploaded in one
 //! shot at flush time.
@@ -18,7 +18,7 @@
 use wgpu::util::DeviceExt;
 
 use super::font;
-use crate::ui::{Color, Painter};
+use slmsttaa_ui::{Color, Painter};
 
 /// A 2D overlay vertex: pixel position, atlas UV, and RGBA tint.
 #[repr(C)]

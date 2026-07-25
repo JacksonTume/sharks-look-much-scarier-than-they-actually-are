@@ -11,9 +11,11 @@ keywords = ["graphics", "rendering", "wgpu", "3d", "engine"]
 categories = ["graphics", "rendering"]
 
 [workspace]
-# The engine is the root package; `xtask` is the dev-tooling crate behind
-# `cargo xtask` (build + serve the web demo). See `.cargo/config.toml`.
-members = ["xtask"]
+# The engine is the root package. `slmsttaa-ui` is the immediate-mode UI toolkit
+# (a zero-dependency leaf crate the engine re-exports as `slmsttaa::ui`); `xtask`
+# is the dev-tooling crate behind `cargo xtask` (build + serve the web demo).
+# See `.cargo/config.toml`.
+members = ["slmsttaa-ui", "xtask"]
 
 [lib]
 name = "slmsttaa"
@@ -24,6 +26,11 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [dependencies]
+# The UI toolkit. The dependency points *this* way and only this way: the
+# toolkit knows nothing of the engine, so it can never reach into `wgpu`. The
+# engine implements `Painter` for its overlay and re-exports the crate as
+# `slmsttaa::ui`. See `slmsttaa-ui/README.md` § Dependency direction.
+slmsttaa-ui = { path = "slmsttaa-ui" }
 wgpu = "29"
 winit = "0.30"
 bytemuck = { version = "1.16", features = ["derive"] }

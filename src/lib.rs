@@ -12,7 +12,8 @@
 //! - [`camera`]  — a minimal perspective camera producing a view-projection matrix.
 //! - [`input`]   — per-frame keyboard/mouse state, decoupled from winit.
 //! - [`time`]    — a cross-platform frame clock (delta time).
-//! - [`ui`]      — a decoupled immediate-mode UI framework drawn by the overlay.
+//! - [`ui`]      — the immediate-mode UI toolkit, re-exported from the separate
+//!   [`slmsttaa-ui`](slmsttaa_ui) crate and drawn by the overlay pass.
 //!
 //! To put something on screen, implement [`Application`] and pass it to [`run`],
 //! which opens a window and drives your consumer until it is closed. See the
@@ -24,7 +25,16 @@ pub mod camera;
 pub mod input;
 pub mod renderer;
 pub mod time;
-pub mod ui;
+
+/// The immediate-mode UI toolkit.
+///
+/// This is the [`slmsttaa-ui`](slmsttaa_ui) crate, re-exported so consumers see
+/// one dependency. It lives outside the engine on purpose: it depends on
+/// nothing, so "the UI never touches `wgpu`" is enforced by the crate graph
+/// rather than by good intentions. The engine's only contribution is
+/// `impl Painter for Overlay` in the overlay pass, and translating [`Input`]
+/// into a [`ui::UiInput`] each frame ([`Renderer::ui`]).
+pub use slmsttaa_ui as ui;
 
 pub use app::App;
 pub use application::Application;

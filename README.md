@@ -24,11 +24,21 @@ hydro-thermal **stream-power erosion**, every layer tunable from an on-screen
 panel. The whole algorithm lives in the demo — `wgpu` and `winit` appear nowhere
 in it, which is the point.
 
+The UI lives in its own zero-dependency crate,
+[`slmsttaa-ui`](slmsttaa-ui/README.md), so a widget toolkit doesn't grow inside a
+rendering engine. The engine keeps the screen-space pass and the glyph atlas; the
+toolkit keeps everything above the `Painter` trait — and since it depends on
+nothing, "the UI never touches `wgpu`" is enforced by the crate graph rather than
+by good intentions. It is re-exported as `slmsttaa::ui`, so consumers still see
+one dependency, and it plans its own work in
+[`slmsttaa-ui/ROADMAP.md`](slmsttaa-ui/ROADMAP.md).
+
 Still to grow into: materials, multiple meshes with transforms, a real lighting
 model, and a render graph — each waiting for a demo that actually demands it.
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for how the pieces fit together and the
-cross-platform gotchas that shaped them.
+cross-platform gotchas that shaped them, and [`ROADMAP.md`](ROADMAP.md) for where
+it's going and why.
 
 ## Requirements
 
@@ -52,14 +62,15 @@ cross-platform gotchas that shaped them.
 | `src/renderer/vertex.rs` | Vertex format + buffer layout.                           |
 | `src/renderer/shader.wgsl` | WGSL vertex/fragment shaders.                          |
 | `src/camera.rs`          | Perspective camera + GPU uniform.                        |
-| `src/renderer/overlay.rs` | Screen-space 2D pass + glyph atlas (the UI/HUD layer).  |
-| `src/ui.rs`              | Decoupled immediate-mode UI framework (sliders, etc.).   |
+| `src/renderer/overlay.rs` | Screen-space 2D pass + glyph atlas (`Painter` impl).   |
 | `src/time.rs`            | Cross-platform frame clock (`Renderer::dt`).             |
 | `examples/triangle.rs`   | Reference consumer: draws one triangle (native + web).   |
 | `examples/cube.rs`       | Spinning solid cube: indexed mesh + depth + culling.     |
 | `examples/gallery.rs`    | Scene switcher: web buttons swap demos; native cycles.   |
 | `examples/grid.rs`       | Orbitable terrain grid: the input + camera seam.         |
 | `examples/terrain.rs`    | **Capstone**: Perlin + stream-power erosion, live panel.  |
+| `slmsttaa-ui/src/`       | The UI toolkit crate (zero deps): `Painter`, widgets.    |
+| `slmsttaa-ui/tests/`     | Layout + hit-testing tests (headless recording painter). |
 | `web/index.html`         | Browser harness for the wasm build (loads `pkg/app.js`). |
 | `xtask/`                 | `cargo xtask serve`: build native + web and host it.     |
 

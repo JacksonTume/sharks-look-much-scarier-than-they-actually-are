@@ -36,15 +36,13 @@ src/
 ├── time.rs           Clock: a cross-platform frame clock (delta-time). Native
 │                     Instant; web performance.now() (Instant panics on wasm).
 │                     Surfaced as Renderer::dt().
-├── ui.rs             A modular, decoupled immediate-mode UI framework. The
-│                     Painter trait decouples it from the renderer (it never sees
-│                     wgpu); widgets edit a consumer's own &mut values, decoupling
-│                     it from the consumer. Renderer::ui() hands one out per frame.
 └── renderer/
     ├── mod.rs        Renderer: wgpu instance/adapter/device/queue/surface, the
     │                 solid + wireframe render pipelines (RenderMode), the depth
     │                 buffer, the consumer's mesh draw-list, the overlay, the UI
     │                 state + clock, and per-frame begin_frame()/update()/render().
+    │                 Renderer::ui() also translates Input -> ui::UiInput, which is
+    │                 what keeps the UI crate free of any dependency on the engine.
     ├── mesh.rs       Mesh (vertices + indices): the CPU-side geometry a consumer
     │                 builds and hands over via Renderer::set_meshes.
     ├── vertex.rs     Vertex (position + color) and its buffer layout.
@@ -77,6 +75,22 @@ examples/
                       layer and a wireframe toggle. Both layers live entirely in
                       the demo (pulled in via #[path]); the engine only uploads the
                       mesh, picks solid/wireframe, draws the UI, runs the camera.
+
+slmsttaa-ui/          The UI toolkit, as its own zero-dependency workspace member
+├── README.md         (see its README for why, and for the dependency-direction
+├── ROADMAP.md        rule). The engine depends on it and re-exports it as
+├── WISHLIST.md       `slmsttaa::ui`; it never depends on the engine, so it sees
+├── src/              no wgpu and no winit. UI planning lives in its ROADMAP,
+│   ├── lib.rs        not the engine's.
+│   ├── painter.rs    Painter (the drawing seam) + RecordingPainter, the headless
+│   │                 test double that makes layout assertable without a GPU.
+│   ├── interact.rs   UiInput (this frame's pointer, filled in by the host) and
+│   │                 UiState (what survives between frames).
+│   ├── layout.rs     Rect + the vertical placement cursor.
+│   ├── theme.rs      Every metric and color in one place.
+│   └── widgets/      One file per widget: text.rs, button.rs, slider.rs.
+└── tests/            The project's only tests — layout + hit-testing, driven
+                      against RecordingPainter. No GPU, no window, no async.
 
 xtask/                Dev tooling (a separate workspace member, no deps). `cargo
 └── src/main.rs       xtask serve [example]` builds the example natively and for
@@ -159,15 +173,26 @@ render graph will eventually grow. The design holds two boundaries at once:
   keeps it crisp; there is no font file or rasterizer at runtime, which keeps it
   identical on native and web (KISS).
 
-- **The UI is decoupled from both sides.** `ui.rs` is an immediate-mode toolkit
-  that talks to the overlay *only* through the `Painter` trait (`rect`/`text`/
-  `text_size`) and reads `Input`. It never sees `wgpu`; the overlay is just one
-  `Painter` implementation. Upward, widgets borrow the consumer's own `&mut f32`/
-  `&mut bool`, so parameters live in the demo — the UI knows nothing about what it
-  controls. The only retained state is a tiny `UiState` (which slider is being
-  dragged, last frame's panel height for the background). This mirrors the
-  engine/consumer inversion of control one layer down, and is deliberately *not* a
-  retained-mode widget tree (roadmap principle 2).
+- **`Painter` is the seam, and it is the engine's only obligation to the UI.**
+  The toolkit talks to the overlay *only* through that trait (`rect` / `text` /
+  `text_size`) and never sees `wgpu`; the overlay is just one implementation, and
+  a headless recorder in the UI crate's tests is another. Everything above the
+  trait — widgets, layout, theming, interaction — is
+  [`slmsttaa-ui`](slmsttaa-ui/README.md)'s business and is documented there.
+
+  Input crosses the same boundary, in the opposite direction and by copy. The
+  toolkit cannot `use crate::input::Input` — it doesn't depend on the engine, and
+  reaching back would be a dependency cycle — so it declares its own `UiInput`
+  snapshot and `Renderer::ui()` fills one in each frame from this frame's
+  `Input`. Three field assignments buys a UI crate with no dependencies at all.
+
+  What lives on *this* side of the seam is the part that touches the GPU: the
+  overlay pipeline, the glyph atlas, the 2D vertex format, and draw ordering. So
+  when the UI needs a capability the painter lacks — rounded corners, clipping,
+  ordered draw layers — the work lands here, in `overlay.rs` / `overlay.wgsl` /
+  `Vertex2D`, as a deliberate widening of the trait. That funnel is the point of
+  the crate split (see [UI roadmap](slmsttaa-ui/ROADMAP.md) Slices 1–2, which are
+  the ones that will move it).
 
 ## Why the async/user-event dance
 
@@ -239,8 +264,13 @@ The scaffold leaves obvious seams:
 - A small **render-graph**: there are now two passes (3D + overlay) wired by hand
   in `render()`. A second consumer wanting its own pass is the roadblock that turns
   this into a real graph.
-- Interactive UI **beyond the current widgets** (text input, scroll regions,
-  draggable panels) — pulled in only when a demo asks.
+- **Overlay capabilities the UI crate will ask for**: rounded-rect and clip
+  support in `overlay.wgsl` (both fit in the fragment shader via an SDF plus a
+  per-vertex clip rect, with no draw-call splitting), ordered draw layers in
+  `Overlay::flush`, and a `scale_factor`-aware surface — nothing reads it today,
+  so the UI renders at half size on a 2× display. These are sequenced in the
+  [UI roadmap](slmsttaa-ui/ROADMAP.md), since that's what demands them; widgets
+  themselves are no longer an engine concern.
 
 Already in place (earlier seams now filled): an indexed `Mesh` + draw-list
 (Slice 1), a **depth buffer + back-face culling** (Slice 2), a **consumer-driven

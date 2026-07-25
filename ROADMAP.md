@@ -216,7 +216,8 @@ public-domain `font8x8`, no font file or rasterizer dependency); and a frame clo
 *The interactive-UI step came with it.* The driving demo didn't just need to
 *display* numbers — it needed to *edit* erosion parameters, which is the natural
 "clickable widgets" roadblock. So this slice also delivered a small **modular,
-decoupled immediate-mode UI framework** (`src/ui.rs`): widgets (`slider`,
+decoupled immediate-mode UI framework** (then `src/ui.rs`, since extracted into
+the `slmsttaa-ui` crate — see *The UI split* below): widgets (`slider`,
 `button`, `checkbox`, `label`, `title`) that edit a consumer's own `&mut`
 values. It is decoupled twice over: downward from the renderer via the [`Painter`]
 trait (the UI never sees `wgpu` — the overlay is just one `Painter` impl), and
@@ -275,10 +276,213 @@ proved the vertical worked end-to-end (the thing that mattered then). Slice 6 ke
 that win and trades the algorithm for one that honors the "compose, don't solve"
 and "always something visible" principles.
 
+## The second vertical — a `scene` demo (Slices 7–11)
+
+Terrain proved the thesis, but it is a **single deforming mesh in world space**.
+Every consumer that wants *many distinct objects that move independently* falls
+off a cliff the terrain demo never approached: meshes are uploaded pre-transformed
+and `cube.rs` literally rotates its own corners on the CPU and re-uploads the mesh
+every frame. That works for one cube and for nothing else.
+
+The driving demo is **`examples/scene.rs`** — a small stage holding several
+articulated figures assembled from primitive shapes, moving independently, lit,
+with the whole scene pausable and scrubbable. It is deliberately content-free: no
+terrain, no game, nothing but "several things, in different places, that a viewer
+can tell apart."
+
+*Where this came from, honestly.* The sequence below was **not** invented from a
+blank page — it was distilled from an external project's request list (a
+deterministic simulation with an event stream, wanting a renderer). Principle 2
+forbids building from a wishlist, so nothing here is scheduled on that project's
+behalf: each item was kept only because `scene.rs` independently hits the same
+wall, and the rest was discarded (see *What stays in the consumer* below). If
+`scene.rs` doesn't hit a wall, it isn't in this list.
+
+### Slice 7 — Per-object transforms + an instance draw-list
+
+*Roadblock:* the demo wants twenty objects, several of which are the *same* mesh
+in different places. Today `set_meshes` takes geometry already baked into world
+space, so "move something" means rebuilding its vertices and re-uploading — per
+object, per frame — and the same box uploaded ten times is ten vertex buffers.
+
+- Uploading a mesh returns a **handle**; the draw-list becomes a list of
+  *instances* (`handle` + transform), so one mesh can be drawn many times.
+- A per-object **model matrix** reaching the shader. The vertex shader stops
+  assuming world-space input.
+- Transforms exposed as plain data (position / rotation / scale, or a `[[f32; 4];
+  4]`) — the consumer never sees a GPU type (principle 4).
+
+*Parity risk to settle here:* the WebGL2 fallback runs under
+`downlevel_webgl2_defaults`, which has **no storage buffers** — so per-instance
+data must ride either an instance-step vertex buffer or a uniform with dynamic
+offsets, not the storage-buffer approach most tutorials reach for. Decide it in
+this slice, while the surface is small.
+
+*Proof:* `scene.rs` places and moves many objects, reusing meshes, with **zero**
+per-frame vertex re-upload; `cube.rs` loses its CPU corner-rotation.
+
+### Slice 8 — Vertex normals + a lighting model in the pipeline
+
+*Roadblock:* Slice 7 breaks the trick terrain relies on. The terrain demo bakes
+diffuse shading into vertex color CPU-side, which is correct only because that
+mesh never moves — rotate an object whose lighting is painted into its vertices
+and the highlight rotates with it. Lighting has to be evaluated *after* the model
+transform, which means it has to live in the shader.
+
+This is the seam `ARCHITECTURE.md` already predicted: "a second lit demo would
+justify pushing normals into the pipeline." `scene.rs` is that demo.
+
+- `Vertex` grows a normal; the pipeline transforms it by the normal matrix.
+- One directional light + ambient, Lambert diffuse. **Not** a lighting *system* —
+  no point lights, no shadows, no PBR until something demands them.
+- Terrain's CPU-baked shading is retired in favor of real normals, which also
+  makes its wireframe/solid toggle honest.
+
+*Proof:* a rotating object in `scene.rs` is lit consistently from a fixed world
+direction, and terrain looks the same or better with the CPU bake deleted.
+
+### Slice 9 — Per-instance material
+
+*Roadblock:* two instances of the *same* mesh must be visually distinguishable,
+and after Slice 7 they cannot be — color lives in the shared vertex buffer, so
+every instance of a mesh is identical by construction. Duplicating the mesh per
+color would undo the entire point of Slice 7.
+
+- A small per-instance **material**: base color tint, and whatever minimum the
+  lighting model needs (e.g. a specular/shininess scalar). Multiplied into vertex
+  color rather than replacing it.
+- Deliberately **not** a material system: no shader graph, no pipeline
+  permutations, no texture binding (see *Beyond*). One struct on the instance.
+
+*Proof:* one uploaded mesh, drawn many times, each instance a different color.
+
+### Slice 10 — Primitive mesh builders
+
+*Roadblock:* every figure in `scene.rs` is assembled from boxes, spheres, and
+capsules, and after Slice 8 hand-rolling them is genuinely painful — correct
+per-face normals mean splitting shared vertices, so a box is 24 vertices with
+carefully paired normals rather than 8 tidy corners. Writing that by hand for the
+fifth shape is the wall.
+
+- `Mesh::box`, `Mesh::sphere`, `Mesh::capsule` (or cylinder), `Mesh::plane` —
+  positions, indices, and correct normals, parameterized by size/segments.
+- Zero dependencies, zero file I/O, no runtime asset loading. This is the
+  **deliberate alternative to an asset pipeline**: composition of primitives under
+  a transform, not glTF.
+
+*On principle 3:* a mesh builder isn't GPU plumbing, so it's worth stating why it
+lands in the engine anyway — it is entirely **content-free** geometry
+construction. It encodes no consumer semantics (compare: a `Terrain` builder,
+which would). Every consumer needs a box; none of them need *our* box.
+
+*Proof:* `scene.rs` builds all its geometry from engine primitives and contains no
+hand-written vertex arrays.
+
+### Slice 11 — Fixed-timestep clock + time control
+
+*Roadblock:* `scene.rs`'s motion is frame-rate coupled — it looks different at
+60 Hz and 144 Hz, and replaying it doesn't reproduce. The demo wants to pause,
+single-step, and scrub the scene, and `Renderer::dt()` (raw wall-clock) cannot
+express any of that.
+
+- An **accumulator** driving a fixed-step hook at a consumer-chosen rate, plus an
+  **interpolation alpha** so rendering between steps is smooth rather than juddery.
+- Consumer-facing time control: pause, time scale, single-step, and seek.
+- **Determinism as a property of the seam.** The engine's contribution is simply
+  that a consumer which advances its state *only* in the fixed hook gets the same
+  result regardless of frame rate — the engine stops being the source of
+  wall-clock nondeterminism. It does not make the consumer deterministic; that is
+  the consumer's job.
+- Terrain benefits too: its erosion iterations are frame-rate coupled today.
+
+*Proof:* `scene.rs` runs identically at capped and uncapped frame rates, and its
+transport controls (play/pause/step/scrub) drive the scene from the UI panel.
+
+### What stays in the consumer
+
+Recorded because this boundary will be asked about again, and it is the same
+ruling that keeps the erosion solver in the terrain demo (principle 3).
+
+A consumer that wants to *visualize its own simulation* will ask for two things
+that look like engine work and are not:
+
+- **A presentation model** — a pure function from that consumer's own state (or
+  event log) to a view state. It is the consumer's data model, one layer above its
+  simulation and one layer above us.
+- **Spatial synthesis** — inventing continuous positions, facing, and posture
+  where the simulation only has categories. That is an *algorithm*, exactly like
+  stream-power erosion, and it belongs in the demo.
+
+The engine's answer to both is the same answer terrain got: you compute it, we
+draw it. What we owe such a consumer is the list above — transforms, lighting,
+materials, primitives, a time model — and nothing that knows what the objects
+*mean*.
+
+## The UI split (post-Slice 6)
+
+Slice 5 delivered a UI framework as a side effect of the terrain demo needing
+knobs, and Slice 6 grew it again. That worked, but it put a widget toolkit inside
+a 3D rendering engine — and the toolkit is the part most likely to expand without
+limit, because it has the tightest iteration loop and the best-looking results per
+hour spent.
+
+So it moved out (**UI Slice 0**, done). **`slmsttaa-ui` is its own workspace
+member**, a zero-dependency leaf crate that the engine depends on and re-exports
+as `slmsttaa::ui`. The split is for *enforcement*, not insulation: the old
+`src/ui.rs` already claimed it never saw `wgpu`, and a crate boundary turns that
+claim into a compile error — the same trick `examples/` plays on the
+engine/consumer boundary (principle 1).
+
+The engine's side of the move was small and is the whole seam: it keeps
+`impl Painter for Overlay`, and `Renderer::ui()` translates this frame's `Input`
+into the toolkit's own `UiInput` snapshot (the toolkit can't import `Input` —
+that would be the cycle). Consumers saw no change at all; `examples/terrain.rs`
+was not touched.
+
+It does **not** make UI work free of engine changes. Growing what the toolkit can
+draw means growing `renderer/overlay.rs`, `overlay.wgsl`, and the `Vertex2D`
+layout. The boundary just forces that to arrive as a deliberate widening of the
+`Painter` trait instead of a private reach-through.
+
+**All UI planning now lives in [`slmsttaa-ui/ROADMAP.md`](slmsttaa-ui/ROADMAP.md)**
+— slices, scope limits, and the stopping rule that keeps the widget roster from
+becoming the project. See [`slmsttaa-ui/README.md`](slmsttaa-ui/README.md) for the
+design and the dependency-direction decision. This roadmap keeps the engine half
+only: the overlay pass, the glyph atlas, and the input plumbing beneath the
+`Painter` seam.
+
 ## Beyond (seams, not commitments)
 
 Listed only so we recognize them when a future demo demands them — **not** to be
-built ahead of need: a material abstraction, multiple meshes with transforms,
-MSAA, basic lighting model, interactive UI widgets (clickable regions / sliders,
-building on Slice 5's text overlay), and a render graph once there's more than one
-pass. Each waits for a consumer to ask.
+built ahead of need: MSAA, and a render graph once there's more than one pass.
+(Transforms, a lighting model, and a minimal material moved out of this list and
+into Slices 7–11 above, because `scene.rs` demands them.) Each of the rest waits
+for a consumer to ask:
+
+- **Consumer-supplied textures.** The overlay already samples a glyph atlas, so
+  the shader work is adjacent, but no public API exists to upload an image and
+  nothing has demanded one. Two things would: a 3D demo wanting surface detail
+  that per-instance color can't express, and the UI crate's request for textured
+  quads (icons, portraits) — see [UI `WISHLIST.md`](slmsttaa-ui/WISHLIST.md).
+- **An asset pipeline (glTF/OBJ + runtime file loading).** Explicitly *not* taken:
+  Slice 10 answers "geometry the consumer didn't compute" with primitives plus
+  transforms instead, which costs zero dependencies and no wasm asset-fetching
+  story. Revisit only when a demo needs authored art that primitives genuinely
+  cannot compose.
+- **Skeletal animation (joints, vertex skinning, clip playback).** Recognized and
+  deferred whole. It is the single largest item any renderer consumer will ask
+  for, and it is close to pointless without the asset pipeline above — you cannot
+  author a rig with no importer. Slices 7–11 deliberately stop at rigid objects a
+  consumer poses itself each frame; that is animation *by the consumer*, and it is
+  as far as we go until a demo proves it insufficient.
+- **An offscreen render target composited into a UI rect**, so the 3D scene is one
+  panel among many rather than a fullscreen background with UI floating on top.
+  This is the concrete thing that would turn the two hand-wired passes into a real
+  render graph; it is named in [UI `WISHLIST.md`](slmsttaa-ui/WISHLIST.md) as
+  engine-side work.
+
+Painter capabilities the UI crate will demand of the overlay (rounded-rect and
+clip support in `overlay.wgsl`, ordered draw layers in `Overlay::flush`, a
+`scale_factor`-aware surface) are engine seams too — but they're sequenced in the
+[UI roadmap](slmsttaa-ui/ROADMAP.md), since that's what pulls them into
+existence.

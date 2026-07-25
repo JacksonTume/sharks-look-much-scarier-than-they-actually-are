@@ -1,0 +1,15 @@
+[package]
+name = "slmsttaa-ui"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "The immediate-mode UI toolkit for SLMSTTAA — zero dependencies, no GPU, no windowing."
+license = "MIT OR Apache-2.0"
+# Built for this project, not for crates.io. See README.md § Scope.
+publish = false
+
+# Deliberately empty, and the whole point of the crate: `slmsttaa-ui` is a leaf.
+# It never sees `wgpu`, `winit`, `glam`, or the engine — which is what turns
+# "the UI is decoupled from the renderer" from a convention into a compile
+# error. See README.md § Dependency direction before adding anything here.
+[dependencies]

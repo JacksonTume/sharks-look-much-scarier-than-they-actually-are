@@ -19,10 +19,10 @@ use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 use crate::camera::{Camera, CameraUniform};
-use crate::input::Input;
+use crate::input::{Input, MouseButton};
 use crate::time::Clock;
-use crate::ui::{Ui, UiState};
 use overlay::Overlay;
+use slmsttaa_ui::{Ui, UiInput, UiState};
 
 /// Format of the depth buffer used for depth testing.
 ///
@@ -501,8 +501,19 @@ impl Renderer {
     /// read [`Ui::changed`]. The widgets draw into the overlay (composited over
     /// the 3D scene by [`Renderer::render`]) and read this frame's [`Input`].
     /// The returned `Ui` borrows the renderer mutably, so drive the camera first.
+    ///
+    /// This is where the two halves meet. The toolkit lives in its own crate and
+    /// cannot see [`Input`] (that would be a dependency cycle — see
+    /// `slmsttaa-ui/README.md`), so the engine copies this frame's pointer state
+    /// into the toolkit's own [`UiInput`] snapshot. Three assignments, in
+    /// exchange for a UI crate that has no dependencies at all.
     pub fn ui(&mut self) -> Ui<'_> {
-        Ui::new(&mut self.overlay, &self.input, &mut self.ui_state)
+        let input = UiInput {
+            cursor: self.input.cursor_position(),
+            primary_held: self.input.is_mouse_held(MouseButton::Left),
+            primary_pressed: self.input.is_mouse_pressed(MouseButton::Left),
+        };
+        Ui::new(&mut self.overlay, input, &mut self.ui_state)
     }
 
     /// Advance the frame clock and reset per-frame overlay geometry.
