@@ -2,9 +2,8 @@
 //!
 //! Both fire on the press *edge* rather than the held state, so holding the
 //! mouse down doesn't retrigger every frame. True press-inside-release-inside
-//! semantics would use the `active` id [`Ui::interact`] now maintains; the
-//! button doesn't yet, because nothing has asked to cancel a click by dragging
-//! off it.
+//! semantics would use the `active` id [`Ui::interact`] maintains; the button
+//! doesn't yet, because nothing has asked to cancel a click by dragging off it.
 
 use crate::theme::*;
 use crate::{Rect, Response, Ui};
@@ -25,7 +24,10 @@ impl Ui<'_> {
         } else {
             COL_BTN
         };
-        self.painter.rect(face.x, face.y, face.w, face.h, bg);
+        self.painter.fill_rect(face, RADIUS, bg);
+        if response.focused {
+            self.painter.stroke_rect(face, RADIUS, RING, COL_RING);
+        }
 
         // Center the label within the button.
         let tw = self.painter.text_size(label, TEXT_PX)[0];
@@ -44,7 +46,7 @@ impl Ui<'_> {
         let id = self.next_id(label);
         let row = self.allocate([0.0, ROW_H]);
         let mut response = self.interact(row, id);
-        let box_sz = TEXT_PX;
+        let well = Rect::new(row.x, row.y, TEXT_PX, TEXT_PX);
 
         if response.clicked {
             *value = !*value;
@@ -52,24 +54,20 @@ impl Ui<'_> {
             self.changed = true;
         }
 
-        // The well, then a fill if checked.
-        self.painter.rect(row.x, row.y, box_sz, box_sz, COL_TRACK);
+        self.painter.fill_rect(well, RADIUS, COL_TRACK);
         if *value {
-            let inset = 3.0;
-            self.painter.rect(
-                row.x + inset,
-                row.y + inset,
-                box_sz - 2.0 * inset,
-                box_sz - 2.0 * inset,
-                if response.hovered {
-                    COL_ACCENT_HOT
-                } else {
-                    COL_ACCENT
-                },
-            );
+            let tick = if response.hovered {
+                COL_ACCENT_HOT
+            } else {
+                COL_ACCENT
+            };
+            self.painter.fill_rect(well.shrink(3.0), RADIUS - 1.0, tick);
+        }
+        if response.focused {
+            self.painter.stroke_rect(well, RADIUS, BORDER, COL_RING);
         }
         self.painter
-            .text(row.x + box_sz + 8.0, row.y, label, TEXT_PX, COL_TEXT);
+            .text(well.max_x() + 8.0, row.y, label, TEXT_PX, COL_TEXT);
 
         response
     }

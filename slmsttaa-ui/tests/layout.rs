@@ -5,7 +5,7 @@
 //! the public API only, which doubles as a check that the API is usable from
 //! outside the crate.
 
-use slmsttaa_ui::{DrawCmd, Layer, Painter, RecordingPainter, Ui, UiInput, UiState};
+use slmsttaa_ui::{DrawCmd, Layer, Painter, RecordingPainter, Rect, Ui, UiInput, UiState};
 
 /// The panel's fixed geometry, restated here rather than imported: a test that
 /// reads the same constant as the code can't catch it changing. Update
@@ -17,12 +17,13 @@ const PAD: f32 = 10.0;
 const ROW_H: f32 = 24.0;
 const CONTENT_X: f32 = PANEL_X + PAD;
 
-/// The recorded rectangles, as `(x, y, w, h)`, in call order.
-fn rects(p: &RecordingPainter) -> Vec<(f32, f32, f32, f32)> {
+/// The recorded *fills*, in call order. Strokes are skipped: they are outlines
+/// drawn over a fill of the same bounds, and would double every entry.
+fn rects(p: &RecordingPainter) -> Vec<Rect> {
     p.cmds
         .iter()
         .filter_map(|c| match *c {
-            DrawCmd::Rect { x, y, w, h, .. } => Some((x, y, w, h)),
+            DrawCmd::Rect { rect, border, .. } if border == 0.0 => Some(rect),
             _ => None,
         })
         .collect()
@@ -55,12 +56,20 @@ fn panel_background_paints_behind_widgets_despite_being_declared_last() {
     // ...but painted first, because Base flushes before Panel. This is the
     // whole reason layers exist.
     let ordered = painter.in_layer_order();
-    assert_eq!(ordered[0].layer(), Layer::Base);
     match ordered[0] {
-        DrawCmd::Rect { x, y, w, .. } => assert_eq!((*x, *y, *w), (PANEL_X, PANEL_Y, PANEL_W)),
+        DrawCmd::Rect { rect, radius, .. } => {
+            assert_eq!((rect.x, rect.y, rect.w), (PANEL_X, PANEL_Y, PANEL_W));
+            assert!(*radius > 0.0, "the panel has rounded corners");
+        }
         other => panic!("expected the panel background, got {other:?}"),
     }
-    assert!(ordered[1..].iter().all(|c| c.layer() == Layer::Panel));
+    // The panel is a fill plus a hairline border, both behind the widgets.
+    assert_eq!(ordered[1].layer(), Layer::Base);
+    assert!(
+        matches!(ordered[1], DrawCmd::Rect { border, .. } if *border > 0.0),
+        "expected the panel border"
+    );
+    assert!(ordered[2..].iter().all(|c| c.layer() == Layer::Panel));
 }
 
 #[test]
@@ -80,7 +89,7 @@ fn panel_height_fits_its_contents_on_the_very_first_frame() {
     let bg = painter.in_layer_order()[0];
     match bg {
         // Top pad, five rows, bottom pad.
-        DrawCmd::Rect { h, .. } => assert_eq!(*h, PAD + 5.0 * ROW_H + PAD),
+        DrawCmd::Rect { rect, .. } => assert_eq!(rect.h, PAD + 5.0 * ROW_H + PAD),
         other => panic!("expected the panel background, got {other:?}"),
     }
 }
@@ -118,8 +127,8 @@ fn slider_fill_tracks_the_value() {
 
     // Track, fill, knob (the background is recorded after them, at drop).
     let r = rects(&painter);
-    let track_w = r[0].2;
-    let fill_w = r[1].2;
+    let track_w = r[0].w;
+    let fill_w = r[1].w;
     assert_eq!(fill_w, track_w * 0.5);
 }
 
@@ -127,7 +136,7 @@ fn slider_fill_tracks_the_value() {
 /// the panel came out, and exactly what a viewer sees.
 fn panel_height(p: &RecordingPainter) -> f32 {
     match p.in_layer_order()[0] {
-        DrawCmd::Rect { h, .. } => *h,
+        DrawCmd::Rect { rect, .. } => rect.h,
         other => panic!("expected the panel background first, got {other:?}"),
     }
 }
@@ -156,6 +165,7 @@ fn collapsing_a_section_shrinks_the_panel_to_its_heading() {
         cursor: Some((CONTENT_X + 20.0, PANEL_Y + PAD + 8.0)),
         primary_held: true,
         primary_pressed: true,
+        ..Default::default()
     };
     frame(click, &mut painter, &mut state);
     let collapsed = panel_height(&painter);

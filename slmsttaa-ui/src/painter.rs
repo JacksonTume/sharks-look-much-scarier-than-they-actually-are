@@ -5,15 +5,16 @@
 //! `renderer::overlay::Overlay` turns them into vertices, while
 //! [`RecordingPainter`] just remembers them so tests can assert on layout.
 //!
-//! Widening this trait is how the toolkit gains new visual capabilities (rounded
-//! corners, clipping, borders). That is deliberate: because a `Painter` impl
-//! lives in the *other* crate, every new capability has to arrive as a
-//! considered widening of this trait rather than a reach into renderer
-//! internals.
+//! Widening this trait is how the toolkit gains new visual capabilities. That is
+//! deliberate: because a `Painter` impl lives in the *other* crate, every new
+//! capability has to arrive as a considered widening of this trait rather than a
+//! reach into renderer internals.
 //!
 //! Coordinates are **logical points**, not physical pixels. A painter that
 //! renders to a HiDPI surface scales them on the way out; the toolkit never
 //! learns the display's scale factor, so its layout math is resolution-agnostic.
+
+use crate::Rect;
 
 /// An RGBA color in `[0, 1]`, the only color type the UI speaks.
 pub type Color = [f32; 4];
@@ -57,12 +58,16 @@ impl Layer {
 
 /// A 2D drawing surface the UI paints onto, in logical points with the origin
 /// at the top-left (matching cursor coordinates).
-///
-/// Implementors only need to fill rectangles, stamp text, and keep four ordered
-/// buckets; anything that can do that can host this UI.
 pub trait Painter {
-    /// Fill an axis-aligned rectangle at `(x, y)` (top-left) of size `w`×`h`.
-    fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color);
+    /// Fill `rect`, with corners rounded by `radius` points (`0.0` is square).
+    ///
+    /// A radius at or above half the shorter side gives a capsule, which is how
+    /// slider tracks and knobs are drawn.
+    fn fill_rect(&mut self, rect: Rect, radius: f32, color: Color);
+
+    /// Stroke `rect`'s outline `width` points thick, drawn *inside* the
+    /// rectangle so a stroked and a filled rect of the same bounds line up.
+    fn stroke_rect(&mut self, rect: Rect, radius: f32, width: f32, color: Color);
 
     /// Draw a left-aligned, single-line text run with its top-left at `(x, y)`.
     /// `px` is the (square) cell size of each glyph in points.
@@ -76,25 +81,42 @@ pub trait Painter {
     /// Implementors must keep one accumulation bucket per [`Layer`] and emit
     /// them in [`Layer::ALL`] order, preserving call order within each bucket.
     fn set_layer(&mut self, layer: Layer);
+
+    /// Restrict subsequent drawing to `rect`, until the matching
+    /// [`Painter::pop_clip`].
+    ///
+    /// Clips **intersect** rather than replace, so pushing a region inside an
+    /// existing one can only ever shrink what is visible. This is what makes a
+    /// scroll area possible: its contents are laid out beyond its bounds and the
+    /// clip is what stops them painting over the rest of the screen.
+    fn push_clip(&mut self, rect: Rect);
+
+    /// Undo the innermost [`Painter::push_clip`].
+    fn pop_clip(&mut self);
+
+    /// Fill `rect` with square corners — the common case.
+    fn rect(&mut self, rect: Rect, color: Color) {
+        self.fill_rect(rect, 0.0, color);
+    }
 }
 
 /// A single primitive recorded by [`RecordingPainter`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum DrawCmd {
-    /// A filled rectangle: `(x, y, w, h)` plus its color.
+    /// A filled or stroked rectangle.
     Rect {
-        /// Top-left x, in logical points.
-        x: f32,
-        /// Top-left y, in logical points.
-        y: f32,
-        /// Width in logical points.
-        w: f32,
-        /// Height in logical points.
-        h: f32,
-        /// Fill color.
+        /// The bounds drawn.
+        rect: Rect,
+        /// Corner radius in points; `0.0` is square.
+        radius: f32,
+        /// Stroke width in points, or `0.0` for a solid fill.
+        border: f32,
+        /// The color.
         color: Color,
         /// The layer this was drawn into.
         layer: Layer,
+        /// The clip region in force, if any.
+        clip: Option<Rect>,
     },
     /// A single-line text run.
     Text {
@@ -110,6 +132,8 @@ pub enum DrawCmd {
         color: Color,
         /// The layer this was drawn into.
         layer: Layer,
+        /// The clip region in force, if any.
+        clip: Option<Rect>,
     },
 }
 
@@ -118,6 +142,13 @@ impl DrawCmd {
     pub fn layer(&self) -> Layer {
         match *self {
             DrawCmd::Rect { layer, .. } | DrawCmd::Text { layer, .. } => layer,
+        }
+    }
+
+    /// The clip region in force when this was drawn.
+    pub fn clip(&self) -> Option<Rect> {
+        match *self {
+            DrawCmd::Rect { clip, .. } | DrawCmd::Text { clip, .. } => clip,
         }
     }
 }
@@ -140,14 +171,17 @@ pub struct RecordingPainter {
     pub cmds: Vec<DrawCmd>,
     /// The layer subsequent primitives land in.
     layer: Layer,
+    /// The clip stack, each entry already intersected with the one below it.
+    clips: Vec<Rect>,
 }
 
 impl RecordingPainter {
-    /// Drop all recorded commands, e.g. between simulated frames. The current
-    /// layer is reset too, matching what a real painter does per frame.
+    /// Drop all recorded commands, e.g. between simulated frames. Layer and clip
+    /// state reset too, matching what a real painter does per frame.
     pub fn clear(&mut self) {
         self.cmds.clear();
         self.layer = Layer::default();
+        self.clips.clear();
     }
 
     /// The recorded commands as a real painter would emit them: sorted by layer,
@@ -178,17 +212,51 @@ impl RecordingPainter {
             })
             .collect()
     }
+
+    /// The text of runs that would actually be visible — those not entirely
+    /// outside their clip region. What a viewer would read.
+    pub fn visible_texts(&self) -> Vec<&str> {
+        self.cmds
+            .iter()
+            .filter_map(|c| match c {
+                DrawCmd::Text { text, x, y, px, .. } => {
+                    let bounds = Rect::new(*x, *y, text.chars().count() as f32 * px, *px);
+                    match c.clip() {
+                        Some(clip) if clip.intersect(bounds).is_empty() => None,
+                        _ => Some(text.as_str()),
+                    }
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The clip region currently in force.
+    fn clip(&self) -> Option<Rect> {
+        self.clips.last().copied()
+    }
 }
 
 impl Painter for RecordingPainter {
-    fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) {
+    fn fill_rect(&mut self, rect: Rect, radius: f32, color: Color) {
         self.cmds.push(DrawCmd::Rect {
-            x,
-            y,
-            w,
-            h,
+            rect,
+            radius,
+            border: 0.0,
             color,
             layer: self.layer,
+            clip: self.clip(),
+        });
+    }
+
+    fn stroke_rect(&mut self, rect: Rect, radius: f32, width: f32, color: Color) {
+        self.cmds.push(DrawCmd::Rect {
+            rect,
+            radius,
+            border: width,
+            color,
+            layer: self.layer,
+            clip: self.clip(),
         });
     }
 
@@ -200,6 +268,7 @@ impl Painter for RecordingPainter {
             px,
             color,
             layer: self.layer,
+            clip: self.clip(),
         });
     }
 
@@ -209,5 +278,17 @@ impl Painter for RecordingPainter {
 
     fn set_layer(&mut self, layer: Layer) {
         self.layer = layer;
+    }
+
+    fn push_clip(&mut self, rect: Rect) {
+        let clipped = match self.clip() {
+            Some(current) => current.intersect(rect),
+            None => rect,
+        };
+        self.clips.push(clipped);
+    }
+
+    fn pop_clip(&mut self) {
+        self.clips.pop();
     }
 }

@@ -37,6 +37,12 @@ pub struct UiInput {
     /// Whether the primary button went down *this frame* — a press edge, true
     /// for exactly one frame. Drives clicks.
     pub primary_pressed: bool,
+    /// Wheel movement this frame, in notches; positive is scrolling up.
+    ///
+    /// Only a scroll area reads it. A host that also uses the wheel for
+    /// something else (the terrain demo zooms its camera with it) decides who
+    /// wins by checking [`Ui::wants_pointer`](crate::Ui::wants_pointer).
+    pub scroll_delta: f32,
 }
 
 impl UiInput {
@@ -67,6 +73,9 @@ pub struct Response {
     pub held: bool,
     /// The primary button went down on it this frame.
     pub clicked: bool,
+    /// It holds focus — it was the last thing clicked. Widgets draw a focus ring
+    /// from this; keyboard input will route by it once there is any.
+    pub focused: bool,
     /// The widget edited its bound value this frame. Always `false` for widgets
     /// that don't bind one.
     pub changed: bool,
@@ -110,6 +119,8 @@ pub struct UiState {
     /// linear scan over them beats hashing, and it keeps this crate's state
     /// trivially `Debug`-able. Revisit if a consumer ever has hundreds.
     pub(crate) open: Vec<(u64, bool)>,
+    /// How far each scroll area is scrolled, in points from its top.
+    pub(crate) scroll: Vec<(u64, f32)>,
 }
 
 impl UiState {
@@ -127,6 +138,22 @@ impl UiState {
         match self.open.iter_mut().find(|(k, _)| *k == id) {
             Some((_, v)) => *v = !*v,
             None => self.open.push((id, !default)),
+        }
+    }
+
+    /// How far `id`'s scroll area is scrolled from its top.
+    pub(crate) fn scroll_offset(&self, id: u64) -> f32 {
+        self.scroll
+            .iter()
+            .find(|(k, _)| *k == id)
+            .map_or(0.0, |(_, v)| *v)
+    }
+
+    /// Set `id`'s scroll offset.
+    pub(crate) fn set_scroll_offset(&mut self, id: u64, offset: f32) {
+        match self.scroll.iter_mut().find(|(k, _)| *k == id) {
+            Some((_, v)) => *v = offset,
+            None => self.scroll.push((id, offset)),
         }
     }
 }

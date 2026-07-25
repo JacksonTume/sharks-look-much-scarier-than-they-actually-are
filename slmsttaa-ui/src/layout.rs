@@ -5,7 +5,7 @@
 //! it — allocate-from-available-rect, rows, columns, and alignment are UI Slice
 //! 3, pulled in when the terrain panel wants a button row.
 
-/// An axis-aligned rectangle in physical pixels, origin top-left.
+/// An axis-aligned rectangle in logical points, origin top-left.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
     /// Left edge.
@@ -38,6 +38,38 @@ impl Rect {
     pub fn contains(&self, (px, py): (f32, f32)) -> bool {
         px >= self.x && px <= self.max_x() && py >= self.y && py <= self.max_y()
     }
+
+    /// The overlap of two rectangles, or an empty rectangle if they don't touch.
+    ///
+    /// Nested clip regions intersect rather than replace, so a scroll area
+    /// inside a panel can never paint outside the panel.
+    pub fn intersect(&self, other: Rect) -> Rect {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let max_x = self.max_x().min(other.max_x());
+        let max_y = self.max_y().min(other.max_y());
+        Rect::new(x, y, (max_x - x).max(0.0), (max_y - y).max(0.0))
+    }
+
+    /// Whether the rectangle encloses no area, and so hides anything clipped to it.
+    pub fn is_empty(&self) -> bool {
+        self.w <= 0.0 || self.h <= 0.0
+    }
+
+    /// The same rectangle inset by `points` on every side.
+    pub fn shrink(&self, points: f32) -> Rect {
+        Rect::new(
+            self.x + points,
+            self.y + points,
+            (self.w - 2.0 * points).max(0.0),
+            (self.h - 2.0 * points).max(0.0),
+        )
+    }
+
+    /// The same rectangle moved by `(dx, dy)`.
+    pub fn translate(&self, dx: f32, dy: f32) -> Rect {
+        Rect::new(self.x + dx, self.y + dy, self.w, self.h)
+    }
 }
 
 /// The running placement cursor for one panel's top-to-bottom layout.
@@ -63,9 +95,18 @@ impl Layout {
         self.cursor_y
     }
 
-    /// Consume `dy` pixels of vertical space.
+    /// Consume `dy` points of vertical space.
     pub(crate) fn advance(&mut self, dy: f32) {
         self.cursor_y += dy;
+    }
+
+    /// Move the cursor to an absolute `y`, leaving the origin alone.
+    ///
+    /// A scroll area needs this: its contents are laid out from a shifted
+    /// position, but the *panel's* height still has to be measured from where
+    /// the panel actually started.
+    pub(crate) fn set_y(&mut self, y: f32) {
+        self.cursor_y = y;
     }
 
     /// How tall the panel has grown so far.

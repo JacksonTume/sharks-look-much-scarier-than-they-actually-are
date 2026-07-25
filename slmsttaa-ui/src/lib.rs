@@ -36,7 +36,7 @@
 //! needs private access, the seam is wrong and the seam gets fixed.
 //!
 //! ```
-//! use slmsttaa_ui::{theme, Response, Ui};
+//! use slmsttaa_ui::{theme, Rect, Response, Ui};
 //!
 //! /// A read-only bar. Nothing here is privileged.
 //! fn meter(ui: &mut Ui, label: &str, t: f32) -> Response {
@@ -45,8 +45,9 @@
 //!     let response = ui.interact(row, id);
 //!
 //!     let fill = if response.hovered { theme::COL_ACCENT_HOT } else { theme::COL_ACCENT };
-//!     ui.painter().rect(row.x, row.y, row.w, row.h, theme::COL_TRACK);
-//!     ui.painter().rect(row.x, row.y, row.w * t.clamp(0.0, 1.0), row.h, fill);
+//!     let filled = Rect::new(row.x, row.y, row.w * t.clamp(0.0, 1.0), row.h);
+//!     ui.painter().fill_rect(row, theme::RADIUS, theme::COL_TRACK);
+//!     ui.painter().fill_rect(filled, theme::RADIUS, fill);
 //!     response
 //! }
 //! ```
@@ -220,6 +221,7 @@ impl<'a> Ui<'a> {
             hovered,
             held: self.state.active == Some(id),
             clicked,
+            focused: self.state.focused == Some(id),
             changed: false,
             open: true,
         }
@@ -309,6 +311,110 @@ impl<'a> Ui<'a> {
     pub fn is_active(&self, id: u64) -> bool {
         self.state.active == Some(id)
     }
+
+    /// Declare widgets inside a scrollable, clipped region at most `max_height`
+    /// points tall.
+    ///
+    /// Contents are laid out in full and the region is clipped to its viewport,
+    /// so overflow is *hidden* rather than painted over the rest of the screen —
+    /// which is why this could not exist before the painter could clip. The
+    /// wheel scrolls it while the pointer is inside, and a slim indicator appears
+    /// on the right only when there is something to scroll to.
+    ///
+    /// Takes a closure rather than `begin`/`end` calls deliberately: an
+    /// unbalanced pair would desync the clip stack, and this makes that
+    /// unrepresentable.
+    ///
+    /// ```
+    /// # use slmsttaa_ui::{RecordingPainter, Ui, UiInput, UiState};
+    /// # let (mut p, mut s) = (RecordingPainter::default(), UiState::default());
+    /// # let mut ui = Ui::new(&mut p, UiInput::default(), &mut s);
+    /// # let mut value = 0.0_f32;
+    /// ui.scroll_area("params", 300.0, |ui| {
+    ///     for i in 0..40 {
+    ///         ui.slider(&format!("knob {i}"), &mut value, 0.0, 1.0);
+    ///     }
+    /// });
+    /// ```
+    pub fn scroll_area<R>(
+        &mut self,
+        label: &str,
+        max_height: f32,
+        add_contents: impl FnOnce(&mut Ui<'a>) -> R,
+    ) -> R {
+        let id = self.next_id(label);
+        let top = self.layout.y();
+
+        // Last frame's content height decides this frame's viewport and whether
+        // a scrollbar is needed. A scroll area that has never been laid out
+        // simply takes its full height on the first frame and settles on the
+        // second — invisible in practice, because nothing has scrolled yet.
+        let previous_content = self.state.scroll_offset(content_key(id)).max(0.0);
+        let viewport_h = if previous_content > 0.0 {
+            previous_content.min(max_height)
+        } else {
+            max_height
+        };
+        let viewport = Rect::new(theme::CONTENT_X, top, theme::CONTENT_W, viewport_h);
+
+        // Wheel input, applied before laying out so the contents land in their
+        // scrolled position this frame rather than next.
+        let max_offset = (previous_content - max_height).max(0.0);
+        let mut offset = self.state.scroll_offset(id).clamp(0.0, max_offset);
+        if max_offset > 0.0 && self.input.hits(viewport) {
+            offset =
+                (offset - self.input.scroll_delta * theme::SCROLL_SPEED).clamp(0.0, max_offset);
+        }
+        self.state.set_scroll_offset(id, offset);
+
+        // Lay the contents out shifted up by the offset, clipped to the viewport.
+        // Only the *cursor* moves — the layout's origin stays where the panel
+        // began, so the panel's overall height is still measured correctly.
+        self.painter.push_clip(viewport);
+        self.layout.set_y(top - offset);
+        let result = add_contents(self);
+        let content_h = self.layout.y() - (top - offset);
+        self.painter.pop_clip();
+
+        // Remember what the contents measured, and leave the cursor just below
+        // the viewport so whatever follows isn't overlapped.
+        self.state.set_scroll_offset(content_key(id), content_h);
+        self.layout.set_y(top + viewport_h.min(content_h));
+
+        if content_h > max_height {
+            self.draw_scrollbar(viewport, offset, content_h);
+        }
+        result
+    }
+
+    /// The slim overflow indicator drawn inside a scroll area's right edge.
+    fn draw_scrollbar(&mut self, viewport: Rect, offset: f32, content_h: f32) {
+        let visible = (viewport.h / content_h).clamp(0.0, 1.0);
+        let travel = (content_h - viewport.h).max(f32::EPSILON);
+        let thumb_h = (viewport.h * visible).max(theme::ROW_H);
+        let thumb_y = viewport.y + (viewport.h - thumb_h) * (offset / travel).clamp(0.0, 1.0);
+        let x = viewport.max_x() - theme::SCROLLBAR_W;
+
+        let radius = theme::SCROLLBAR_W * 0.5;
+        self.painter.fill_rect(
+            Rect::new(x, viewport.y, theme::SCROLLBAR_W, viewport.h),
+            radius,
+            theme::COL_TRACK,
+        );
+        self.painter.fill_rect(
+            Rect::new(x, thumb_y, theme::SCROLLBAR_W, thumb_h),
+            radius,
+            theme::COL_MUTED,
+        );
+    }
+}
+
+/// The key a scroll area's *content height* is remembered under.
+///
+/// It shares the scroll map with the offset rather than adding a second one; the
+/// offset by itself is meaningless without knowing how far there is to scroll.
+fn content_key(id: u64) -> u64 {
+    id ^ 0x9E37_79B9_7F4A_7C15
 }
 
 impl Drop for Ui<'_> {
@@ -319,7 +425,12 @@ impl Drop for Ui<'_> {
         // everything declared above it. This is the whole reason layers exist.
         self.painter.set_layer(Layer::Base);
         let bg = panel_rect(height);
-        self.painter.rect(bg.x, bg.y, bg.w, bg.h, theme::COL_PANEL);
+        self.painter
+            .fill_rect(bg, theme::RADIUS_LG, theme::COL_PANEL);
+        // A hairline border does the job a drop shadow would, for a fraction of
+        // the shader: over a bright patch of terrain the panel still has an edge.
+        self.painter
+            .stroke_rect(bg, theme::RADIUS_LG, theme::BORDER, theme::COL_BORDER);
         self.painter.set_layer(Layer::Panel);
 
         // Still recorded, but only so `wants_pointer` has an answer before this

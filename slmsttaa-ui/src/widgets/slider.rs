@@ -51,20 +51,30 @@ impl Ui<'_> {
             }
         }
 
-        // Track, filled portion, and knob.
+        // Track, filled portion, and knob — all capsules (a radius at half the
+        // shorter side rounds the ends off completely).
         let t = ((*value - min) / span).clamp(0.0, 1.0);
-        self.painter.rect(row.x, track_y, row.w, TRACK_H, COL_TRACK);
-        self.painter
-            .rect(row.x, track_y, row.w * t, TRACK_H, COL_ACCENT);
+        let track = Rect::new(row.x, track_y, row.w, TRACK_H);
+        let cap = TRACK_H * 0.5;
+        self.painter.fill_rect(track, cap, COL_TRACK);
+        self.painter.fill_rect(
+            Rect::new(row.x, track_y, row.w * t, TRACK_H),
+            cap,
+            COL_ACCENT,
+        );
 
         let knob_x = (row.x + row.w * t - KNOB_W * 0.5).clamp(row.x, row.max_x() - KNOB_W);
+        let knob = Rect::new(knob_x, track_y - 4.0, KNOB_W, TRACK_H + 8.0);
         let knob_col = if response.held || response.hovered {
             COL_ACCENT_HOT
         } else {
             COL_TEXT
         };
-        self.painter
-            .rect(knob_x, track_y - 4.0, KNOB_W, TRACK_H + 8.0, knob_col);
+        self.painter.fill_rect(knob, KNOB_W * 0.5, knob_col);
+        if response.focused {
+            self.painter
+                .stroke_rect(knob, KNOB_W * 0.5, BORDER, COL_RING);
+        }
 
         response
     }

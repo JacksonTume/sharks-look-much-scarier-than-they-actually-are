@@ -141,6 +141,7 @@ fn a_row_appearing_above_a_slider_mid_drag_does_not_break_the_drag() {
         cursor: Some((content_x, first_band_y)),
         primary_held: true,
         primary_pressed: true,
+        ..Default::default()
     };
     frame(press, false, &mut value);
     assert_eq!(value, 0.0, "the press snaps to the left end");
@@ -151,6 +152,7 @@ fn a_row_appearing_above_a_slider_mid_drag_does_not_break_the_drag() {
         cursor: Some((content_x + content_w, first_band_y)),
         primary_held: true,
         primary_pressed: false,
+        ..Default::default()
     };
     let response = frame(drag, true, &mut value);
 
@@ -184,6 +186,7 @@ fn a_section_stays_collapsed_when_a_row_is_added_above_it() {
                 cursor: Some((40.0, 12.0 + 10.0 + 24.0 + 8.0)),
                 primary_held: true,
                 primary_pressed: true,
+                ..Default::default()
             },
             s,
         );
@@ -231,6 +234,7 @@ fn two_sections_with_the_same_label_collapse_independently() {
         cursor: Some((40.0, 12.0 + 10.0 + 8.0)),
         primary_held: true,
         primary_pressed: true,
+        ..Default::default()
     };
     let (a, b) = frame(click, &mut painter, &mut state);
     assert!(!a, "the clicked section collapsed");

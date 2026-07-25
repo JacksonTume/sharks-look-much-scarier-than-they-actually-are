@@ -5,7 +5,7 @@
 //! are exactly what a consumer needs to hang a tooltip on one later.
 
 use crate::theme::*;
-use crate::{Response, Ui};
+use crate::{Rect, Response, Ui};
 
 impl Ui<'_> {
     /// A bold heading row, underlined with a short accent bar.
@@ -18,8 +18,11 @@ impl Ui<'_> {
         // A short accent rule under the title gives the panel a clear header
         // instead of a flat wall of text.
         let tw = self.painter.text_size(text, TITLE_PX)[0];
-        self.painter
-            .rect(row.x, row.y + TITLE_PX + 3.0, tw.max(40.0), 2.0, COL_ACCENT);
+        self.painter.fill_rect(
+            Rect::new(row.x, row.y + TITLE_PX + 3.0, tw.max(40.0), 2.0),
+            1.0,
+            COL_ACCENT,
+        );
 
         response
     }
@@ -86,7 +89,8 @@ impl Ui<'_> {
         let id = self.next_id("separator");
         let row = self.allocate([0.0, 12.0]);
         let response = self.interact(row, id);
-        self.painter.rect(row.x, row.y + 4.0, row.w, 1.0, COL_TRACK);
+        self.painter
+            .rect(Rect::new(row.x, row.y + 4.0, row.w, 1.0), COL_TRACK);
         response
     }
 

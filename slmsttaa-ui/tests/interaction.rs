@@ -27,6 +27,7 @@ fn clicking(x: f32, y: f32) -> UiInput {
         cursor: Some((x, y)),
         primary_held: true,
         primary_pressed: true,
+        ..Default::default()
     }
 }
 
@@ -36,6 +37,7 @@ fn dragging(x: f32, y: f32) -> UiInput {
         cursor: Some((x, y)),
         primary_held: true,
         primary_pressed: false,
+        ..Default::default()
     }
 }
 

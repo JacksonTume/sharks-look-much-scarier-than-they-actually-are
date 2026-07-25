@@ -46,6 +46,25 @@ pub const CONTENT_W: f32 = PANEL_W - 2.0 * PAD;
 /// The x every widget's content starts at.
 pub const CONTENT_X: f32 = PANEL_X + PAD;
 
+/// Width of the scroll indicator drawn beside an overflowing panel body.
+pub const SCROLLBAR_W: f32 = 4.0;
+/// How many points one wheel notch scrolls.
+pub const SCROLL_SPEED: f32 = 28.0;
+
+// --- Radii and strokes -----------------------------------------------------
+//
+// A two-step radius scale, which is all a panel of rows needs. The full scale
+// arrives with the `Theme` struct in UI Slice 4.
+
+/// Corner radius for panels and other large surfaces.
+pub const RADIUS_LG: f32 = 8.0;
+/// Corner radius for controls: buttons, checkbox wells, the scroll indicator.
+pub const RADIUS: f32 = 4.0;
+/// Standard hairline stroke width.
+pub const BORDER: f32 = 1.0;
+/// Focus ring thickness.
+pub const RING: f32 = 2.0;
+
 // --- Colors ----------------------------------------------------------------
 
 /// Panel background (translucent, so the 3D scene reads through).
@@ -66,3 +85,8 @@ pub const COL_TRACK: Color = [1.0, 1.0, 1.0, 0.14];
 pub const COL_BTN: Color = [0.18, 0.32, 0.55, 1.0];
 /// Button fill, hovered.
 pub const COL_BTN_HOT: Color = [0.26, 0.46, 0.78, 1.0];
+/// Panel border — a hairline that separates the panel from a busy 3D scene far
+/// more cheaply than a drop shadow would.
+pub const COL_BORDER: Color = [1.0, 1.0, 1.0, 0.10];
+/// Focus ring, drawn around the focused widget.
+pub const COL_RING: Color = [0.42, 0.72, 1.0, 0.85];

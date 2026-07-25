@@ -18,20 +18,49 @@
 use wgpu::util::DeviceExt;
 
 use super::font;
-use slmsttaa_ui::{Color, Layer, Painter};
+use slmsttaa_ui::{Color, Layer, Painter, Rect};
 
-/// A 2D overlay vertex: pixel position, atlas UV, and RGBA tint.
+/// A 2D overlay vertex: pixel position, atlas UV, RGBA tint, and the shape
+/// parameters the fragment shader needs for rounded corners, borders, and
+/// clipping.
+///
+/// The last three fields are per-vertex rather than per-draw on purpose: it is
+/// what lets a panel with rounded corners, a hairline border, and a clipped
+/// scroll region inside it all still be **one** draw call. The cost is 80 bytes
+/// a vertex, which for a few thousand UI vertices is nothing.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex2D {
     pos: [f32; 2],
     uv: [f32; 2],
     color: [f32; 4],
+    /// The shape being drawn: `[centre.x, centre.y, half.x, half.y]`, in pixels.
+    shape: [f32; 4],
+    /// `[radius, border width, mode, unused]`; mode 0 skips the SDF.
+    params: [f32; 4],
+    /// `[min.x, min.y, max.x, max.y]`, in pixels.
+    clip: [f32; 4],
 }
 
+/// Shader mode: a plain textured quad — text, and square-cornered rectangles.
+const MODE_PLAIN: f32 = 0.0;
+/// Shader mode: a filled rounded box, evaluated as an SDF.
+const MODE_FILL: f32 = 1.0;
+/// Shader mode: the outline of a rounded box.
+const MODE_STROKE: f32 = 2.0;
+
+/// A clip rectangle large enough to never clip anything.
+const NO_CLIP: [f32; 4] = [-1.0e9, -1.0e9, 1.0e9, 1.0e9];
+
+/// How far a rounded/stroked quad is inflated past its shape so the antialiased
+/// edge has room to fade out. One pixel each side is exactly the smoothstep band.
+const AA_PAD: f32 = 1.0;
+
 impl Vertex2D {
-    const ATTRS: [wgpu::VertexAttribute; 3] =
-        wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4];
+    const ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+        0 => Float32x2, 1 => Float32x2, 2 => Float32x4,
+        3 => Float32x4, 4 => Float32x4, 5 => Float32x4
+    ];
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
@@ -141,8 +170,11 @@ pub struct Overlay {
     indices: [Vec<u32>; Layer::COUNT],
     /// Concatenation of `indices` in layer order, rebuilt at flush time.
     flat_indices: Vec<u32>,
-    /// Which bucket [`Painter::rect`]/[`Painter::text`] currently fill.
+    /// Which bucket the painter methods currently fill.
     layer: usize,
+    /// The clip stack, in pixels, each entry already intersected with the one
+    /// below it. Empty means "no clipping".
+    clips: Vec<[f32; 4]>,
 
     /// Physical pixels per logical point. The UI lays out in points; this is
     /// where they become pixels, which is the only place the display's scale
@@ -340,6 +372,7 @@ impl Overlay {
             indices: Default::default(),
             flat_indices: Vec::new(),
             layer: Layer::default().index(),
+            clips: Vec::new(),
             scale: 1.0,
         }
     }
@@ -374,6 +407,12 @@ impl Overlay {
         }
         self.flat_indices.clear();
         self.layer = Layer::default().index();
+        self.clips.clear();
+    }
+
+    /// The clip rectangle currently in force, in pixels.
+    fn clip(&self) -> [f32; 4] {
+        self.clips.last().copied().unwrap_or(NO_CLIP)
     }
 
     /// Push one quad (two triangles) with a per-vertex UV rectangle.
@@ -381,12 +420,39 @@ impl Overlay {
     /// Takes logical points and emits physical pixels; the indices go into the
     /// current layer's bucket, which is what decides draw order at flush time.
     fn push_quad(&mut self, x: f32, y: f32, w: f32, h: f32, uv: [f32; 4], color: Color) {
-        let (x, y, w, h) = (
-            x * self.scale,
-            y * self.scale,
-            w * self.scale,
-            h * self.scale,
-        );
+        self.push_shape(x, y, w, h, uv, color, 0.0, 0.0, MODE_PLAIN);
+    }
+
+    /// Push one quad, carrying the shape parameters the fragment shader needs.
+    ///
+    /// For the SDF modes the emitted quad is inflated by [`AA_PAD`] beyond the
+    /// shape it describes, so the antialiased edge fades out inside the geometry
+    /// instead of being cut off by it.
+    #[allow(clippy::too_many_arguments)]
+    fn push_shape(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        uv: [f32; 4],
+        color: Color,
+        radius: f32,
+        border: f32,
+        mode: f32,
+    ) {
+        let s = self.scale;
+        let (sx, sy, sw, sh) = (x * s, y * s, w * s, h * s);
+
+        // The shape, in pixels — described independently of the quad drawn.
+        let shape = [sx + sw * 0.5, sy + sh * 0.5, sw * 0.5, sh * 0.5];
+        let params = [radius * s, border * s, mode, 0.0];
+        let clip = self.clip();
+
+        // Inflate the quad for the antialiasing band (plain quads need none).
+        let pad = if mode == MODE_PLAIN { 0.0 } else { AA_PAD };
+        let (x, y, w, h) = (sx - pad, sy - pad, sw + 2.0 * pad, sh + 2.0 * pad);
+
         let base = self.vertices.len() as u32;
         let [u0, v0, u1, v1] = uv;
         self.vertices.extend_from_slice(&[
@@ -394,21 +460,33 @@ impl Overlay {
                 pos: [x, y],
                 uv: [u0, v0],
                 color,
+                shape,
+                params,
+                clip,
             },
             Vertex2D {
                 pos: [x + w, y],
                 uv: [u1, v0],
                 color,
+                shape,
+                params,
+                clip,
             },
             Vertex2D {
                 pos: [x + w, y + h],
                 uv: [u1, v1],
                 color,
+                shape,
+                params,
+                clip,
             },
             Vertex2D {
                 pos: [x, y + h],
                 uv: [u0, v1],
                 color,
+                shape,
+                params,
+                clip,
             },
         ]);
         self.indices[self.layer].extend_from_slice(&[
@@ -497,9 +575,50 @@ impl Overlay {
 }
 
 impl Painter for Overlay {
-    fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) {
+    fn fill_rect(&mut self, rect: Rect, radius: f32, color: Color) {
         let uv = cell_center_uv(WHITE_CELL);
-        self.push_quad(x, y, w, h, [uv[0], uv[1], uv[0], uv[1]], color);
+        let uv = [uv[0], uv[1], uv[0], uv[1]];
+        // A zero radius keeps the old cheap path: no SDF, no inflated quad, and
+        // pixel-identical to what square rectangles drew before.
+        let mode = if radius > 0.0 { MODE_FILL } else { MODE_PLAIN };
+        self.push_shape(rect.x, rect.y, rect.w, rect.h, uv, color, radius, 0.0, mode);
+    }
+
+    fn stroke_rect(&mut self, rect: Rect, radius: f32, width: f32, color: Color) {
+        if width <= 0.0 {
+            return;
+        }
+        let uv = cell_center_uv(WHITE_CELL);
+        let uv = [uv[0], uv[1], uv[0], uv[1]];
+        self.push_shape(
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            uv,
+            color,
+            radius,
+            width,
+            MODE_STROKE,
+        );
+    }
+
+    fn push_clip(&mut self, rect: Rect) {
+        let s = self.scale;
+        let want = [rect.x * s, rect.y * s, rect.max_x() * s, rect.max_y() * s];
+        // Intersect with whatever is already in force, so nesting can only ever
+        // shrink the visible region.
+        let current = self.clip();
+        self.clips.push([
+            want[0].max(current[0]),
+            want[1].max(current[1]),
+            want[2].min(current[2]),
+            want[3].min(current[3]),
+        ]);
+    }
+
+    fn pop_clip(&mut self) {
+        self.clips.pop();
     }
 
     fn text(&mut self, x: f32, y: f32, text: &str, px: f32, color: Color) {

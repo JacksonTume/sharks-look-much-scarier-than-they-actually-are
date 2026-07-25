@@ -528,6 +528,9 @@ impl Renderer {
                 .map(|(x, y)| (x / scale, y / scale)),
             primary_held: self.input.is_mouse_held(MouseButton::Left),
             primary_pressed: self.input.is_mouse_pressed(MouseButton::Left),
+            // Scroll is shared with whatever else the consumer does with the
+            // wheel; `Ui::wants_pointer` is how it decides who gets it.
+            scroll_delta: self.input.scroll_delta(),
         };
         self.overlay.set_scale(scale);
         Ui::new(&mut self.overlay, input, &mut self.ui_state)
