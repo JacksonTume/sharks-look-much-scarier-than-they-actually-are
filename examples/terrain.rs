@@ -30,7 +30,7 @@
 //!   native — `cargo run --example terrain`
 //!   web    — `cargo xtask serve terrain`, then open the printed URL.
 
-use slmsttaa::ui::{theme, Response, Ui};
+use slmsttaa::ui::{theme, Rect, Response, Ui};
 use slmsttaa::{run, Application, Key, Mesh, MouseButton, RenderMode, Renderer, Vertex};
 
 #[path = "terrain/erosion.rs"]
@@ -65,7 +65,7 @@ fn log_slider(ui: &mut Ui, label: &str, value: &mut f32, min: f32, max: f32) -> 
         .text(row.x, row.y, &header, theme::TEXT_PX, theme::COL_TEXT);
 
     let track_y = row.y + theme::TEXT_PX + 5.0;
-    let band = slmsttaa::ui::Rect::new(row.x, track_y - 6.0, row.w, theme::TRACK_H + 12.0);
+    let band = Rect::new(row.x, track_y - 6.0, row.w, theme::TRACK_H + 12.0);
     let mut response = ui.interact(band, id);
 
     if response.held {
@@ -86,16 +86,25 @@ fn log_slider(ui: &mut Ui, label: &str, value: &mut f32, min: f32, max: f32) -> 
     } else {
         theme::COL_TEXT
     };
-    let painter = ui.painter();
-    painter.rect(row.x, track_y, row.w, theme::TRACK_H, theme::COL_TRACK);
-    painter.rect(row.x, track_y, row.w * t, theme::TRACK_H, theme::COL_ACCENT);
+    // Capsule track and knob, matching the built-in slider — which the demo can
+    // do because `theme` and the rounded-rect painter are both public.
+    let cap = theme::TRACK_H * 0.5;
     let knob_x =
         (row.x + row.w * t - theme::KNOB_W * 0.5).clamp(row.x, row.max_x() - theme::KNOB_W);
-    painter.rect(
-        knob_x,
-        track_y - 4.0,
-        theme::KNOB_W,
-        theme::TRACK_H + 8.0,
+    let painter = ui.painter();
+    painter.fill_rect(
+        Rect::new(row.x, track_y, row.w, theme::TRACK_H),
+        cap,
+        theme::COL_TRACK,
+    );
+    painter.fill_rect(
+        Rect::new(row.x, track_y, row.w * t, theme::TRACK_H),
+        cap,
+        theme::COL_ACCENT,
+    );
+    painter.fill_rect(
+        Rect::new(knob_x, track_y - 4.0, theme::KNOB_W, theme::TRACK_H + 8.0),
+        theme::KNOB_W * 0.5,
         knob_col,
     );
 
@@ -106,6 +115,13 @@ fn log_slider(ui: &mut Ui, label: &str, value: &mut f32, min: f32, max: f32) -> 
 const HALF: f32 = 2.5;
 /// Vertical scale: normalized `[0, 1]` heights map into `[0, VHEIGHT]` world units.
 const VHEIGHT: f32 = 1.3;
+/// How tall the panel's scrolling body is allowed to get, in UI points.
+///
+/// A constant rather than "whatever fits the window": the toolkit can't anchor a
+/// panel to a window edge yet (UI Slice 3), so the demo picks a budget that
+/// leaves the 3D view usable at the default 1280x720.
+const PANEL_SCROLL_MAX: f32 = 420.0;
+
 /// Grid resolution bounds (cells per side); snapped to a multiple of 8.
 const RES_MIN: f32 = 32.0;
 const RES_MAX: f32 = 256.0;
@@ -278,74 +294,79 @@ impl TerrainDemo {
         ui.checkbox("wireframe", &mut self.wireframe);
         ui.separator();
 
-        // Sections collapse (click a heading), which is what keeps the panel on
-        // screen now that there are enough knobs to run off the bottom of it.
-        // --- Layer 1: the Perlin base shape ---
-        let mut base = false;
-        if ui.section("Base shape (Perlin)").open {
-            base |= ui
-                .slider_fmt("frequency", &mut self.params.frequency, 0.5, 8.0, 2)
-                .changed;
-            let mut octaves = self.params.octaves as f32;
-            if ui.slider_fmt("octaves", &mut octaves, 1.0, 8.0, 0).changed {
-                self.params.octaves = octaves.round() as u32;
-                base = true;
-            }
-            base |= ui
-                .slider_fmt("lacunarity", &mut self.params.lacunarity, 1.5, 3.0, 2)
-                .changed;
-            base |= ui
-                .slider_fmt("persistence", &mut self.params.persistence, 0.2, 0.8, 2)
-                .changed;
-            base |= ui
-                .slider_fmt("ridge (peaks)", &mut self.params.ridge, 0.5, 3.0, 2)
-                .changed;
-        }
-        ui.separator();
-
-        // --- Layer 2: erosion ---
-        let mut erode = false;
-        if ui.section("Fluvial erosion (rivers)").open {
-            let mut iters = self.erosion.iterations as f32;
-            if ui.slider_fmt("passes", &mut iters, 0.0, 120.0, 0).changed {
-                self.erosion.iterations = iters.round() as u32;
-                erode = true;
-            }
-            // The demo's own widget: erodibility is only tunable on a log track.
-            erode |= log_slider(
-                &mut ui,
-                "erodibility",
-                &mut self.erosion.erodibility,
-                1.0e-5,
-                6.0e-3,
-            )
-            .changed;
-            erode |= ui
-                .slider_fmt("area exponent m", &mut self.erosion.m, 0.2, 1.0, 2)
-                .changed;
-        }
-
-        if ui.section("Thermal erosion").open {
-            erode |= ui
-                .checkbox("enable talus", &mut self.erosion.thermal)
-                .changed;
-            if self.erosion.thermal {
-                erode |= ui
-                    .slider_fmt("  talus (slope)", &mut self.erosion.talus, 0.3, 4.0, 2)
+        // Everything below the header scrolls. Sections collapse too (click a
+        // heading) — between them the panel stays on screen however many knobs
+        // it grows.
+        let (mut base, erode, new_seed) = ui.scroll_area("params", PANEL_SCROLL_MAX, |ui| {
+            // --- Layer 1: the Perlin base shape ---
+            let mut base = false;
+            if ui.section("Base shape (Perlin)").open {
+                base |= ui
+                    .slider_fmt("frequency", &mut self.params.frequency, 0.5, 8.0, 2)
                     .changed;
-                erode |= ui
-                    .slider_fmt("  rate", &mut self.erosion.thermal_rate, 0.0, 0.5, 2)
+                let mut octaves = self.params.octaves as f32;
+                if ui.slider_fmt("octaves", &mut octaves, 1.0, 8.0, 0).changed {
+                    self.params.octaves = octaves.round() as u32;
+                    base = true;
+                }
+                base |= ui
+                    .slider_fmt("lacunarity", &mut self.params.lacunarity, 1.5, 3.0, 2)
+                    .changed;
+                base |= ui
+                    .slider_fmt("persistence", &mut self.params.persistence, 0.2, 0.8, 2)
+                    .changed;
+                base |= ui
+                    .slider_fmt("ridge (peaks)", &mut self.params.ridge, 0.5, 3.0, 2)
                     .changed;
             }
-        }
-        ui.separator();
+            ui.separator();
 
-        // --- Grid ---
-        let mut new_seed = false;
-        if ui.section("Grid").open {
-            ui.slider_fmt("resolution", &mut self.res, RES_MIN, RES_MAX, 0);
-            new_seed = ui.button("new seed").clicked;
-        }
+            // --- Layer 2: erosion ---
+            let mut erode = false;
+            if ui.section("Fluvial erosion (rivers)").open {
+                let mut iters = self.erosion.iterations as f32;
+                if ui.slider_fmt("passes", &mut iters, 0.0, 120.0, 0).changed {
+                    self.erosion.iterations = iters.round() as u32;
+                    erode = true;
+                }
+                // The demo's own widget: erodibility is only tunable on a log track.
+                erode |= log_slider(
+                    ui,
+                    "erodibility",
+                    &mut self.erosion.erodibility,
+                    1.0e-5,
+                    6.0e-3,
+                )
+                .changed;
+                erode |= ui
+                    .slider_fmt("area exponent m", &mut self.erosion.m, 0.2, 1.0, 2)
+                    .changed;
+            }
+
+            if ui.section("Thermal erosion").open {
+                erode |= ui
+                    .checkbox("enable talus", &mut self.erosion.thermal)
+                    .changed;
+                if self.erosion.thermal {
+                    erode |= ui
+                        .slider_fmt("  talus (slope)", &mut self.erosion.talus, 0.3, 4.0, 2)
+                        .changed;
+                    erode |= ui
+                        .slider_fmt("  rate", &mut self.erosion.thermal_rate, 0.0, 0.5, 2)
+                        .changed;
+                }
+            }
+            ui.separator();
+
+            // --- Grid ---
+            let mut new_seed = false;
+            if ui.section("Grid").open {
+                ui.slider_fmt("resolution", &mut self.res, RES_MIN, RES_MAX, 0);
+                new_seed = ui.button("new seed").clicked;
+            }
+
+            (base, erode, new_seed)
+        });
 
         let wants_pointer = ui.wants_pointer();
         drop(ui);
