@@ -11,12 +11,21 @@ but up close it's mostly friendly little triangles.
 
 ## Status
 
-Early scaffold, but live on both targets: a consumer implements the
-`Application` trait and calls `run(app)`; the engine owns the window, GPU, and
-event loop and calls into it. The `triangle` example renders a
-camera-transformed, vertex-colored triangle natively **and** in the browser. The
-structure is laid out so the scary parts (meshes, materials, a render graph) have
-obvious homes to grow into.
+Live on both targets, and past the point of proving itself. A consumer implements
+the `Application` trait and calls `run(app)`; the engine owns the window, GPU, and
+event loop and calls into it. It draws indexed meshes with a depth buffer and
+back-face culling, in solid or **wireframe** mode; the camera is driven by the
+consumer through a `winit`-free input layer; and a second, screen-space pass
+provides text and an immediate-mode **UI** (sliders, buttons, checkboxes) that
+renders identically on native and web.
+
+The capstone is `examples/terrain`: a fractal Perlin heightmap carved by live
+hydro-thermal **stream-power erosion**, every layer tunable from an on-screen
+panel. The whole algorithm lives in the demo — `wgpu` and `winit` appear nowhere
+in it, which is the point.
+
+Still to grow into: materials, multiple meshes with transforms, a real lighting
+model, and a render graph — each waiting for a demo that actually demands it.
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for how the pieces fit together and the
 cross-platform gotchas that shaped them.
