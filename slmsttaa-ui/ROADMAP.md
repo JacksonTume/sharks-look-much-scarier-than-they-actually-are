@@ -123,12 +123,10 @@ used to have spent most of its length on indistinguishable values.
 
 **What shipped, and what it cost:**
 
-- **Ids** are `hash(enclosing scope, index in that scope, label)`, with
-  `push_id`/`pop_id` for explicit scoping. Sections are the exception: their id
-  comes from `stable_id` (label + scope, *no* index), because a section's
-  collapsed state is keyed by its id and an order-dependent id would make it
-  silently re-expand the moment a row was added above it. The trade is that two
-  same-labelled sections in one scope share state, which `push_id` separates.
+- **Ids** are `hash(enclosing scope, label)`, with `push_id`/`pop_id` for
+  explicit scoping. Pointedly **not** keyed by declaration order — see *The bug
+  that rewrote this* below, which is how that was settled. Two widgets sharing a
+  label in one scope are re-hashed apart; `push_id` is the durable fix.
 - **`Response { id, rect, hovered, held, clicked, changed, open }`** is returned
   by every widget, labels included — a label's rectangle is how a consumer will
   hang a tooltip on one. `open` is only ever `false` for a section.
@@ -143,10 +141,29 @@ used to have spent most of its length on indistinguishable values.
   never learns the scale factor, which is why `theme`'s numbers still mean one
   thing on every display.
 - **The seam went public** as `allocate` / `interact` / `painter` / `next_id` /
-  `stable_id` / `input` / `mark_changed` — *and `theme` with it*. That last one
+  `input` / `mark_changed` — *and `theme` with it*. That last one
   was not in the plan: a consumer's widget cannot look like a built-in one while
   the metrics and colors are private, so the unprivileged rule forced the
   constants public. Slice 4 replaces them with a `Theme` of semantic tokens.
+
+**The bug that rewrote this.** Ids originally mixed in a per-scope *sequence
+number*, so a widget's identity depended on how many widgets were declared above
+it. Every test passed. Then the demo was driven by hand and the sliders wouldn't
+slide: clicking snapped the value, dragging did nothing.
+
+The cause is worth recording, because it will look tempting again. The terrain
+panel shows a `"release to rebuild..."` row only while a rebuild is pending — and
+pending becomes true the instant a slider *first moves*. So the row appears
+between the press frame and the next one, every widget below it renumbers, the
+dragged slider's `active` claim stops matching anything, and the drag dies after
+exactly one frame. A conditional row is an entirely ordinary thing to write; any
+order-keyed id scheme is broken by it.
+
+So ids are keyed on the label and scope alone. The lesson is not about hashing:
+**every test passed because every test declared a fixed set of widgets.** The
+demo is the only place a conditional row existed, which is precisely the case
+root principle 2 exists to catch — the toolkit's blind spots are the ones the
+driving demo is shaped to find, and only running it finds them.
 
 **Deliberately not shipped: the scroll region.** It was in this slice's proof,
 and it is moved to Slice 2 rather than quietly dropped. Scrolling without

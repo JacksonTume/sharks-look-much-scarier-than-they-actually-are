@@ -15,8 +15,9 @@ done. The toolkit is a zero-dependency crate the engine re-exports as
 `slmsttaa::ui`, and it now has the machinery that separates a toolkit from a
 pile of sliders:
 
-- **Ids** — `hash(scope, index, label)`, with `push_id`/`pop_id`, plus
-  `stable_id` for state that must survive layout edits.
+- **Ids** — `hash(scope, label)`, with `push_id`/`pop_id`. Never keyed by
+  declaration order, so a row appearing above a widget can't steal its identity
+  mid-drag.
 - **Interaction** — `hot` / `active` / `focused`, and a `Response` from every
   widget.
 - **Draw layers** — base / panel / popup / tooltip, flushed in order, still one

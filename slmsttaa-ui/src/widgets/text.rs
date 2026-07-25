@@ -41,12 +41,11 @@ impl Ui<'_> {
     /// is keyed by the heading's id and lives in [`UiState`](crate::UiState), so
     /// it survives the frame.
     ///
-    /// That id comes from [`Ui::stable_id`] rather than [`Ui::next_id`]: keyed
-    /// by declaration order, a section would forget it was collapsed the moment
-    /// a row was added above it. Two sections sharing a label in one scope
-    /// therefore share their state — [`Ui::push_id`] separates them.
+    /// Because ids are keyed by label rather than by declaration order, a
+    /// section keeps its collapsed state when rows appear above it. Two sections
+    /// sharing a label in one scope are separated with [`Ui::push_id`].
     pub fn section(&mut self, text: &str) -> Response {
-        let id = self.stable_id(text);
+        let id = self.next_id(text);
         let row = self.allocate([0.0, 2.0 + SECTION_PX + 6.0]);
         let mut response = self.interact(row, id);
 

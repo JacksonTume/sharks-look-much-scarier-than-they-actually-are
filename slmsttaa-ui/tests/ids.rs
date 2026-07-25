@@ -110,11 +110,59 @@ fn pop_id_never_unbalances_the_root_scope() {
 }
 
 #[test]
+fn a_row_appearing_above_a_slider_mid_drag_does_not_break_the_drag() {
+    // The bug this pins was found by hand, not by these tests, and it is the
+    // most damaging kind: the terrain panel shows a "release to rebuild..." row
+    // only while a rebuild is pending — which becomes true the instant a slider
+    // is first moved. So a row appears above every slider *between the press
+    // frame and the next one*. With ids keyed by declaration order, that
+    // renumbered the slider, `active` stopped matching it, and the drag died
+    // after exactly one frame: clicking snapped the value, dragging did nothing.
+    let mut painter = RecordingPainter::default();
+    let mut state = UiState::default();
+    let mut value = 0.0_f32;
+
+    // Panel geometry: the first row starts one pad below the panel's top, and a
+    // slider's grab band sits under its header line.
+    let first_band_y = 12.0 + 10.0 + 16.0 + 5.0 + 2.0;
+    let (content_x, content_w) = (22.0, 320.0);
+
+    let mut frame = |input: UiInput, show_status: bool, v: &mut f32| {
+        painter.clear();
+        let mut ui = Ui::new(&mut painter, input, &mut state);
+        if show_status {
+            ui.label("release to rebuild...");
+        }
+        ui.slider("erodibility", v, 0.0, 100.0)
+    };
+
+    // Frame 1: press at the far left of the track. No status row yet.
+    let press = UiInput {
+        cursor: Some((content_x, first_band_y)),
+        primary_held: true,
+        primary_pressed: true,
+    };
+    frame(press, false, &mut value);
+    assert_eq!(value, 0.0, "the press snaps to the left end");
+
+    // Frame 2: still held, cursor dragged right — and now the status row exists,
+    // so the slider has shifted a row down the panel.
+    let drag = UiInput {
+        cursor: Some((content_x + content_w, first_band_y)),
+        primary_held: true,
+        primary_pressed: false,
+    };
+    let response = frame(drag, true, &mut value);
+
+    assert!(response.held, "the slider must still own the pointer");
+    assert_eq!(value, 100.0, "and must still track the cursor");
+}
+
+#[test]
 fn a_section_stays_collapsed_when_a_row_is_added_above_it() {
-    // The reason `stable_id` exists. A section's collapsed state is keyed by its
-    // id, so an order-dependent id would mean that adding one row anywhere above
-    // it silently re-expands it — a bug that would look like the panel randomly
-    // forgetting itself.
+    // A section's collapsed state is keyed by its id, so an order-dependent id
+    // would mean that adding one row anywhere above it silently re-expands it —
+    // a bug that would look like the panel randomly forgetting itself.
     let mut painter = RecordingPainter::default();
     let mut state = UiState::default();
 

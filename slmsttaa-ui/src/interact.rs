@@ -133,14 +133,24 @@ impl UiState {
 
 /// Hash a label into a stable id, scoped by its parent.
 ///
-/// FNV-1a over the label, mixed with the enclosing scope's id and the widget's
-/// index within that scope. Scoping by parent is what makes ids stable under
-/// edits: adding a widget inside one section no longer renumbers the widgets in
-/// every section after it, which a flat counter did.
-pub(crate) fn hash_id(parent: u64, seq: u64, label: &str) -> u64 {
+/// FNV-1a over the label, mixed with the enclosing scope's id — and pointedly
+/// **not** with the widget's position in the panel.
+///
+/// That last part is the whole design, and it was learned the hard way. Ids
+/// originally mixed in a per-scope sequence number, which meant a widget's
+/// identity depended on how many widgets were declared before it. Any
+/// conditional row — `if pending { ui.label("rebuilding…") }`, which is an
+/// entirely ordinary thing to write — renumbered everything below it the frame
+/// it appeared, and a slider being dragged at that moment lost its `active`
+/// claim and stopped following the cursor.
+///
+/// Keying on the label instead means a widget keeps its identity no matter what
+/// appears above it. The cost is that two widgets sharing a label in one scope
+/// would collide, which [`Ui::next_id`](crate::Ui::next_id) resolves by
+/// re-hashing duplicates.
+pub(crate) fn hash_id(parent: u64, label: &str) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     h = mix(h, parent);
-    h = mix(h, seq);
     for b in label.bytes() {
         h ^= b as u64;
         h = h.wrapping_mul(0x100000001b3);

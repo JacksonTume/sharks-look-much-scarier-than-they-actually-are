@@ -89,14 +89,14 @@ pub use painter::{Color, DrawCmd, Layer, Painter, RecordingPainter};
 
 use layout::Layout;
 
-/// One scope on the id stack: what it is, and how many widgets it has seen.
+/// One scope on the id stack: what it is, and which ids it has handed out.
 ///
-/// Ids are `hash(parent scope, index in that scope, label)`, which is why the
-/// per-scope counter lives here rather than on [`Ui`] — a widget's id depends on
-/// its position *within its section*, not within the whole panel.
+/// Ids are `hash(scope, label)` — no position, so a widget survives rows
+/// appearing above it. `used` exists only to catch the resulting collision when
+/// one scope declares the same label twice.
 struct Scope {
     id: u64,
-    seq: u64,
+    used: Vec<u64>,
 }
 
 /// One frame of the immediate-mode UI: a single left-anchored panel.
@@ -135,7 +135,10 @@ impl<'a> Ui<'a> {
             input,
             state,
             layout: Layout::new(theme::PANEL_Y, theme::PAD),
-            scopes: vec![Scope { id: 0, seq: 0 }],
+            scopes: vec![Scope {
+                id: 0,
+                used: Vec::new(),
+            }],
             changed: false,
         }
     }
@@ -228,14 +231,29 @@ impl<'a> Ui<'a> {
         self.painter
     }
 
-    /// The next unused widget id for `label`, scoped to the enclosing section.
+    /// The id for `label` in the enclosing scope.
     ///
-    /// Call this **once** per widget, before laying it out — it advances the
-    /// scope's counter, so calling it twice gives two different ids.
+    /// The id depends on the label and the scope, **not** on where the widget
+    /// sits in the panel — so a row appearing above it (a status line, an
+    /// expanding section) doesn't change its identity, and an in-progress drag
+    /// survives. That is not a nicety: order-keyed ids broke slider dragging
+    /// outright, because the terrain panel grows a status row the instant a
+    /// slider moves.
+    ///
+    /// Call it **once** per widget. Declaring the same label twice in one scope
+    /// would otherwise collide, so the duplicate is re-hashed into a distinct id
+    /// — which keeps them independent, but means the *second* one's identity
+    /// depends on the first still being there. Wrap repeated widgets in
+    /// [`Ui::push_id`] when their state has to be durable.
     pub fn next_id(&mut self, label: &str) -> u64 {
         let scope = self.scopes.last_mut().expect("root scope is never popped");
-        let id = interact::hash_id(scope.id, scope.seq, label);
-        scope.seq += 1;
+        let mut id = interact::hash_id(scope.id, label);
+        // Deterministic re-hash chain, so the Nth duplicate is always the same
+        // id for the same N.
+        while scope.used.contains(&id) {
+            id = interact::hash_id(id, "\u{1}dup");
+        }
+        scope.used.push(id);
         id
     }
 
@@ -247,7 +265,10 @@ impl<'a> Ui<'a> {
     /// one iteration's widgets from the next's.
     pub fn push_id(&mut self, label: &str) {
         let id = self.next_id(label);
-        self.scopes.push(Scope { id, seq: 0 });
+        self.scopes.push(Scope {
+            id,
+            used: Vec::new(),
+        });
     }
 
     /// Close the scope opened by [`Ui::push_id`].
@@ -287,21 +308,6 @@ impl<'a> Ui<'a> {
     /// Whether this widget is currently capturing the pointer.
     pub fn is_active(&self, id: u64) -> bool {
         self.state.active == Some(id)
-    }
-
-    /// An id derived from `label` and the enclosing scope **only** — not from
-    /// declaration order, and it doesn't advance the scope's counter.
-    ///
-    /// Use this for a widget whose state has to outlive layout edits.
-    /// [`Ui::section`] does: a section's collapsed state is keyed by its id, and
-    /// with an order-dependent id, adding one row above a section would make it
-    /// forget it was collapsed. The cost is that two same-labelled widgets in
-    /// one scope share an id — wrap them in [`Ui::push_id`] to separate them.
-    pub fn stable_id(&self, label: &str) -> u64 {
-        let scope = self.scopes.last().expect("root scope is never popped");
-        // A sentinel in the sequence slot keeps these from ever colliding with
-        // an ordinary `next_id`, whose counter starts at 0 and counts up.
-        interact::hash_id(scope.id, u64::MAX, label)
     }
 }
 
