@@ -5,7 +5,7 @@
 //! squints at a screenshot. Everything goes through the public API against a
 //! [`RecordingPainter`].
 
-use slmsttaa_ui::{Anchor, DrawCmd, Painter, RecordingPainter, Rect, Ui, UiInput, UiState};
+use slmsttaa_ui::{font, Anchor, DrawCmd, RecordingPainter, Rect, Theme, Ui, UiInput, UiState};
 
 /// Restated rather than imported, as elsewhere in this suite.
 const MARGIN: f32 = 12.0;
@@ -14,7 +14,16 @@ const PAD: f32 = 10.0;
 const GAP: f32 = 8.0;
 const INDENT: f32 = 16.0;
 const ROW_H: f32 = 24.0;
-const TEXT_PX: f32 = 16.0;
+/// The body step's em size. Not a text *height* — see `font::line_height`.
+const TEXT_PX: f32 = 19.0;
+
+/// Width of a body-text run, measured through the one function that measures
+/// text. Before Slice 5 this was `painter.text_size`, and the painter having its
+/// own metrics is precisely what could have made these assertions pass while the
+/// screen disagreed.
+fn width(text: &str) -> f32 {
+    font::text_width(text, TEXT_PX, Theme::dark().text.body.weight)
+}
 const CONTENT_X: f32 = MARGIN + PAD;
 const CONTENT_W: f32 = PANEL_W - 2.0 * PAD;
 
@@ -122,7 +131,7 @@ fn label_value_puts_the_value_on_the_right_edge() {
     // never push it out of the panel — which is what the one-string
     // `"label: value"` row did until it got cut mid-glyph by the clip rect.
     assert_eq!(runs[1].2, "0.50");
-    let value_w = painter.text_size("0.50", TEXT_PX)[0];
+    let value_w = width("0.50");
     assert_eq!(runs[1].0 + value_w, CONTENT_X + CONTENT_W);
     // Same row, not stacked.
     assert_eq!(runs[0].1, runs[1].1);
@@ -242,8 +251,8 @@ fn a_compact_slider_fits_its_track_between_the_label_and_the_value() {
         })
     };
 
-    let label_w = painter.text_size("m", TEXT_PX)[0];
-    let value_w = painter.text_size("0.50", TEXT_PX)[0];
+    let label_w = width("m");
+    let value_w = width("0.50");
     assert_eq!(track.x, CONTENT_X + label_w + GAP);
     assert_eq!(track.max_x(), CONTENT_X + CONTENT_W - value_w - GAP);
     // One row tall, where the stacked layout is two.

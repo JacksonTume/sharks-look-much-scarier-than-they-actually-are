@@ -6,7 +6,7 @@
 //! *an id depends on a widget's position within its section, not within the
 //! whole panel*.
 
-use slmsttaa_ui::{Anchor, RecordingPainter, Ui, UiInput, UiState};
+use slmsttaa_ui::{font, Anchor, RecordingPainter, Ui, UiInput, UiState};
 
 /// The default panel width, restated as elsewhere in this suite.
 const PANEL_W: f32 = 340.0;
@@ -126,8 +126,9 @@ fn a_row_appearing_above_a_slider_mid_drag_does_not_break_the_drag() {
     let mut value = 0.0_f32;
 
     // Panel geometry: the first row starts one pad below the panel's top, and a
-    // slider's grab band sits under its header line.
-    let first_band_y = 12.0 + 10.0 + 16.0 + 5.0 + 2.0;
+    // slider's grab band sits under its header line — one *line box* down, which
+    // is no longer the same as one em since the font became a real one.
+    let first_band_y = 12.0 + 10.0 + font::line_height(19.0) + 2.0;
     let (content_x, content_w) = (22.0, 320.0);
 
     let mut frame = |input: UiInput, show_status: bool, v: &mut f32| {

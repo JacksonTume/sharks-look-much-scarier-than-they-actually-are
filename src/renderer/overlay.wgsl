@@ -1,14 +1,23 @@
 // Overlay shader: draws 2D screen-space quads (UI rectangles and text glyphs)
 // composited on top of the 3D scene. Positions arrive in physical pixels with
-// the origin at the top-left; we map them to clip space here. The glyph atlas is
-// single-channel coverage (R8): solid rectangles point at a fully-white texel, so
-// one pipeline serves both rects and text.
+// the origin at the top-left; we map them to clip space here.
 //
-// Rounded corners, borders, and clipping are all evaluated per-fragment from
-// per-vertex parameters, which is what keeps the whole UI a single draw call —
-// no scissor-rect state changes, no pipeline switches. Everything here sticks to
-// GLSL ES 3.0-compatible constructs so the WebGL2 fallback behaves identically
-// to WebGPU: no derivatives, no storage buffers.
+// The glyph atlas is a single-channel (R8) **signed distance field**: 0.5 is the
+// glyph edge and larger is further inside, so one bake serves every size in the
+// type scale. Rectangles don't sample it at all — they take their coverage from
+// the mode instead, which is why the old opaque-white-texel trick is gone.
+//
+// Rounded corners, borders, glyph antialiasing, and clipping are all evaluated
+// per-fragment from per-vertex parameters, which is what keeps the whole UI a
+// single draw call — no scissor-rect state changes, no pipeline switches.
+// Everything here sticks to GLSL ES 3.0-compatible constructs so the WebGL2
+// fallback behaves identically to WebGPU: no derivatives, no storage buffers.
+//
+// That "no derivatives" rule is why text carries its antialiasing width as a
+// vertex attribute. The usual SDF trick is `fwidth(distance)` to recover how fast
+// the field changes per pixel; here the CPU computes it from the render size and
+// the display scale (`slmsttaa_ui::font::aa_band`), which is both portable and
+// exact rather than estimated.
 
 struct Screen {
     // Surface size in physical pixels; .zw is padding to a 16-byte uniform.
@@ -32,8 +41,8 @@ struct VertexInput {
     // Note this is the *shape*, not the quad — the quad is inflated slightly so
     // the antialiased edge has somewhere to fade out.
     @location(3) shape: vec4<f32>,
-    // x: corner radius, y: border width (0 = filled), z: mode, w: unused.
-    // Mode 0 skips the SDF entirely, which is what text and square rects use.
+    // x: corner radius, y: border width (0 = filled), z: mode, w: glyph AA band.
+    // Modes: 0 flat rect, 1 rounded fill, 2 rounded stroke, 3 distance-field glyph.
     @location(4) params: vec4<f32>,
     // Clip rectangle: min.xy, max.xy, in pixels.
     @location(5) clip: vec4<f32>,
@@ -81,8 +90,9 @@ fn sd_round_box(p: vec2<f32>, half_size: vec2<f32>, radius: f32) -> f32 {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Sampled before any branching: WGSL requires texture sampling to happen in
-    // uniform control flow, so this cannot move below the clip test.
-    let coverage = textureSample(atlas_tex, atlas_sampler, in.uv).r;
+    // uniform control flow, so this cannot move below the clip test or into the
+    // text branch, even though only glyphs use the result.
+    let field = textureSample(atlas_tex, atlas_sampler, in.uv).r;
 
     // Clipping is a discard rather than a scissor rect, so a clipped region
     // costs nothing in draw calls and nests by simple intersection on the CPU.
@@ -91,10 +101,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    var alpha = in.color.a * coverage;
+    var alpha = in.color.a;
 
     let mode = in.params.z;
-    if (mode > 0.5) {
+    if (mode > 2.5) {
+        // A glyph. 0.5 is the outline; the band is how much of the field one
+        // screen pixel spans, so the same atlas antialiases correctly at 15pt on
+        // a 1x display and at 24pt on a 2x one.
+        let band = in.params.w;
+        alpha = alpha * smoothstep(0.5 - band, 0.5 + band, field);
+    } else if (mode > 0.5) {
         let d = sd_round_box(in.px - in.shape.xy, in.shape.zw, in.params.x);
         // 1-pixel band centred on the edge.
         var cov = 1.0 - smoothstep(-0.5, 0.5, d);

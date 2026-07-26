@@ -12,7 +12,7 @@
 //! closure, it got [`Slider`] in Slice 3 — a rehearsal for the
 //! [`Button`](crate::Button) builder Slice 4 generalized it into.
 
-use crate::{Rect, Response, Ui};
+use crate::{font, Rect, Response, Ui};
 
 /// How a [`Slider`] arranges its label, value, and track.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -121,7 +121,8 @@ impl<'u, 'a, 'v> Slider<'u, 'a, 'v> {
         } = self;
 
         let theme = *ui.theme();
-        let (px, row_h, track_h) = (theme.text.body, theme.control.row_h, theme.control.track_h);
+        let (px, weight) = theme.text.body.parts();
+        let (row_h, track_h) = (theme.control.row_h, theme.control.track_h);
 
         let text = match &fmt {
             Some(format) => format(*value),
@@ -131,16 +132,27 @@ impl<'u, 'a, 'v> Slider<'u, 'a, 'v> {
 
         let (track, mut response) = match layout {
             SliderLayout::Stacked => {
-                let row = ui.allocate([0.0, row_h + px]);
-                let value_w = ui.painter().text_size(&text, px)[0];
+                // A text line, the track, and a trailing gap. Sized from the line
+                // box rather than from `px`: the two were the same number under
+                // the bitmap font and are not under a real face.
+                let text_h = font::line_height(px);
+                let row = ui.allocate([0.0, text_h + track_h + 9.0]);
+                let value_w = font::text_width(&text, px, weight);
 
                 // Label left, value hard against the right edge: two runs that
                 // share the width instead of one that outgrows it.
                 let painter = ui.painter();
-                painter.text(row.x, row.y, label, px, theme.color.foreground);
-                painter.text(row.max_x() - value_w, row.y, &text, px, theme.color.muted);
+                painter.text(row.x, row.y, label, px, weight, theme.color.foreground);
+                painter.text(
+                    row.max_x() - value_w,
+                    row.y,
+                    &text,
+                    px,
+                    weight,
+                    theme.color.muted,
+                );
 
-                let track = Rect::new(row.x, row.y + px + 5.0, row.w, track_h);
+                let track = Rect::new(row.x, row.y + text_h + 2.0, row.w, track_h);
                 // The hit band is taller than the visible track so it's easy to grab.
                 let band = Rect::new(track.x, track.y - 6.0, track.w, track_h + 12.0);
                 (track, ui.interact(band, id))
@@ -150,13 +162,20 @@ impl<'u, 'a, 'v> Slider<'u, 'a, 'v> {
                 // The row owns a 4-point trailing gap, as a button's does.
                 let face_h = row_h - 4.0;
                 let gap = theme.space.gap;
-                let label_w = ui.painter().text_size(label, px)[0];
-                let value_w = ui.painter().text_size(&text, px)[0];
+                let label_w = font::text_width(label, px, weight);
+                let value_w = font::text_width(&text, px, weight);
 
-                let text_y = row.y + (face_h - px) * 0.5;
+                let text_y = font::centered_top(row.y, face_h, px);
                 let painter = ui.painter();
-                painter.text(row.x, text_y, label, px, theme.color.foreground);
-                painter.text(row.max_x() - value_w, text_y, &text, px, theme.color.muted);
+                painter.text(row.x, text_y, label, px, weight, theme.color.foreground);
+                painter.text(
+                    row.max_x() - value_w,
+                    text_y,
+                    &text,
+                    px,
+                    weight,
+                    theme.color.muted,
+                );
 
                 let track_x = row.x + label_w + gap;
                 let track_w = (row.max_x() - value_w - gap - track_x).max(0.0);
@@ -168,8 +187,10 @@ impl<'u, 'a, 'v> Slider<'u, 'a, 'v> {
 
         let span = (max - min).max(f32::EPSILON);
         if response.held && track.w > 0.0 {
-            if let Some((px, _)) = ui.input().cursor {
-                let t = ((px - track.x) / track.w).clamp(0.0, 1.0);
+            // Named `cursor_x`, not `px`: that used to shadow the font size, which
+            // is a trap now that `px` genuinely means something else.
+            if let Some((cursor_x, _)) = ui.input().cursor {
+                let t = ((cursor_x - track.x) / track.w).clamp(0.0, 1.0);
                 let new_val = min + t * span;
                 if (new_val - *value).abs() > f32::EPSILON {
                     *value = new_val;

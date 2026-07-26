@@ -5,7 +5,9 @@
 //! shader. So these assert on the clip rectangle attached to each primitive,
 //! which is exactly what the painter hands the GPU.
 
-use slmsttaa_ui::{Anchor, DrawCmd, Painter, RecordingPainter, Rect, Ui, UiInput, UiState};
+use slmsttaa_ui::{
+    font, Anchor, DrawCmd, Painter, RecordingPainter, Rect, Theme, Ui, UiInput, UiState, Weight,
+};
 
 const MARGIN: f32 = 12.0;
 const PANEL_W: f32 = 340.0;
@@ -30,7 +32,7 @@ fn a_clip_region_is_recorded_on_everything_drawn_inside_it() {
     painter.rect(Rect::new(0.0, 0.0, 10.0, 10.0), [1.0; 4]);
     painter.push_clip(region);
     painter.rect(Rect::new(0.0, 0.0, 10.0, 10.0), [1.0; 4]);
-    painter.text(0.0, 0.0, "inside", 16.0, [1.0; 4]);
+    painter.text(0.0, 0.0, "inside", 16.0, Weight::Regular, [1.0; 4]);
     painter.pop_clip();
     painter.rect(Rect::new(0.0, 0.0, 10.0, 10.0), [1.0; 4]);
 
@@ -181,6 +183,54 @@ fn a_scroll_area_that_fits_does_not_scroll() {
         top, after_wheel,
         "there is nothing to scroll to, so the wheel does nothing"
     );
+}
+
+#[test]
+fn a_scroll_area_keeps_its_contents_clear_of_the_scrollbar() {
+    // The scrollbar is drawn inside the viewport's right edge, so the contents
+    // have to stop short of it. They didn't until UI Slice 5, and nothing caught
+    // it: the bitmap font left a quarter of every glyph cell blank on the right,
+    // so a right-aligned readout's *ink* cleared the bar even though its box
+    // didn't. A proportional font has no such slack, and the bar started covering
+    // the last digit of every value in the panel.
+    let mut painter = RecordingPainter::default();
+    let mut state = UiState::default();
+    let mut value = 0.5_f32;
+
+    // Two frames: the first measures the content, the second knows to scroll.
+    for _ in 0..2 {
+        painter.clear();
+        let mut ui = Ui::new(&mut painter, UiInput::default(), &mut state);
+        ui.panel(Anchor::TopLeft, PANEL_W, |ui| {
+            ui.scroll_area("body", 100.0, |ui| {
+                for i in 0..20 {
+                    ui.slider(&format!("knob {i}"), &mut value, 0.0, 1.0).show();
+                }
+            });
+        });
+    }
+
+    // The bar sits in the last `scrollbar_w` points of the content width.
+    let content_edge = MARGIN + PANEL_W - PAD;
+    let bar_left = content_edge - Theme::dark().control.scrollbar_w;
+
+    // Every run — labels and right-aligned readouts alike — ends left of the bar.
+    for cmd in &painter.cmds {
+        if let DrawCmd::Text {
+            x,
+            text,
+            px,
+            weight,
+            ..
+        } = cmd
+        {
+            let right = x + font::text_width(text, *px, *weight);
+            assert!(
+                right <= bar_left,
+                "{text:?} ends at {right}, but the scrollbar starts at {bar_left}"
+            );
+        }
+    }
 }
 
 #[test]

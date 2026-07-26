@@ -8,16 +8,22 @@
 //! and web, which is the whole point: it gives both targets real on-screen UI,
 //! unlike the gallery's DOM-button hack which only exists in a browser.
 //!
-//! The overlay owns a glyph atlas baked from the embedded [`font`](super::font)
-//! bitmap and exposes a tiny CPU draw API ([`Painter`]); the
-//! [`Ui`](slmsttaa_ui::Ui) immediate-mode layer is built on top of it, but a
+//! The overlay uploads the toolkit's baked glyph atlas
+//! ([`slmsttaa_ui::font::ATLAS`]) and exposes a tiny CPU draw API ([`Painter`]);
+//! the [`Ui`](slmsttaa_ui::Ui) immediate-mode layer is built on top of it, but a
 //! consumer could also drive it directly. Primitives are accumulated into CPU
 //! vectors each frame (cleared by [`Overlay::begin_frame`]) and uploaded in one
 //! shot at flush time.
+//!
+//! The atlas is a **signed distance field**, which is why this module no longer
+//! rasterizes a font at startup and no longer owns one. It belongs to
+//! `slmsttaa-ui` so that the metrics used to *lay text out* and the glyphs used
+//! to *draw it* cannot come from two different fonts — see
+//! [`slmsttaa_ui::font`] for why that was worth a narrower seam.
 
 use wgpu::util::DeviceExt;
 
-use super::font;
+use slmsttaa_ui::font::{self, Weight};
 use slmsttaa_ui::{Color, Layer, Painter, Rect};
 
 /// A 2D overlay vertex: pixel position, atlas UV, RGBA tint, and the shape
@@ -36,24 +42,38 @@ struct Vertex2D {
     color: [f32; 4],
     /// The shape being drawn: `[centre.x, centre.y, half.x, half.y]`, in pixels.
     shape: [f32; 4],
-    /// `[radius, border width, mode, unused]`; mode 0 skips the SDF.
+    /// `[radius, border width, mode, glyph AA band]`.
+    ///
+    /// The last slot was unused through Slice 4 and is now what makes distance
+    /// field text work without derivatives — see [`Overlay::text`].
     params: [f32; 4],
     /// `[min.x, min.y, max.x, max.y]`, in pixels.
     clip: [f32; 4],
 }
 
-/// Shader mode: a plain textured quad — text, and square-cornered rectangles.
-const MODE_PLAIN: f32 = 0.0;
+/// Shader mode: a flat, square-cornered rectangle. No SDF, no texture.
+const MODE_RECT: f32 = 0.0;
 /// Shader mode: a filled rounded box, evaluated as an SDF.
 const MODE_FILL: f32 = 1.0;
 /// Shader mode: the outline of a rounded box.
 const MODE_STROKE: f32 = 2.0;
+/// Shader mode: a glyph, sampled from the distance field atlas.
+const MODE_TEXT: f32 = 3.0;
 
 /// A clip rectangle large enough to never clip anything.
 const NO_CLIP: [f32; 4] = [-1.0e9, -1.0e9, 1.0e9, 1.0e9];
 
+/// UVs for a primitive that isn't textured. Non-text modes ignore the sample, so
+/// the value only has to be in range — the fetch still happens because WGSL
+/// requires texture sampling in uniform control flow.
+const NO_UV: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+
 /// How far a rounded/stroked quad is inflated past its shape so the antialiased
 /// edge has room to fade out. One pixel each side is exactly the smoothstep band.
+///
+/// Glyph quads are **not** inflated: the baked field already carries its own
+/// padding, so the quad the toolkit hands over is exactly the region the field
+/// covers.
 const AA_PAD: f32 = 1.0;
 
 impl Vertex2D {
@@ -79,76 +99,19 @@ struct ScreenUniform {
     _pad: [f32; 2],
 }
 
-// --- Atlas layout ----------------------------------------------------------
-
-/// Glyph cells per row in the atlas.
-const ATLAS_COLS: usize = 16;
-/// Rows needed to hold every glyph.
-const ATLAS_ROWS: usize = font::COUNT.div_ceil(ATLAS_COLS);
-const ATLAS_W: usize = ATLAS_COLS * font::SIZE;
-const ATLAS_H: usize = ATLAS_ROWS * font::SIZE;
-/// The cell repurposed as a fully-opaque white texel for solid rectangles. The
-/// last glyph (`0x7F`, DEL) is never printed, so we overwrite it.
-const WHITE_CELL: usize = font::COUNT - 1;
-
-/// Build the R8 coverage atlas: every printable glyph stamped into its cell,
-/// plus a white [`WHITE_CELL`] for rectangle fills.
-fn build_atlas() -> Vec<u8> {
-    let mut pixels = vec![0u8; ATLAS_W * ATLAS_H];
-    for (idx, glyph) in font::GLYPHS.iter().enumerate() {
-        let (cx, cy) = (
-            (idx % ATLAS_COLS) * font::SIZE,
-            (idx / ATLAS_COLS) * font::SIZE,
-        );
-        for (row, bits) in glyph.iter().enumerate() {
-            for col in 0..font::SIZE {
-                // font8x8: bit 0 (LSB) is the leftmost pixel.
-                if (bits >> col) & 1 == 1 {
-                    pixels[(cy + row) * ATLAS_W + (cx + col)] = 0xFF;
-                }
-            }
-        }
-    }
-    // Solid white block for rect fills.
-    let (wx, wy) = (
-        (WHITE_CELL % ATLAS_COLS) * font::SIZE,
-        (WHITE_CELL / ATLAS_COLS) * font::SIZE,
-    );
-    for row in 0..font::SIZE {
-        for col in 0..font::SIZE {
-            pixels[(wy + row) * ATLAS_W + (wx + col)] = 0xFF;
-        }
-    }
-    pixels
-}
-
-/// UV of a single texel at the centre of `cell` — used for solid rectangles so
-/// every fragment samples full coverage.
-fn cell_center_uv(cell: usize) -> [f32; 2] {
-    let cx = (cell % ATLAS_COLS) * font::SIZE + font::SIZE / 2;
-    let cy = (cell / ATLAS_COLS) * font::SIZE + font::SIZE / 2;
-    [cx as f32 / ATLAS_W as f32, cy as f32 / ATLAS_H as f32]
-}
-
-/// UV rectangle `[u0, v0, u1, v1]` covering the glyph cell for `ch`.
-fn glyph_uv(ch: char) -> Option<[f32; 4]> {
-    let code = ch as u32;
-    if code < font::FIRST as u32 || code >= font::FIRST as u32 + (font::COUNT as u32 - 1) {
-        // Out of range, or the white/DEL cell which isn't a printable glyph.
-        return None;
-    }
-    let idx = (code - font::FIRST as u32) as usize;
-    let (cx, cy) = (
-        (idx % ATLAS_COLS) * font::SIZE,
-        (idx / ATLAS_COLS) * font::SIZE,
-    );
-    Some([
-        cx as f32 / ATLAS_W as f32,
-        cy as f32 / ATLAS_H as f32,
-        (cx + font::SIZE) as f32 / ATLAS_W as f32,
-        (cy + font::SIZE) as f32 / ATLAS_H as f32,
-    ])
-}
+// --- Atlas -----------------------------------------------------------------
+//
+// There is nothing to build any more. Through Slice 4 this module rasterized an
+// 8x8 bitmap font into a coverage atlas at startup and reserved one cell as an
+// opaque white texel so that solid rectangles could share the text pipeline.
+// Both are gone: the atlas is a baked distance field that arrives from
+// `slmsttaa_ui::font::ATLAS` as bytes, and rectangles no longer sample a texture
+// at all — the shader gives them full coverage by mode instead. The engine's
+// `renderer/font.rs` went with it.
+//
+// The atlas is *the toolkit's*, deliberately, so that the metrics used to lay
+// text out and the glyphs used to draw it cannot come from different fonts. See
+// `slmsttaa_ui::font` for that argument.
 
 /// All GPU state for the overlay pass plus this frame's accumulated geometry.
 pub struct Overlay {
@@ -223,10 +186,9 @@ impl Overlay {
         });
 
         // --- Glyph atlas texture ---
-        let atlas_pixels = build_atlas();
         let atlas_size = wgpu::Extent3d {
-            width: ATLAS_W as u32,
-            height: ATLAS_H as u32,
+            width: font::metrics::ATLAS_W,
+            height: font::metrics::ATLAS_H,
             depth_or_array_layers: 1,
         };
         let atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -246,23 +208,30 @@ impl Overlay {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &atlas_pixels,
+            font::ATLAS,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(ATLAS_W as u32),
-                rows_per_image: Some(ATLAS_H as u32),
+                bytes_per_row: Some(font::metrics::ATLAS_W),
+                rows_per_image: Some(font::metrics::ATLAS_H),
             },
             atlas_size,
         );
         let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        // Nearest filtering keeps the bitmap font crisp at any scale.
+        // **Linear**, where the bitmap font wanted nearest. A distance field has
+        // to be interpolated — the whole reason it scales to any size is that a
+        // fragment reads a smoothly varying distance, and point-sampling it would
+        // reintroduce exactly the stair-stepped edges it exists to avoid.
+        //
+        // Safe against bleeding between neighbours: the baker leaves a one-texel
+        // gutter, and a zero texel decodes as "fully outside", which is the
+        // correct thing for a filter tap to pick up.
         let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("overlay atlas sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
@@ -415,19 +384,17 @@ impl Overlay {
         self.clips.last().copied().unwrap_or(NO_CLIP)
     }
 
-    /// Push one quad (two triangles) with a per-vertex UV rectangle.
+    /// Push one quad (two triangles), carrying the shape parameters the fragment
+    /// shader needs.
     ///
     /// Takes logical points and emits physical pixels; the indices go into the
     /// current layer's bucket, which is what decides draw order at flush time.
-    fn push_quad(&mut self, x: f32, y: f32, w: f32, h: f32, uv: [f32; 4], color: Color) {
-        self.push_shape(x, y, w, h, uv, color, 0.0, 0.0, MODE_PLAIN);
-    }
-
-    /// Push one quad, carrying the shape parameters the fragment shader needs.
     ///
-    /// For the SDF modes the emitted quad is inflated by [`AA_PAD`] beyond the
-    /// shape it describes, so the antialiased edge fades out inside the geometry
-    /// instead of being cut off by it.
+    /// For the rounded-box modes the emitted quad is inflated by [`AA_PAD`]
+    /// beyond the shape it describes, so the antialiased edge fades out inside
+    /// the geometry instead of being cut off by it. Rectangles and glyphs are
+    /// not inflated — the former have hard edges, the latter carry their own
+    /// padding in the baked field.
     #[allow(clippy::too_many_arguments)]
     fn push_shape(
         &mut self,
@@ -440,17 +407,22 @@ impl Overlay {
         radius: f32,
         border: f32,
         mode: f32,
+        aa: f32,
     ) {
         let s = self.scale;
         let (sx, sy, sw, sh) = (x * s, y * s, w * s, h * s);
 
         // The shape, in pixels — described independently of the quad drawn.
         let shape = [sx + sw * 0.5, sy + sh * 0.5, sw * 0.5, sh * 0.5];
-        let params = [radius * s, border * s, mode, 0.0];
+        let params = [radius * s, border * s, mode, aa];
         let clip = self.clip();
 
-        // Inflate the quad for the antialiasing band (plain quads need none).
-        let pad = if mode == MODE_PLAIN { 0.0 } else { AA_PAD };
+        // Inflate the quad for the antialiasing band.
+        let pad = if mode == MODE_FILL || mode == MODE_STROKE {
+            AA_PAD
+        } else {
+            0.0
+        };
         let (x, y, w, h) = (sx - pad, sy - pad, sw + 2.0 * pad, sh + 2.0 * pad);
 
         let base = self.vertices.len() as u32;
@@ -576,30 +548,29 @@ impl Overlay {
 
 impl Painter for Overlay {
     fn fill_rect(&mut self, rect: Rect, radius: f32, color: Color) {
-        let uv = cell_center_uv(WHITE_CELL);
-        let uv = [uv[0], uv[1], uv[0], uv[1]];
-        // A zero radius keeps the old cheap path: no SDF, no inflated quad, and
-        // pixel-identical to what square rectangles drew before.
-        let mode = if radius > 0.0 { MODE_FILL } else { MODE_PLAIN };
-        self.push_shape(rect.x, rect.y, rect.w, rect.h, uv, color, radius, 0.0, mode);
+        // A zero radius keeps the cheap path: no SDF, no inflated quad, no
+        // texture fetch that matters.
+        let mode = if radius > 0.0 { MODE_FILL } else { MODE_RECT };
+        self.push_shape(
+            rect.x, rect.y, rect.w, rect.h, NO_UV, color, radius, 0.0, mode, 0.0,
+        );
     }
 
     fn stroke_rect(&mut self, rect: Rect, radius: f32, width: f32, color: Color) {
         if width <= 0.0 {
             return;
         }
-        let uv = cell_center_uv(WHITE_CELL);
-        let uv = [uv[0], uv[1], uv[0], uv[1]];
         self.push_shape(
             rect.x,
             rect.y,
             rect.w,
             rect.h,
-            uv,
+            NO_UV,
             color,
             radius,
             width,
             MODE_STROKE,
+            0.0,
         );
     }
 
@@ -621,23 +592,43 @@ impl Painter for Overlay {
         self.clips.pop();
     }
 
-    fn text(&mut self, x: f32, y: f32, text: &str, px: f32, color: Color) {
-        // Snap the run origin to whole *physical* pixels so the bitmap font
-        // stays crisp — rounding in points would still land mid-pixel at 1.5×.
-        let mut pen_x = (x * self.scale).round() / self.scale;
-        let pen_y = (y * self.scale).round() / self.scale;
-        for ch in text.chars() {
-            if let Some(uv) = glyph_uv(ch) {
-                self.push_quad(pen_x, pen_y, px, px, uv, color);
-            }
-            // Spaces and unknown glyphs still advance (monospace).
-            pen_x += px;
-        }
-    }
+    fn text(&mut self, x: f32, y: f32, text: &str, px: f32, weight: Weight, color: Color) {
+        // Snap the **baseline** to a whole physical pixel. The horizontal strokes
+        // — baseline, x-height, cap line — are what the eye reads as crisp, and
+        // they all key off it. Snapping x is pointless now that advances are
+        // proportional and fractional: it would distort spacing to no benefit,
+        // which is a change from the bitmap font, where every advance was a whole
+        // number of points and snapping the origin snapped every glyph.
+        let baseline = font::baseline(y, px);
+        let baseline = (baseline * self.scale).round() / self.scale;
 
-    fn text_size(&self, text: &str, px: f32) -> [f32; 2] {
-        // In points: the UI lays out in points and never learns the scale.
-        [text.chars().count() as f32 * px, px]
+        // The antialiasing width, computed here because it depends on the display
+        // scale factor, which the toolkit is never told. `overlay.wgsl` uses no
+        // derivatives (so the WebGL2 fallback matches WebGPU), so `fwidth` isn't
+        // available to estimate it in the shader — and the CPU knows it exactly.
+        let aa = font::aa_band(px * self.scale);
+
+        let mut pen = x;
+        for ch in text.chars() {
+            let glyph = font::glyph(ch, weight);
+            if glyph.has_ink() {
+                self.push_shape(
+                    pen + glyph.x * px,
+                    baseline + glyph.y * px,
+                    glyph.w * px,
+                    glyph.h * px,
+                    glyph.uv,
+                    color,
+                    0.0,
+                    0.0,
+                    MODE_TEXT,
+                    aa,
+                );
+            }
+            // A space has no ink but still advances, and an unbaked character
+            // resolves to a visible tofu box rather than being skipped.
+            pen += glyph.advance * px;
+        }
     }
 
     fn set_layer(&mut self, layer: Layer) {

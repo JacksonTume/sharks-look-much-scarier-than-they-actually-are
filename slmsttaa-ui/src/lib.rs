@@ -12,9 +12,11 @@
 //! ## The two seams
 //!
 //! - **Downward, from the renderer.** The UI draws through the [`Painter`]
-//!   trait — `rect` / `text` / `text_size` / `set_layer` — and reads a
+//!   trait — `fill_rect` / `text` / `set_layer` / clipping — and reads a
 //!   [`UiInput`] snapshot the host fills in. The engine's overlay is one
-//!   `Painter`; [`RecordingPainter`] is another.
+//!   `Painter`; [`RecordingPainter`] is another. *Measuring* text is not on that
+//!   trait: it lives in [`font`], so both painters agree by construction. See
+//!   that module for why, and what it cost.
 //! - **Upward, from the consumer.** Widgets borrow the consumer's own
 //!   `&mut f32` / `&mut bool`, so the UI has no idea *what* it controls. Erosion
 //!   parameters live in the terrain demo, which is where they belong.
@@ -86,16 +88,18 @@
 
 #![deny(missing_docs)]
 
+pub mod font;
 mod interact;
 mod layout;
 mod painter;
 pub mod theme;
 mod widgets;
 
+pub use font::Weight;
 pub use interact::{Response, UiInput, UiState};
 pub use layout::Rect;
 pub use painter::{Color, DrawCmd, Layer, Painter, RecordingPainter};
-pub use theme::{Size, Theme, Variant};
+pub use theme::{Size, Theme, TypeStep, Variant};
 pub use widgets::{Button, Slider, SliderLayout};
 
 use layout::{Dir, Region};
@@ -699,11 +703,26 @@ impl<'a> Ui<'a> {
         // clipped to the viewport. Because it is a child region, the enclosing
         // panel's cursor never moves — so the panel's height is measured from
         // the viewport, not from however far the contents actually ran.
+        //
+        // The region is narrower than the viewport by a **gutter**: the scrollbar
+        // is drawn inside the viewport's right edge, and content laid out to that
+        // edge would run underneath it. Through Slice 4 nothing noticed, because
+        // the 8x8 bitmap font left a quarter of every glyph cell empty on the
+        // right and the ink never actually reached the bar. Inter's `0` has about
+        // a point of side bearing, so the bar started eating the last digit of
+        // every right-aligned readout the moment the font became a real one.
+        //
+        // Reserved unconditionally rather than only when the bar is visible. A
+        // conditional gutter would reflow every row the moment one more row tipped
+        // the area into overflowing — and worse, once anything here wraps, a
+        // narrower region could *grow* the content height, which would toggle the
+        // bar on and off forever.
+        let gutter = self.theme.control.scrollbar_w + self.theme.space.gap;
         self.painter.push_clip(viewport);
         self.regions.push(Region::vertical(Rect::new(
             line.x,
             top - offset,
-            line.w,
+            (line.w - gutter).max(0.0),
             line.h,
         )));
         let result = add_contents(self);

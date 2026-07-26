@@ -13,7 +13,7 @@
 //! the trade the slider's builder already refused.
 
 use crate::theme::{Size, Variant};
-use crate::{Rect, Response, Ui};
+use crate::{font, Rect, Response, Ui};
 
 /// A clickable button, configured then shown.
 ///
@@ -103,12 +103,15 @@ impl<'u, 'a> Button<'u, 'a> {
             painter.stroke_rect(face, theme.radius.md, theme.control.ring, theme.color.ring);
         }
 
-        // Center the label within the button.
-        let px = size.text_px(&theme);
-        let tw = ui.painter().text_size(label, px)[0];
+        // Center the label within the button. Vertically that means centring the
+        // *capitals*, not the line box — a line box carries descender space no
+        // capital uses, and centring it leaves the label sitting visibly high.
+        let (px, weight) = size.text(&theme).parts();
+        let tw = font::text_width(label, px, weight);
         let tx = face.x + (face.w - tw) * 0.5;
-        let ty = face.y + (face.h - px) * 0.5;
-        ui.painter().text(tx, ty, label, px, theme.on_fill(variant));
+        let ty = font::centered_top(face.y, face.h, px);
+        ui.painter()
+            .text(tx, ty, label, px, weight, theme.on_fill(variant));
 
         response
     }
@@ -121,12 +124,20 @@ impl Ui<'_> {
     /// a mean thing to ask anyone to hit.
     pub fn checkbox(&mut self, label: &str, value: &mut bool) -> Response {
         let theme = self.theme;
-        let px = theme.text.body;
+        let (px, weight) = theme.text.body.parts();
 
         let id = self.next_id(label);
         let row = self.allocate([0.0, theme.control.row_h]);
         let mut response = self.interact(row, id);
-        let well = Rect::new(row.x, row.y, px, px);
+
+        // The well is a square the height of the label's capitals, sitting on the
+        // same cap band — so box and text line up optically instead of the box
+        // being an em tall (too big) and top-aligned in the row (too high). Both
+        // were invisible while the font's cell size *was* its cap height.
+        let text_y = font::centered_top(row.y, row.h, px);
+        let cap = font::cap_height(px);
+        let cap_top = text_y + font::ascent(px) - cap;
+        let well = Rect::new(row.x, cap_top, cap, cap);
 
         if response.clicked {
             *value = !*value;
@@ -155,9 +166,10 @@ impl Ui<'_> {
         }
         self.painter.text(
             well.max_x() + theme.space.gap,
-            row.y,
+            text_y,
             label,
             px,
+            weight,
             theme.color.foreground,
         );
 

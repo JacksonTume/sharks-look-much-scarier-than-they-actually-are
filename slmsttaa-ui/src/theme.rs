@@ -39,6 +39,7 @@
 //! All metrics are in **logical points**, so they mean the same thing on a 1× and
 //! a 2× display.
 
+use crate::font::{self, Weight};
 use crate::Color;
 
 /// The emphasis level a control is drawn at.
@@ -87,8 +88,8 @@ impl Size {
         }
     }
 
-    /// The cell size of text drawn inside the control, in points.
-    pub fn text_px(self, theme: &Theme) -> f32 {
+    /// The type step text inside the control is drawn at.
+    pub fn text(self, theme: &Theme) -> TypeStep {
         match self {
             Size::Sm => theme.text.small,
             Size::Md | Size::Lg => theme.text.body,
@@ -170,17 +171,65 @@ pub struct Space {
     pub indent: f32,
 }
 
-/// The type scale, in glyph cell size (points).
+/// One step on the type scale: a size **and** the weight that goes with it.
+///
+/// The two travel together because that is what a type scale is — "section
+/// heading" is 18 points *semibold*, not a size that someone later remembers to
+/// embolden. Before Slice 5 there was only one weight, so the scale was four bare
+/// `f32`s and `widgets/text.rs` documented `title` as "a bold heading row" while
+/// drawing it in exactly the same weight as a label.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TypeStep {
+    /// Em size in points. The conventional meaning of a font size: the ink is
+    /// smaller than this, and a line box is *larger*.
+    pub px: f32,
+    /// Which cut of the face.
+    pub weight: Weight,
+}
+
+impl TypeStep {
+    /// The pair, for handing to [`Painter::text`](crate::Painter::text).
+    ///
+    /// ```
+    /// # use slmsttaa_ui::Theme;
+    /// let theme = Theme::dark();
+    /// let (px, weight) = theme.text.body.parts();
+    /// ```
+    pub fn parts(self) -> (f32, Weight) {
+        (self.px, self.weight)
+    }
+
+    /// The line-box top that optically centres this step in a box `h` tall
+    /// starting at `y` — see
+    /// [`font::centered_top`](crate::font::centered_top).
+    pub fn centered_top(self, y: f32, h: f32) -> f32 {
+        font::centered_top(y, h, self.px)
+    }
+
+    /// The width of `text` at this step, in points.
+    pub fn width(self, text: &str) -> f32 {
+        font::text_width(text, self.px, self.weight)
+    }
+}
+
+/// The type scale: four roles, each a size and a weight.
+///
+/// The numbers are **em sizes**, which is a change of meaning as of Slice 5 — they
+/// used to be the square cell of an 8x8 bitmap, where the cell *was* the cap
+/// height. Inter's capitals are `0.729` em, so the scale was multiplied by about
+/// `1.2` to keep text the same visual size it had been. Matching cap height rather
+/// than nominal size is the reason a real face didn't arrive looking abruptly
+/// smaller than the bitmap it replaced.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TypeScale {
     /// Compact text, inside a [`Size::Sm`] control.
-    pub small: f32,
+    pub small: TypeStep,
     /// Body text — labels, values, button faces.
-    pub body: f32,
+    pub body: TypeStep,
     /// Section headings.
-    pub section: f32,
+    pub section: TypeStep,
     /// Panel titles.
-    pub title: f32,
+    pub title: TypeStep,
 }
 
 /// Metrics shared by the controls themselves.
@@ -328,11 +377,26 @@ impl Theme {
                 gap: 8.0,
                 indent: 16.0,
             },
+            // Sizes chosen to hold cap height steady across the bitmap-to-Inter
+            // switch (see `TypeScale`); weights are where the two-weight bake
+            // earns itself — headings are genuinely heavier than body text now.
             text: TypeScale {
-                small: 13.0,
-                body: 16.0,
-                section: 15.0,
-                title: 20.0,
+                small: TypeStep {
+                    px: 15.0,
+                    weight: Weight::Regular,
+                },
+                body: TypeStep {
+                    px: 19.0,
+                    weight: Weight::Regular,
+                },
+                section: TypeStep {
+                    px: 18.0,
+                    weight: Weight::SemiBold,
+                },
+                title: TypeStep {
+                    px: 24.0,
+                    weight: Weight::SemiBold,
+                },
             },
             control: Control {
                 row_h: 24.0,

@@ -415,7 +415,7 @@ blue-filled button needs white text while a faint-wash button needs near-black,
 and a single `on_fill` token cannot be both. The second theme is not decoration —
 it is the thing that finds the tokens a one-theme system lets you skip.
 
-## Slice 5 — Typography *(polish, labeled)*
+## Slice 5 — Typography *(polish, labeled)* ✅ done
 
 *Roadblock:* honestly, none — this is the "it still looks like a debug HUD"
 slice, and it is named as polish rather than dressed up as infrastructure.
@@ -428,6 +428,96 @@ the existing bitmap; or take a `fontdue`/`ab_glyph` dependency with a dynamic
 atlas (rejected by default — it would break the zero-dependency rule).
 
 *Proof:* readable text at multiple sizes with correct proportional metrics.
+
+**Labeled polish, and it behaved like anything but.** This is the slice with the
+widest gap between how it reads on the roadmap and what it cost. The rendering was
+the easy half. The dangerous half was that *measuring* text turned out to be load
+bearing for every alignment in the crate, and it was implemented twice.
+
+**What shipped, and what it cost:**
+
+- **`text_size` left the `Painter` trait, which is the whole point.** It had been
+  implemented once on the engine's `Overlay` and once on `RecordingPainter`, both
+  as `chars().count() * px`. Those agreed *only* because the bitmap font was a
+  monospace grid. Proportional advances break the tie — and the failure mode is
+  not a wrong number, it is that **the tests measure a different font than the
+  screen draws**. `tests/regions.rs` asserts right-alignment against the recording
+  painter, so the suite would have stayed green while every readout in the demo
+  drifted off the panel. Metrics now live in [`font`](src/font.rs), both painters
+  read them, and the divergence is unrepresentable rather than merely discouraged.
+- **The font lives in this crate, and `cargo tree -p slmsttaa-ui` still prints one
+  line.** That was the test of whether "zero dependencies" meant anything precise:
+  an atlas is *data*, so `include_bytes!` costs nothing in the dependency graph.
+  The rasterizer went into a new `fontbake` workspace member — quarantined there so
+  that `xtask`, which gets run constantly, stays dependency-free too.
+- **It cost the seam some width, deliberately.** A `Painter` no longer chooses its
+  font: it is handed a run, a size, a `Weight`, and glyph geometry from
+  `font::glyph`. This is the first slice to make the downward seam *narrower*, and
+  the trade is stated in `font`'s module docs — a seam wide enough for two fonts is
+  a seam wide enough for two disagreeing fonts, and nothing ever wanted the second.
+- **`px` changed meaning, and the type scale was re-tuned to hide it.** It used to
+  be a square glyph cell, which *was* the cap height; it is now an em size, the
+  conventional meaning. Inter's capitals are `0.729em`, so the scale went up by
+  about 1.2× (13/16/15/20 → 15/19/18/24) to keep text the same visual size. Matching
+  cap height rather than nominal size is why a real face didn't arrive looking
+  abruptly smaller than the bitmap it replaced.
+- **Every hand-tuned vertical offset in the crate was wrong and had to be
+  rederived.** `row.y + 2.0`, `(face.h - px) * 0.5`, `row.y + px + 3.0` — all
+  correct only while a run was exactly `px` tall. A real face has a line box
+  *larger* than its em and ink *smaller*, so there is now one function,
+  `font::centered_top`, and it centres **cap height, not the line box**: a line box
+  reserves descender space no capital occupies, and centring it leaves text sitting
+  visibly high. The checkbox well was re-derived the same way and now sits on the
+  label's cap band instead of being an em tall and top-aligned.
+- **Digits are tabular, synthesized in the bake.** `fontdue` applies no OpenType
+  features, so `tnum` was unavailable and the widest digit's advance is forced onto
+  all ten with each glyph re-centred. This is not fussiness: Inter's proportional
+  `1` is **37% narrower** than its `0` (0.4067em vs 0.6460em), so a dragged slider's
+  readout visibly shuffles sideways as digits change. Right-aligning it pins the
+  right edge and makes the wobble *more* obvious, not less.
+- **Two weights, because the docs were already lying.** `widgets/text.rs` described
+  `title` as "a bold heading row" while drawing it in the same weight as a label.
+  A `TypeStep` now pairs a size *with* a weight — which is what a type-scale step
+  actually is — and headings are genuinely semibold. It costs a second atlas page,
+  and `tests/typography.rs` asserts the default scale uses both, so the page can't
+  become dead weight in every wasm bundle unnoticed.
+- **Antialiasing is computed on the CPU, not with `fwidth`.** `overlay.wgsl`
+  deliberately avoids derivatives so the WebGL2 fallback matches WebGPU, so the
+  usual SDF trick was unavailable. `font::aa_band(physical_px)` is called by the
+  painter — it takes *physical* pixels, which is why it can't be a widget's job —
+  and rides along in the vertex attribute slot Slice 2 left unused. This is
+  strictly better than `fwidth`: the CPU knows the exact render size where the
+  shader could only estimate it.
+
+**The SDF was the wrong call to be confident about, and it worked anyway.** Plain
+SDF is known to go mushy at small ppem, and 15pt body text on a 1× display was
+exactly the case to worry about. It reads crisply. Two things bought that: the type
+scale went *up* rather than down, and the bake supersamples 4× before the distance
+transform so edge positions resolve to a quarter of a bake pixel instead of a whole
+one. Recorded because the reasoning generalizes — if a future scale wants 11pt text,
+this is the decision to revisit first, and per-size coverage bakes are the fallback.
+
+**What it exposed, and this is the real find.** Reserving no space for the
+scrollbar was a **live bug the whole time**, and the bitmap font was hiding it. The
+scroll area laid its contents out across the full content width and then painted
+the bar *over* the right 4 points. `font8x8` leaves roughly a quarter of every
+glyph cell blank on the right, so a right-aligned readout's box ran under the bar
+while its *ink* cleared it. Inter's `0` has about a point of side bearing. The
+moment the font became real, the bar started eating the last digit of every value
+in the panel — `3.50` read as `3.5`, and the `peaks` preset lost its `s`.
+
+The fix reserves a gutter unconditionally rather than only when the bar is showing,
+because a conditional one reflows every row the moment one more row tips the area
+into overflow — and once anything here wraps, a narrower region could *grow* the
+content height and toggle the bar on and off forever. There is now a test
+(`clipping.rs`) asserting every run ends left of the bar.
+
+This is the third time the pattern has repeated: Slice 1's id bug, Slice 3's
+overflowing button label, and now this. **Every test passed.** What found it was
+running the demo and looking at the panel — and the reason it was *findable* is
+that a proportional font removes slack that a monospace grid silently donates.
+Changing the font was, accidentally, a fuzz test for every layout assumption in
+the crate.
 
 ## Slice 6 — Animation *(polish, labeled)*
 
@@ -454,16 +544,29 @@ finally demands one, not as a to-build list:
   preset picker is the likely first.
 - **Tabs, accordion, card, badge, modal** — the shadcn roster proper. None has a
   roadblock yet, and the roster is the part most likely to become the project.
-- **Text fitting (`fit_text` / ellipsis)** — asked for twice now and declined
-  twice. Slice 2's clipping made long section headings truncate mid-glyph; Slice
-  3's preset row made a button label overflow its cell. Both were answered by
-  shortening the string, which works and is honest, but the third time will be
-  the one where the caller can't shorten it. Slice 4's `Size::Sm` made the preset
-  cell fit seven glyphs instead of six, which buys slack rather than solving
-  anything — the caller still has to know what fits. The shape is known and
-  small: with monospace `Painter::text_size` and a real available rect, clamping
-  a run to its width with a trailing `…` is a dozen lines. It waits for a
-  consumer whose strings aren't its own to edit.
+- **Text fitting (`fit_text` / ellipsis)** — asked for twice, declined twice, and
+  now *fully unblocked*, which is a different status than before. Slice 2's
+  clipping made long section headings truncate mid-glyph; Slice 3's preset row made
+  a button label overflow its cell. Both were answered by shortening the string,
+  which works and is honest, but the third time will be the one where the caller
+  can't. Slice 4's `Size::Sm` bought slack rather than solving anything. Slice 5
+  removed the last two excuses: `…` is now in the atlas by name, and
+  `font::text_width` is exact per-glyph rather than a monospace estimate, so
+  clamping a run to an available width is a `take_while` over advances plus one
+  fallback glyph — genuinely a dozen lines. Still waiting on a consumer whose
+  strings aren't its own to edit, because the *policy* (truncate where? middle-
+  ellipsis? wrap instead?) is the part that needs a real caller to answer.
+- **Kerning** — deliberately skipped in Slice 5, recorded so it reads as a decision
+  rather than an omission. `font::text_width` is a plain sum of advances, which is
+  what makes it exactly reproducible on both sides of the seam and trivially
+  testable. Kerning would make a run narrower than the sum of its parts, so every
+  measurement would have to replicate the pair table — a real cost for a
+  barely-visible gain at 15 to 24 points. Revisit if a display size (a 48pt
+  heading, a title screen) ever makes `AV` and `To` look loose.
+- **A third type weight, or italics** — Slice 5 baked Regular and SemiBold because
+  the type scale distinguishes headings from body text. Nothing has asked for
+  Medium, Bold, or an italic, and each is another atlas page in every wasm bundle
+  (~185 KiB), so each waits for something that actually needs it.
 - **Draggable panel edges** — panel *width* is a parameter as of Slice 3, so a
   consumer can already resize one by passing a different number. A grab handle
   that lets the *user* do it at runtime is a separate thing, and stays under the

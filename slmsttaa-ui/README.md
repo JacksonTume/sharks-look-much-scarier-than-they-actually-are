@@ -12,8 +12,9 @@ becoming a UI framework with a triangle demo attached.
 Slices [0](ROADMAP.md#slice-0--extraction-the-move) (extraction),
 [1](ROADMAP.md#slice-1--interaction-core--draw-layers) (interaction core),
 [2](ROADMAP.md#slice-2--painter-capabilities-and-the-scroll-region) (painter
-capabilities), [3](ROADMAP.md#slice-3--layout) (layout) and
-[4](ROADMAP.md#slice-4--theme-tokens--variants) (theme tokens) are done. The
+capabilities), [3](ROADMAP.md#slice-3--layout) (layout),
+[4](ROADMAP.md#slice-4--theme-tokens--variants) (theme tokens) and
+[5](ROADMAP.md#slice-5--typography-polish-labeled) (typography) are done. The
 toolkit is a zero-dependency crate the engine re-exports as `slmsttaa::ui`, and it
 now has the machinery that separates a toolkit from a pile of sliders:
 
@@ -32,16 +33,20 @@ now has the machinery that separates a toolkit from a pile of sliders:
 - **Theme tokens** — one `Theme` of semantic colors and four scales, plus
   `Variant` and `Size`. No widget anywhere names a literal color, and there is a
   test that says so.
+- **Typography** — Inter as a baked signed distance field, proportional advances,
+  two weights, and tabular figures so a live readout doesn't shuffle sideways as
+  its digits change. Metrics live in [`font`](src/font.rs) rather than on the
+  painter, which is the whole point — see *The two seams* below.
 - **A public seam** — `allocate` / `interact` / `painter` / `theme`, so a widget
   written by a consumer is not second-class.
 
 Widgets: `title` / `section` (collapsible) / `label` / `label_muted` /
 `label_value` / `separator` / `button` / `checkbox` / `slider` / `scroll_area`.
 
-Next is [Slice 5](ROADMAP.md#slice-5--typography-polish-labeled) — typography,
-and it is **labeled as polish**. With rounded corners, tokens, and variants in
-place, the 8×8 bitmap font is the loudest remaining tell, and no demo is blocked
-on it.
+Next is [Slice 6](ROADMAP.md#slice-6--animation-polish-labeled) — animation, also
+**labeled as polish**: per-id floats easing toward a target, for hover fades and
+accordion transitions. Around forty lines given the ids Slice 1 built and the
+`Renderer::dt` the engine already provides, and no demo is blocked on it.
 
 **New UI code and UI docs belong here, not in the engine.**
 
@@ -73,7 +78,7 @@ So the rule is: **`slmsttaa-ui` depends on nothing.**
 
 ```
 slmsttaa-ui/     zero dependencies. Owns Painter, Color, Rect, Theme, Ui,
-   ▲             the widgets, and its own UiInput snapshot type.
+   ▲             the widgets, the font (as data), and its own UiInput snapshot.
    │ path dep
    │
 slmsttaa/        depends on slmsttaa-ui. impl Painter for Overlay;
@@ -86,6 +91,12 @@ primary_held, primary_pressed, scroll_delta, viewport }` — and the engine copi
 into it each frame in `Renderer::ui()`. Four field assignments, nothing
 measurable, and it buys a leaf crate with no `wgpu`, no `winit`, no `glam`, and
 therefore no reason to ever grow a `#[cfg(target_arch = "wasm32")]` branch.
+
+The font does not change that, which was worth checking rather than assuming: the
+atlas is `include_bytes!`d and its metrics are generated Rust, so `cargo tree -p
+slmsttaa-ui` still prints exactly one line. **Data is not a dependency.** The
+rasterizer that produced both lives in the `fontbake` workspace member and runs by
+hand — quarantined there so that even `xtask` stays dependency-free.
 
 `viewport` is the whole of what edge anchoring needs: a `TopRight` panel has to
 know where the right edge is, and this is how it finds out without the toolkit
@@ -110,7 +121,16 @@ Both are inherited from the current design and both survive the split:
 - **Downward, from the renderer** — the toolkit draws through the `Painter`
   trait and nothing else. The engine's `renderer::overlay::Overlay` is one
   implementation; a headless recorder used by the tests is another. Anything that
-  can fill a rectangle and stamp a string can host this UI.
+  can fill a rectangle and stamp a glyph can host this UI.
+
+  Slice 5 **narrowed** this seam, the only time that has happened. `text_size`
+  used to be on the trait, which meant every painter had its own idea of how wide
+  a string is — and the two agreed only because the old bitmap font was a
+  monospace grid. Proportional advances would have made them disagree *silently*:
+  the tests measure through the recorder, so the suite would have stayed green
+  while the demo's readouts slid off the edge of the panel. Measuring now lives in
+  [`font`](src/font.rs), and a painter no longer chooses its font. A seam wide
+  enough for two fonts is a seam wide enough for two disagreeing fonts.
 - **Upward, from the consumer** — widgets borrow the consumer's own `&mut f32` /
   `&mut bool`. The toolkit has no idea what it controls; erosion parameters live
   in the terrain demo, which is where root principle 3 puts them.
@@ -122,8 +142,9 @@ as one designed system rather than a debug HUD. Three of its ideas port; the
 third only in translation:
 
 1. **Design tokens.** Semantic names (`background`, `foreground`, `muted`,
-   `accent`, `border`, `ring`, `destructive`), a radius scale, a spacing scale, a
-   type scale — held in a `Theme` struct. Widgets never name a literal color.
+   `accent`, `border`, `ring`, `destructive`), a radius scale, a spacing scale, and
+   a type scale whose steps pair a size *with* a weight — held in a `Theme` struct.
+   Widgets never name a literal color.
    **Shipped in Slice 4**, along with `Variant` and `Size`. The rule is enforced
    rather than asserted: `tests/theme.rs` styles a frame with sentinel tokens and
    fails if any color reaches the painter that the theme didn't supply.
@@ -172,15 +193,26 @@ hit-testing were simultaneously the most testable and least verified code here.
 row/column/indent/right-align arithmetic; `tests/interaction.rs` pins press-edge
 versus held semantics and drag capture; `tests/ids.rs` pins that a widget's
 identity survives rows appearing above it; `tests/clipping.rs` pins that a
-scrolled-away row is genuinely invisible; `tests/theme.rs` pins that no widget
-draws a color or reads a metric the theme didn't supply. All six drive the crate
-through its public API only, which doubles as a check that a consumer could do
-the same.
+scrolled-away row is genuinely invisible *and* that no run strays under the
+scrollbar; `tests/theme.rs` pins that no widget draws a color or reads a metric the
+theme didn't supply; `tests/typography.rs` pins proportional advances, tabular
+digits, em-linear metrics, and that an unbaked character draws a visible box rather
+than vanishing. All seven drive the crate through its public API only, which
+doubles as a check that a consumer could do the same.
 
-They constrain, but they do not replace running the demo. Slice 1's id bug and
-Slice 3's overflowing button label both passed every test and were found the
-first time a human looked at the screen — because a test declares a fixed set of
-widgets with strings it chose itself, and the demo does not.
+They constrain, but they do not replace running the demo. Slice 1's id bug,
+Slice 3's overflowing button label, and Slice 5's readouts running under the
+scrollbar all passed every test and were found the first time a human looked at
+the screen — because a test declares a fixed set of widgets with strings it chose
+itself, and the demo does not.
+
+The scrollbar one is the sharpest of the three, because the suite was not merely
+silent about it: the bug had been live since Slice 2, and the *font* was hiding it.
+`font8x8` left roughly a quarter of every glyph cell blank on the right, so a
+right-aligned readout's box ran under the bar while its ink cleared it. Replacing
+the font removed that donated slack and the bug surfaced on the first frame — which
+makes changing a font an accidental fuzz test for every layout assumption in the
+crate.
 
 ## See also
 

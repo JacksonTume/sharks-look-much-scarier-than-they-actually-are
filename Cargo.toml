@@ -15,7 +15,13 @@ categories = ["graphics", "rendering"]
 # (a zero-dependency leaf crate the engine re-exports as `slmsttaa::ui`); `xtask`
 # is the dev-tooling crate behind `cargo xtask` (build + serve the web demo).
 # See `.cargo/config.toml`.
-members = ["slmsttaa-ui", "xtask"]
+#
+# `fontbake` is the offline glyph baker, and the only crate here allowed a font
+# rasterizer. It is quarantined into its own member precisely so that `xtask` —
+# which you run constantly — stays dependency-free, and so nothing in the
+# engine's or the toolkit's build graph can reach a rasterizer. Its output is
+# committed; it runs by hand, roughly never.
+members = ["slmsttaa-ui", "xtask", "fontbake"]
 
 [lib]
 name = "slmsttaa"

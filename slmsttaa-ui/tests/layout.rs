@@ -5,7 +5,9 @@
 //! the public API only, which doubles as a check that the API is usable from
 //! outside the crate.
 
-use slmsttaa_ui::{Anchor, DrawCmd, Layer, Painter, RecordingPainter, Rect, Ui, UiInput, UiState};
+use slmsttaa_ui::{
+    font, Anchor, DrawCmd, Layer, RecordingPainter, Rect, Ui, UiInput, UiState, Weight,
+};
 
 /// The panel's geometry, restated here rather than imported: a test that reads
 /// the same constant as the code can't catch it changing. Update deliberately if
@@ -25,7 +27,9 @@ fn rects(p: &RecordingPainter) -> Vec<Rect> {
     p.cmds
         .iter()
         .filter_map(|c| match *c {
-            DrawCmd::Rect { rect, border, .. } if border == 0.0 => Some(rect),
+            DrawCmd::Rect {
+                rect, border: 0.0, ..
+            } => Some(rect),
             _ => None,
         })
         .collect()
@@ -119,8 +123,16 @@ fn labels_stack_one_row_apart() {
     assert_eq!(runs[0].0, CONTENT_X);
     assert_eq!(runs[1].0, CONTENT_X);
     assert_eq!(runs[1].1 - runs[0].1, ROW_H);
-    // The first row starts one pad below the panel's top edge.
-    assert_eq!(runs[0].1, MARGIN + PAD);
+    // The first row starts one pad below the panel's top edge — but the *text*
+    // inside it no longer starts there. A label centres its ink in its row, which
+    // under the bitmap font was indistinguishable from drawing at the row top
+    // (cell height == row text height) and is not any more.
+    let row_y = MARGIN + PAD;
+    assert_eq!(runs[0].1, font::centered_top(row_y, ROW_H, 19.0));
+    assert!(
+        runs[0].1 > row_y && runs[0].1 < row_y + ROW_H,
+        "the run sits inside its row"
+    );
 }
 
 #[test]
@@ -290,10 +302,32 @@ fn a_bottom_anchored_panel_settles_on_the_second_frame() {
 }
 
 #[test]
-fn text_size_is_a_monospace_grid() {
-    // Layout math assumes the engine's monospace bitmap font; the recorder has
-    // to agree with it or every assertion above measures the wrong thing.
-    let painter = RecordingPainter::default();
-    assert_eq!(painter.text_size("abcd", 16.0), [64.0, 16.0]);
-    assert_eq!(painter.text_size("", 16.0), [0.0, 16.0]);
+fn a_text_run_is_taller_than_its_em_size() {
+    // The assumption every assertion above used to rest on, now stated out loud.
+    //
+    // Under the 8x8 bitmap font a run was exactly `px` tall, so row heights could
+    // be written as `px + something` and vertical centring as `(h - px) / 2`.
+    // A real face has a line box *larger* than its em size — ascent plus descent
+    // — and ink *smaller* than it. Both directions matter, and getting either
+    // backwards puts text a few points off centre in every control at once, which
+    // is exactly the kind of wrongness a screenshot makes you squint at.
+    let px = 19.0;
+    let line = font::line_height(px);
+    let cap = font::cap_height(px);
+
+    assert!(line > px, "line box {line} should exceed the em size {px}");
+    assert!(
+        cap < px,
+        "capitals {cap} should be shorter than the em size {px}"
+    );
+    assert_eq!(font::text_size("abcd", px, Weight::Regular)[1], line);
+
+    // Centring puts the capitals' midpoint on the box's midpoint — not the line
+    // box's, which would leave the text sitting high by half the descender.
+    let top = font::centered_top(100.0, 24.0, px);
+    let cap_mid = top + font::ascent(px) - cap / 2.0;
+    assert!(
+        (cap_mid - 112.0).abs() < 0.001,
+        "cap midpoint {cap_mid} should be the box midpoint 112"
+    );
 }

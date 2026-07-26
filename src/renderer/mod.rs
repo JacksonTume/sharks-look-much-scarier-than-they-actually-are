@@ -5,7 +5,6 @@
 //! camera-transformed mesh supplied by the consumer, with clear seams where a
 //! real engine would grow (material system, mesh registry, render graph, etc.).
 
-mod font;
 mod mesh;
 mod overlay;
 mod vertex;

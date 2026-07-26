@@ -4,7 +4,7 @@
 //! that releases its drag one frame early looks fine in a screenshot. Here it is
 //! just arithmetic over a [`UiInput`] the test writes by hand.
 
-use slmsttaa_ui::{Anchor, RecordingPainter, Ui, UiInput, UiState};
+use slmsttaa_ui::{font, Anchor, RecordingPainter, Ui, UiInput, UiState};
 
 const MARGIN: f32 = 12.0;
 const PANEL_W: f32 = 340.0;
@@ -12,7 +12,8 @@ const PAD: f32 = 10.0;
 const CONTENT_X: f32 = MARGIN + PAD;
 const CONTENT_W: f32 = 320.0;
 const ROW_H: f32 = 24.0;
-const TEXT_PX: f32 = 16.0;
+/// The body step's em size. Not a text *height*.
+const TEXT_PX: f32 = 19.0;
 
 /// A pointer resting at `(x, y)` with the button up.
 fn hovering(x: f32, y: f32) -> UiInput {
@@ -118,9 +119,15 @@ fn checkbox_toggles_on_press_and_reports_changed() {
 }
 
 /// A point inside the first slider's grab band: the label/value line sits at the
-/// top of the row, the track five points under it.
+/// top of the row and the track two points under it, with the band reaching six
+/// points above the track so it is easy to grab.
+///
+/// Measured from the **line box**, not from the em size. Those were the same
+/// number under the 8x8 bitmap font, which is why every arithmetic like this one
+/// in the suite was written as `TEXT_PX + ...` and why every one of them had to
+/// move in Slice 5.
 fn slider_band_y() -> f32 {
-    MARGIN + PAD + TEXT_PX + 5.0 + 2.0
+    MARGIN + PAD + font::line_height(TEXT_PX) + 2.0
 }
 
 #[test]

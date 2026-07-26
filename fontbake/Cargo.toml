@@ -1,0 +1,15 @@
+[package]
+name = "fontbake"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# The one crate in the workspace allowed a font rasterizer.
+#
+# It exists so that `xtask` doesn't have to. `cargo xtask serve` is the hot path
+# and stays dependency-free; this runs by hand, roughly never, and its output
+# (`slmsttaa-ui/src/font/atlas.bin` + `metrics.rs`) is committed. Same
+# quarantine-by-crate-boundary argument that justified splitting `slmsttaa-ui`:
+# a dependency that can't be reached can't creep.
+[dependencies]
+fontdue = "0.9"

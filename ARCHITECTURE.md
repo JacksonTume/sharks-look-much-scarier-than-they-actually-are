@@ -49,11 +49,13 @@ src/
     ├── vertex.rs     Vertex (position + color) and its buffer layout.
     ├── shader.wgsl   3D vertex/fragment shaders (WGSL).
     ├── overlay.rs    Overlay: the screen-space 2D pass (UI/HUD). Owns its own
-    │                 pipeline, a glyph atlas, and dynamic 2D buffers; implements
-    │                 ui::Painter. Drawn after the 3D pass (see Frame lifecycle).
-    ├── overlay.wgsl  2D vertex/fragment shaders for the overlay.
-    └── font.rs       Embedded public-domain 8x8 bitmap font (font8x8), baked into
-                      the overlay's glyph atlas — no font file/rasterizer at runtime.
+    │                 pipeline and dynamic 2D buffers, and uploads the *toolkit's*
+    │                 glyph atlas; implements ui::Painter. Drawn after the 3D pass
+    │                 (see Frame lifecycle).
+    └── overlay.wgsl  2D vertex/fragment shaders for the overlay.
+
+                      (font.rs is gone as of UI Slice 5 — the font moved to
+                      slmsttaa-ui/src/font/, for reasons under Text below.)
 
 examples/
 ├── triangle.rs       Reference consumer: implements Application and uploads one
@@ -176,16 +178,34 @@ render graph will eventually grow. The design holds two boundaries at once:
   pixel→NDC uniform tracks the surface size, so it resyncs through the same
   `resize()` path as the depth buffer and the web async-renderer resync.
 
-- **Text without a font dependency.** Glyphs come from an embedded 8x8 bitmap font
-  (`font.rs`, public-domain `font8x8`) baked once into an `R8Unorm` coverage atlas
-  at startup. One cell is overwritten fully white so solid rectangles and text
-  share a single pipeline (rects point at the white texel). Nearest filtering
-  keeps it crisp; there is no font file or rasterizer at runtime, which keeps it
-  identical on native and web (KISS).
+- **Text without a font dependency, and no longer the engine's font.** Glyphs come
+  from a **signed distance field** atlas that `slmsttaa-ui` owns
+  (`slmsttaa_ui::font::ATLAS`, `include_bytes!`d): the overlay uploads it as
+  `R8Unorm` and samples it with **linear** filtering, because a distance field has
+  to be interpolated to scale. `0.5` is the glyph outline; the antialiasing width
+  is computed on the CPU per run (`font::aa_band`) and passed per-vertex, since
+  `overlay.wgsl` uses no derivatives and `fwidth` is therefore unavailable. Solid
+  rectangles no longer sample the atlas at all — the old fully-white cell is gone,
+  and the shader gives them coverage by mode.
+
+  There is still no font file or rasterizer at runtime. The rasterizing happens
+  offline in the `fontbake` workspace member (Inter, OFL-1.1, committed under
+  `fontbake/assets/`), which is the one crate here allowed a font dependency; its
+  output is committed and reviewed.
+
+  **Why the font lives above the seam.** Through UI Slice 4 the engine owned the
+  font and `text_size` was on the `Painter` trait — implemented once by the overlay
+  and once by the test recorder, agreeing only because the bitmap font was a
+  monospace grid. Proportional advances break that: the two implementations
+  diverge, and then the UI tests measure a different font than the screen draws,
+  so they stay green while readouts drift out of the panel. Moving the metrics into
+  the crate that does the layout makes that unrepresentable. It costs a narrower
+  seam — a `Painter` no longer chooses its font — which is recorded in
+  `slmsttaa_ui::font` as the deliberate trade it is.
 
 - **`Painter` is the seam, and it is the engine's only obligation to the UI.**
   The toolkit talks to the overlay *only* through that trait (`fill_rect` /
-  `stroke_rect` / `text` / `text_size` / `set_layer` / `push_clip` / `pop_clip`)
+  `stroke_rect` / `text` / `set_layer` / `push_clip` / `pop_clip`)
   and never sees `wgpu`; the overlay is just one implementation, and a headless
   recorder in the UI crate's tests is another. Everything above the trait —
   widgets, layout, theming, interaction — is
@@ -210,9 +230,10 @@ render graph will eventually grow. The design holds two boundaries at once:
   UI Slice 3 is the useful counter-example: a rewrite of the whole layout system
   — regions, rows, columns, edge-anchored panels, right-aligned readouts — that
   widened the `Painter` trait by **nothing at all**. Everything it needed was
-  already there, `text_size` included. The only engine-side change was one more
-  field copied into `UiInput` (the viewport, for anchoring). A seam that absorbs
-  a change that size without moving is a seam in roughly the right place.
+  already there, text measurement included. The only engine-side change was one
+  more field copied into `UiInput` (the viewport, for anchoring). A seam that
+  absorbs a change that size without moving is a seam in roughly the right
+  place.
 
 - **Rounded corners and clipping are per-vertex parameters, not extra passes.**
   `Vertex2D` carries the rect it belongs to (center + half-size), a corner
@@ -323,10 +344,12 @@ Already in place (earlier seams now filled): an indexed `Mesh` + draw-list
 (Slice 1), a **depth buffer + back-face culling** (Slice 2), a **consumer-driven
 camera** fed by a winit-free `Input` (Slice 3), the **terrain vertical** (Slice 4,
 rebuilt in Slice 6 as a layered Perlin + hydro-thermal pipeline), a **screen-space
-overlay pass + decoupled immediate-mode UI** with an embedded bitmap font and a
-wasm-safe frame clock (Slice 5), and a **portable wireframe render mode**
-(`RenderMode`, line topology — Slice 6). On the overlay side specifically:
-**ordered draw layers** in `Overlay::flush` and a **`scale_factor`-aware
-surface** (UI Slice 1 — the toolkit speaks logical points and the overlay scales
-on the way to vertices), plus **rounded-rect, border, and clip support** in
-`overlay.wgsl` (UI Slice 2).
+overlay pass + decoupled immediate-mode UI** with a wasm-safe frame clock
+(Slice 5), and a **portable wireframe render mode** (`RenderMode`, line topology —
+Slice 6). On the overlay side specifically: **ordered draw layers** in
+`Overlay::flush` and a **`scale_factor`-aware surface** (UI Slice 1 — the toolkit
+speaks logical points and the overlay scales on the way to vertices),
+**rounded-rect, border, and clip support** in `overlay.wgsl` (UI Slice 2), and a
+**distance-field text mode** with a linear atlas sampler and a CPU-computed
+antialiasing band (UI Slice 5 — which also deleted `font.rs`, moving the font
+above the seam).

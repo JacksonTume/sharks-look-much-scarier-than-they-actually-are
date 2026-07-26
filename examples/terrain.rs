@@ -36,7 +36,7 @@
 //!   native — `cargo run --example terrain`
 //!   web    — `cargo xtask serve terrain`, then open the printed URL.
 
-use slmsttaa::ui::{Anchor, Rect, Response, Size, Theme, Ui, Variant};
+use slmsttaa::ui::{font, Anchor, Rect, Response, Size, Theme, Ui, Variant};
 use slmsttaa::{run, Application, Key, Mesh, MouseButton, RenderMode, Renderer, Vertex};
 
 #[path = "terrain/erosion.rs"]
@@ -64,34 +64,43 @@ use heightmap::{Heightmap, NoiseParams};
 /// the HUD and watch this track change with everything else — nothing in the
 /// crate knows this widget exists.
 ///
+/// Slice 5 is the second time the seam was tested from out here, and it moved:
+/// `text_size` left the `Painter` trait for [`font`], text takes a
+/// [`Weight`](slmsttaa::ui::Weight), and a run is no longer `px` tall. That this
+/// widget needed four edits and no new access is the point — a consumer's widget
+/// pays the same price a built-in one does, and no more.
+///
 /// If this needed private access, the seam would be wrong (UI roadmap Slice 1).
 fn log_slider(ui: &mut Ui, label: &str, value: &mut f32, min: f32, max: f32) -> Response {
     let theme = *ui.theme();
-    let px = theme.text.body;
+    let (px, weight) = theme.text.body.parts();
     let track_h = theme.control.track_h;
 
     let id = ui.next_id(label);
-    let row = ui.allocate([0.0, theme.control.row_h + px]);
+    // Sized from the line box, not from `px`: an em size is not a text height.
+    let text_h = font::line_height(px);
+    let row = ui.allocate([0.0, text_h + track_h + 9.0]);
 
     // Work in log space: the knob position is linear in log10(value).
     let (lmin, lmax) = (min.max(1e-9).log10(), max.log10());
     let span = (lmax - lmin).max(f32::EPSILON);
 
-    // Label left, value right — measured through the same public `text_size` the
-    // built-in slider uses, so this row lines up with the ones above it.
+    // Label left, value right — measured through the same public `font::text_width`
+    // the built-in slider uses, so this row lines up with the ones above it.
     let readout = format!("{value:.1e}");
-    let readout_w = ui.painter().text_size(&readout, px)[0];
+    let readout_w = font::text_width(&readout, px, weight);
     let painter = ui.painter();
-    painter.text(row.x, row.y, label, px, theme.color.foreground);
+    painter.text(row.x, row.y, label, px, weight, theme.color.foreground);
     painter.text(
         row.max_x() - readout_w,
         row.y,
         &readout,
         px,
+        weight,
         theme.color.muted,
     );
 
-    let track_y = row.y + px + 5.0;
+    let track_y = row.y + text_h + 2.0;
     let band = Rect::new(row.x, track_y - 6.0, row.w, track_h + 12.0);
     let mut response = ui.interact(band, id);
 

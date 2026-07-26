@@ -37,7 +37,7 @@ cargo build                            # debug build
 cargo build --release                  # optimized
 cargo clippy --all-targets             # lint
 cargo fmt --all                        # format (bare `cargo fmt` trips on examples/terrain/)
-cargo test -p slmsttaa-ui              # the tests (UI layout + hit-testing; see below)
+cargo test -p slmsttaa-ui              # the tests (UI layout, hit-testing, typography)
 
 # Web (wasm) — requires `cargo install wasm-bindgen-cli` once, at a version
 # matching the `wasm-bindgen` dependency in Cargo.lock.
@@ -48,6 +48,11 @@ cargo xtask serve cube                 # a specific example; also --release / --
 
 # Type-check the wasm target without packaging
 cargo build --target wasm32-unknown-unknown --lib
+
+# Re-bake the font atlas. Runs by hand, roughly never; its output
+# (slmsttaa-ui/src/font/{atlas.bin,metrics.rs}) is committed and reviewed.
+cargo run -p fontbake --release
+cargo run -p fontbake --release -- --preview atlas.pgm   # dump a viewable atlas
 ```
 
 Logging honors `RUST_LOG` (e.g. `RUST_LOG=slmsttaa=debug`); on the web it goes to
@@ -57,13 +62,16 @@ the browser console.
 
 The only tests live in `slmsttaa-ui/tests/` — the zero-dependency toolkit is the
 one part of the repo testable without a GPU, via the `RecordingPainter` double.
+They constrain but do not replace looking at the screen: three separate bugs (UI
+Slices 1, 3 and 5) passed the whole suite and were caught by running the demo.
 The engine half is still verified by building and looking at it. To confirm a
 change works:
 
 - **Always** `cargo build` (native) **and** `cargo build --target
   wasm32-unknown-unknown --lib` — the two targets diverge via `#[cfg]`, so one
   can break while the other compiles.
-- `cargo test -p slmsttaa-ui` for anything touching UI layout or hit-testing.
+- `cargo test -p slmsttaa-ui` for anything touching UI layout, hit-testing, or
+  text metrics.
 - For visual changes, run the native example (`cargo run --example triangle`)
   and/or rebuild the wasm package and hard-refresh the browser. The dev server
   serves `web/` live; no restart needed after a rebuild.
@@ -77,13 +85,26 @@ change works:
 - Match the surrounding rustdoc style — modules and public items are documented;
   keep that up.
 - Prefer keeping `wgpu` reasonably current (browsers track the live WebGPU spec).
-- **Where UI goes.** Widgets, layout, theming, and interaction belong in
-  `slmsttaa-ui/`, and so do their docs — do not add them to `ARCHITECTURE.md` or
-  the engine `ROADMAP.md`, which keep only the engine half (the overlay pass, the
-  glyph atlas, the `Painter` seam). `slmsttaa-ui` must stay **zero-dependency**:
-  it never imports `wgpu`, `winit`, or the engine crate. When the toolkit needs
-  something the painter can't draw, widen the `Painter` trait and implement it in
-  `renderer/overlay.rs` — never reach through to renderer internals.
+- **Where UI goes.** Widgets, layout, theming, typography, and interaction belong
+  in `slmsttaa-ui/`, and so do their docs — do not add them to `ARCHITECTURE.md`
+  or the engine `ROADMAP.md`, which keep only the engine half (the overlay pass,
+  the atlas upload, the `Painter` seam). `slmsttaa-ui` must stay
+  **zero-dependency**: it never imports `wgpu`, `winit`, or the engine crate. When
+  the toolkit needs something the painter can't draw, widen the `Painter` trait and
+  implement it in `renderer/overlay.rs` — never reach through to renderer
+  internals. Check with `cargo tree -p slmsttaa-ui`, which must print exactly one
+  line.
+- **Text metrics have exactly one home.** `slmsttaa_ui::font` — never a `Painter`
+  method, and never a widget's own arithmetic. Two implementations of "how wide is
+  this string" agreed for four slices only because the font was a monospace grid,
+  and would have diverged silently the moment it wasn't: the tests measure through
+  `RecordingPainter`, so a divergence shows up as a green suite and a broken
+  screen. Likewise, a run is **not** `px` tall — use `font::line_height` to size a
+  row and `font::centered_top` to centre one, never `(h - px) / 2`.
+- **`fontbake/` is the only crate allowed a font rasterizer**, and its output is
+  committed. Don't add `fontdue` (or any rasterizer) to `slmsttaa-ui`, the engine,
+  or `xtask` — including as a `build-dependency`, which would still show up in the
+  dependency graph and break the claim above.
 - Anything the engine ships as a widget must be re-implementable by a demo from
   public API alone. A widget with no demo roadblock behind it is polish; label it
   as such rather than filing it as infrastructure.

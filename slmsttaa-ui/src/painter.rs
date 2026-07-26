@@ -13,8 +13,22 @@
 //! Coordinates are **logical points**, not physical pixels. A painter that
 //! renders to a HiDPI surface scales them on the way out; the toolkit never
 //! learns the display's scale factor, so its layout math is resolution-agnostic.
+//!
+//! # What is deliberately *not* on this trait
+//!
+//! `text_size`. It used to be here, and it was the most dangerous method in the
+//! crate: implemented once per painter, so the recording painter and the engine's
+//! overlay could disagree about how wide a string is, and every test would still
+//! pass. Measuring now lives in [`font`](crate::font), which both painters read.
+//! See that module for the full argument and what it cost.
+//!
+//! The consequence is a real narrowing: **a painter does not choose the font.**
+//! It is handed a run, a size, a [`Weight`], and the glyph geometry it needs from
+//! [`font::glyph`](crate::font::glyph), and its job is to put those quads on the
+//! screen.
 
-use crate::Rect;
+use crate::font::Weight;
+use crate::{font, Rect};
 
 /// An RGBA color in `[0, 1]`, the only color type the UI speaks.
 pub type Color = [f32; 4];
@@ -69,12 +83,17 @@ pub trait Painter {
     /// rectangle so a stroked and a filled rect of the same bounds line up.
     fn stroke_rect(&mut self, rect: Rect, radius: f32, width: f32, color: Color);
 
-    /// Draw a left-aligned, single-line text run with its top-left at `(x, y)`.
-    /// `px` is the (square) cell size of each glyph in points.
-    fn text(&mut self, x: f32, y: f32, text: &str, px: f32, color: Color);
-
-    /// The size a text run would occupy: `[width, height]` in points.
-    fn text_size(&self, text: &str, px: f32) -> [f32; 2];
+    /// Draw a left-aligned, single-line text run at size `px` in `weight`, with
+    /// the top-left of its **line box** at `(x, y)`.
+    ///
+    /// `px` is the em size — the conventional meaning of a font size — so the
+    /// ink does not fill the line box: the baseline sits
+    /// [`font::ascent(px)`](crate::font::ascent) below `y` and capitals reach
+    /// [`font::cap_height(px)`](crate::font::cap_height) above it. Measure a run
+    /// with [`font::text_size`](crate::font::text_size) and centre one in a
+    /// control with [`font::centered_top`](crate::font::centered_top); do not
+    /// assume the run is `px` tall, which is what the old bitmap font allowed.
+    fn text(&mut self, x: f32, y: f32, text: &str, px: f32, weight: Weight, color: Color);
 
     /// Direct subsequent primitives into `layer` until this is called again.
     ///
@@ -120,14 +139,16 @@ pub enum DrawCmd {
     },
     /// A single-line text run.
     Text {
-        /// Top-left x, in logical points.
+        /// Line-box top-left x, in logical points.
         x: f32,
-        /// Top-left y, in logical points.
+        /// Line-box top-left y, in logical points.
         y: f32,
         /// The run's contents.
         text: String,
-        /// Glyph cell size in points.
+        /// Em size in points.
         px: f32,
+        /// Which cut of the face.
+        weight: Weight,
         /// Text color.
         color: Color,
         /// The layer this was drawn into.
@@ -160,9 +181,10 @@ impl DrawCmd {
 /// of these and assert on the resulting [`DrawCmd`]s to pin down layout math and
 /// hit-testing.
 ///
-/// Text metrics assume the same monospace grid the engine's embedded bitmap font
-/// uses (advance == cell size), so recorded layout matches what the overlay
-/// produces.
+/// Text metrics are not this painter's business, and that is the point: it and
+/// the engine's overlay both measure through [`font`](crate::font), so recorded
+/// layout matches what a viewer sees by construction rather than by two
+/// implementations happening to agree.
 #[derive(Debug, Default, Clone)]
 pub struct RecordingPainter {
     /// Everything drawn since construction (or the last [`RecordingPainter::clear`]),
@@ -219,8 +241,18 @@ impl RecordingPainter {
         self.cmds
             .iter()
             .filter_map(|c| match c {
-                DrawCmd::Text { text, x, y, px, .. } => {
-                    let bounds = Rect::new(*x, *y, text.chars().count() as f32 * px, *px);
+                DrawCmd::Text {
+                    text,
+                    x,
+                    y,
+                    px,
+                    weight,
+                    ..
+                } => {
+                    // Measured through `font`, the same as the layout that placed
+                    // it — so this reports what a viewer would actually read.
+                    let [w, h] = font::text_size(text, *px, *weight);
+                    let bounds = Rect::new(*x, *y, w, h);
                     match c.clip() {
                         Some(clip) if clip.intersect(bounds).is_empty() => None,
                         _ => Some(text.as_str()),
@@ -260,20 +292,17 @@ impl Painter for RecordingPainter {
         });
     }
 
-    fn text(&mut self, x: f32, y: f32, text: &str, px: f32, color: Color) {
+    fn text(&mut self, x: f32, y: f32, text: &str, px: f32, weight: Weight, color: Color) {
         self.cmds.push(DrawCmd::Text {
             x,
             y,
             text: text.to_string(),
             px,
+            weight,
             color,
             layer: self.layer,
             clip: self.clip(),
         });
-    }
-
-    fn text_size(&self, text: &str, px: f32) -> [f32; 2] {
-        [text.chars().count() as f32 * px, px]
     }
 
     fn set_layer(&mut self, layer: Layer) {

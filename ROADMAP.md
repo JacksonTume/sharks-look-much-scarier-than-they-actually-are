@@ -209,8 +209,10 @@ yaw/pitch/distance, erosion iteration count) over the 3D scene, on both targets.
 parameter panel over the 3D scene, on native and web. The engine gained: a
 screen-space overlay pass (`src/renderer/overlay.rs`) — the first *second pass*,
 loading rather than clearing the color target, depth off, alpha-blended; an
-embedded bitmap font baked into a glyph atlas (`src/renderer/font.rs`, the
-public-domain `font8x8`, no font file or rasterizer dependency); and a frame clock
+embedded bitmap font baked into a glyph atlas (then `src/renderer/font.rs`, the
+public-domain `font8x8`, no font file or rasterizer dependency — replaced in UI
+Slice 5 by a distance-field bake of Inter that the *toolkit* owns); and a frame
+clock
 (`src/time.rs`, `Renderer::dt`, wasm-safe via `performance.now()`).
 
 *The interactive-UI step came with it.* The driving demo didn't just need to
@@ -483,11 +485,11 @@ for a consumer to ask:
 
 Painter capabilities the UI crate demands of the overlay are engine seams too —
 but they're sequenced in the [UI roadmap](slmsttaa-ui/ROADMAP.md), since that's
-what pulls them into existence. Three have already landed there and been paid for
+what pulls them into existence. Four have already landed there and been paid for
 here: ordered draw layers in `Overlay::flush` and a `scale_factor`-aware surface
 (UI Slice 1), then rounded-rect and clip support in `overlay.wgsl` and the wider
-`Vertex2D` that carries them (UI Slice 2). The overlay is still a single
-`draw_indexed`. The next one the UI is likely to ask for is textured quads, which
+`Vertex2D` that carries them (UI Slice 2), then a distance-field text mode plus a
+linear atlas sampler (UI Slice 5). The overlay is still a single `draw_indexed`. The next one the UI is likely to ask for is textured quads, which
 is the same shader work the "no texture support" entry above is waiting on.
 
 The trend since is the point: UI Slice 3 (layout) cost one field — `UiInput`
@@ -497,3 +499,12 @@ method, no shader change, no `Vertex2D` field. A whole styling system landed abo
 a seam that speaks in colors and rectangles and does not care where a color came
 from, which is the clearest evidence yet that the seam is drawn in the right
 place.
+
+UI Slice 5 (typography) is the exception, and interesting for being one: it is the
+only slice so far to make the seam **narrower**. `text_size` left the `Painter`
+trait entirely and `src/renderer/font.rs` was deleted, because two independent
+implementations of "how wide is this string" agreed only by the accident of a
+monospace font and would have silently disagreed the moment the advances became
+proportional. The engine no longer owns a font; it uploads the toolkit's atlas and
+draws the quads it is given. A seam that can be *cut back* when a capability moves
+above it is as good a sign as one that absorbs a change without moving.

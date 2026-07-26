@@ -4,25 +4,31 @@
 //! [`Response`] and still hit-test, because a label's rectangle and hover state
 //! are exactly what a consumer needs to hang a tooltip on one later.
 
-use crate::{Color, Rect, Response, Ui};
+use crate::theme::TypeStep;
+use crate::{font, Color, Rect, Response, Ui};
 
 impl Ui<'_> {
-    /// A bold heading row, underlined with a short accent bar.
+    /// A heading row in the title step — larger and heavier than body text —
+    /// underlined with a short accent bar.
     pub fn title(&mut self, text: &str) -> Response {
         let theme = self.theme;
-        let px = theme.text.title;
+        let (px, weight) = theme.text.title.parts();
 
         let id = self.next_id(text);
-        let row = self.allocate([0.0, px + 12.0]);
+        // The line box plus room for the rule beneath it.
+        let row = self.allocate([0.0, font::line_height(px) + 8.0]);
         let response = self.interact(row, id);
 
         self.painter
-            .text(row.x, row.y, text, px, theme.color.foreground);
+            .text(row.x, row.y, text, px, weight, theme.color.foreground);
         // A short accent rule under the title gives the panel a clear header
-        // instead of a flat wall of text.
-        let tw = self.painter.text_size(text, px)[0];
+        // instead of a flat wall of text. It sits under the *baseline* rather
+        // than under the line box: descender space below the baseline is empty
+        // for a title in caps, and a rule that clears it looks detached.
+        let tw = font::text_width(text, px, weight);
+        let rule_y = row.y + font::ascent(px) + 4.0;
         self.painter.fill_rect(
-            Rect::new(row.x, row.y + px + 3.0, tw.max(40.0), 2.0),
+            Rect::new(row.x, rule_y, tw.max(40.0), 2.0),
             1.0,
             theme.color.accent,
         );
@@ -54,10 +60,10 @@ impl Ui<'_> {
     /// sharing a label in one scope are separated with [`Ui::push_id`].
     pub fn section(&mut self, text: &str) -> Response {
         let theme = self.theme;
-        let px = theme.text.section;
+        let (px, weight) = theme.text.section.parts();
 
         let id = self.next_id(text);
-        let row = self.allocate([0.0, 2.0 + px + 6.0]);
+        let row = self.allocate([0.0, font::line_height(px) + 6.0]);
         let mut response = self.interact(row, id);
 
         if response.clicked {
@@ -74,9 +80,10 @@ impl Ui<'_> {
         } else {
             theme.color.heading
         };
-        self.painter.text(row.x, row.y + 2.0, caret, px, color);
+        let y = font::centered_top(row.y, row.h, px);
+        self.painter.text(row.x, y, caret, px, weight, color);
         self.painter
-            .text(row.x + theme.space.indent, row.y + 2.0, text, px, color);
+            .text(row.x + theme.space.indent, y, text, px, weight, color);
 
         response
     }
@@ -103,11 +110,17 @@ impl Ui<'_> {
     /// is 304 points where `"area exponent m: 0.50"` is 336 — the difference
     /// between fitting and not.
     ///
-    /// The value is measured with [`Painter::text_size`](crate::Painter::text_size),
-    /// so it is only ever as right-aligned as the font's metrics are honest.
+    /// The value is measured with [`font::text_width`], the same function that
+    /// laid it out — so the alignment is exact rather than as honest as two
+    /// separate metric tables happen to be.
+    ///
+    /// Digits are **tabular**: every digit has the widest digit's advance, so a
+    /// live readout keeps still instead of shuffling sideways as `1`s and `0`s
+    /// trade places. Inter's proportional `1` is 37% narrower than its `0`, which
+    /// is very visible on a slider being dragged.
     pub fn label_value(&mut self, label: &str, value: &str) -> Response {
         let theme = self.theme;
-        let px = theme.text.body;
+        let step = theme.text.body;
 
         // Seeded with a constant for the same reason `text_row` is: the value
         // side is usually a live number, and hashing it would hand the row a new
@@ -116,11 +129,9 @@ impl Ui<'_> {
         let row = self.allocate([0.0, theme.control.row_h]);
         let response = self.interact(row, id);
 
-        let value_w = self.painter.text_size(value, px)[0];
-        self.painter
-            .text(row.x, row.y, label, px, theme.color.foreground);
-        self.painter
-            .text(row.max_x() - value_w, row.y, value, px, theme.color.muted);
+        self.draw_run(row, row.x, label, step, theme.color.foreground);
+        let value_x = row.max_x() - step.width(value);
+        self.draw_run(row, value_x, value, step, theme.color.muted);
         response
     }
 
@@ -137,14 +148,24 @@ impl Ui<'_> {
 
     /// Shared body of [`Ui::label`] and [`Ui::label_muted`].
     fn text_row(&mut self, text: &str, color: Color) -> Response {
-        let px = self.theme.text.body;
+        let step = self.theme.text.body;
         // Seeded with a constant, not the text: labels routinely show live
         // numbers ("60 fps"), and hashing those would give the row a new id
         // every frame.
         let id = self.next_id("label");
         let row = self.allocate([0.0, self.theme.control.row_h]);
         let response = self.interact(row, id);
-        self.painter.text(row.x, row.y, text, px, color);
+        self.draw_run(row, row.x, text, step, color);
         response
+    }
+
+    /// Draw one run at `x`, vertically centred in `row`.
+    ///
+    /// Every text row wants exactly this, and having it in one place is what
+    /// stopped each widget from carrying its own vertical fudge factor.
+    fn draw_run(&mut self, row: Rect, x: f32, text: &str, step: TypeStep, color: Color) {
+        let (px, weight) = step.parts();
+        let y = font::centered_top(row.y, row.h, px);
+        self.painter.text(x, y, text, px, weight, color);
     }
 }
