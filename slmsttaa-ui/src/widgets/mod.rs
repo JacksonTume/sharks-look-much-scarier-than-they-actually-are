@@ -9,4 +9,5 @@ mod button;
 mod slider;
 mod text;
 
+pub use button::Button;
 pub use slider::{Slider, SliderLayout};

@@ -328,7 +328,7 @@ slice's stated scope, and also the clearest possible argument that a `fit_text`
 helper has now been asked for twice. It is still not scheduled; it is recorded
 under *Waiting on a roadblock* with the evidence attached.
 
-## Slice 4 — Theme tokens + variants
+## Slice 4 — Theme tokens + variants ✅ done
 
 *Roadblock:* by here there are enough widgets that nine `const Color`s no longer
 hold the look together, and the demo wants a destructive-styled "reset" action
@@ -340,7 +340,80 @@ that shouldn't be a hand-colored rectangle.
 - Widgets stop naming literal colors — this is what makes ten widgets look like
   one system rather than ten decisions.
 
-*Proof:* the terrain panel restyles end-to-end by swapping one `Theme` value.
+*Proof:* the terrain panel restyles end-to-end by swapping one `Theme` value —
+there is a **light** toggle in the HUD, and both panels, every widget, and the
+demo's own `log_slider` follow it. The Grid section now ends in a red **reset
+all** beneath a blue **new seed**, and the shape presets are secondary and small,
+so one panel shows all three variants at once. Verified on native and on web
+under `BrowserWebGpu`.
+
+**What shipped, and what it cost:**
+
+- **`theme` stopped being a wall of constants and became a value.** `Theme` holds
+  a `Palette` of 18 semantic colors plus four scales — `Radii { sm, md, lg }`,
+  `Space { margin, pad, gap, indent }`, `TypeScale { small, body, section, title }`,
+  `Control { row_h, track_h, knob_w, scrollbar_w, scroll_speed, border, ring }`.
+  `Theme::dark()` restates the exact numbers the toolkit shipped with through
+  Slice 3, so adopting tokens changed the vocabulary without changing the picture.
+- **It is `Copy`, and that is load-bearing.** Widgets open with
+  `let theme = *ui.theme();` and then borrow the painter mutably — which is
+  exactly what a snapshot buys and a `&Theme` would have forbidden. About 300
+  bytes a widget a frame; unmeasurable next to a `format!` in every slider.
+- **The theme is re-applied every frame, deliberately.** `ui.set_theme(t)` at the
+  top of the frame, and nothing style-shaped is retained in `UiState`. The
+  alternative — persisting it in host state — would have needed a
+  `Renderer::ui_theme_mut()` on the engine side to be reachable at all, and it
+  would have made the one part of the design that is *purely* declarative the one
+  part that accumulates. The consumer already owns the value.
+- **Variants are three, not shadcn's six.** `Primary` / `Secondary` /
+  `Destructive`, because the terrain panel wanted exactly those three in one
+  panel: a plain action, a row of equivalent choices, and one that throws work
+  away. `Ghost` is not here. That is the roadmap's stopping rule applied to
+  *styling* rather than to widgets, and it is the harder place to apply it —
+  variants are cheap to add and each one is a token pair forever.
+- **Pressed is a scrim, not a fourth color per variant.** A held control draws its
+  fill and then `surface` over it. `surface` is a light wash on a dark theme and a
+  dark one on a light theme, so one existing token gives every variant a pressed
+  state that reads correctly in both directions. Three more tokens per variant
+  would have said the same thing at three times the price — and this is the shape
+  the rule "a widget never names a literal color" pushes you into once you take
+  it seriously.
+- **The button became a builder**, which is a breaking change to every call site
+  (`ui.button("x").clicked` → `ui.button("x").show().clicked`). This is the same
+  trade Slice 3 made for the slider and for the same reason: `button_destructive`
+  beside `button` is two surfaces for one control, and the third variant would
+  have made it three. `checkbox` did **not** get one — nothing has asked a
+  checkbox for a variant, and a builder with nothing to configure is ceremony.
+- **`Size` earned its place by fixing something.** Slice 3 recorded a button label
+  overflowing its third-width cell, answered by shortening the string. `Size::Sm`
+  draws at 13 points instead of 16, which fits seven glyphs in a preset cell where
+  the standard size fits six. It does not retire `fit_text` — the caller still has
+  to know what fits — but it is the first thing to make that budget bigger rather
+  than the string shorter.
+
+**This is the first UI slice since the split that cost the engine nothing.**
+Slices 1 and 2 both landed work in `renderer/overlay.rs` and `overlay.wgsl`;
+tokens are pure toolkit, because the `Painter` seam speaks in colors and
+rectangles and does not care where a color came from. That the seam absorbed a
+whole styling system without moving is the strongest evidence so far that it is
+drawn in the right place.
+
+**The claim this slice makes is testable, which is unusual for styling.** "No
+widget names a literal color" is not a code-review convention here — `tests/theme.rs`
+styles a frame with a theme whose every token is a distinct sentinel value and
+asserts that *every color reaching the painter* is one of them. A widget added
+later with `[0.26, 0.59, 0.98, 1.0]` typed into it looks perfect on the default
+theme and wrong on every other, which is precisely the failure a screenshot
+misses and this test doesn't. A second test drives the whole roster through
+`dark()` and `light()` and asserts no color survives the swap.
+
+**What it exposed.** `Theme::light()` was written to be the proof, and writing it
+is what forced `primary_foreground` / `secondary_foreground` /
+`destructive_foreground` to exist. On a dark theme every filled control can share
+one near-white label color and nobody notices the shortcut; on a light theme a
+blue-filled button needs white text while a faint-wash button needs near-black,
+and a single `on_fill` token cannot be both. The second theme is not decoration —
+it is the thing that finds the tokens a one-theme system lets you skip.
 
 ## Slice 5 — Typography *(polish, labeled)*
 
@@ -385,10 +458,12 @@ finally demands one, not as a to-build list:
   twice. Slice 2's clipping made long section headings truncate mid-glyph; Slice
   3's preset row made a button label overflow its cell. Both were answered by
   shortening the string, which works and is honest, but the third time will be
-  the one where the caller can't shorten it. The shape is known and small: with
-  monospace `Painter::text_size` and a real available rect, clamping a run to its
-  width with a trailing `…` is a dozen lines. It waits for a consumer whose
-  strings aren't its own to edit.
+  the one where the caller can't shorten it. Slice 4's `Size::Sm` made the preset
+  cell fit seven glyphs instead of six, which buys slack rather than solving
+  anything — the caller still has to know what fits. The shape is known and
+  small: with monospace `Painter::text_size` and a real available rect, clamping
+  a run to its width with a trailing `…` is a dozen lines. It waits for a
+  consumer whose strings aren't its own to edit.
 - **Draggable panel edges** — panel *width* is a parameter as of Slice 3, so a
   consumer can already resize one by passing a different number. A grab handle
   that lets the *user* do it at runtime is a separate thing, and stays under the

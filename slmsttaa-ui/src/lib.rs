@@ -32,23 +32,26 @@
 //!
 //! Everything the built-in widgets use is public: [`Ui::allocate`] claims space,
 //! [`Ui::interact`] hit-tests it and returns a [`Response`], [`Ui::painter`]
-//! draws it, and [`theme`] holds the metrics and colors that make it match. A
-//! widget this crate never shipped is therefore not second-class — if one ever
-//! needs private access, the seam is wrong and the seam gets fixed.
+//! draws it, and [`Ui::theme`] hands over the same semantic tokens they style
+//! themselves from. A widget this crate never shipped is therefore not
+//! second-class — if one ever needs private access, the seam is wrong and the
+//! seam gets fixed.
 //!
 //! ```
-//! use slmsttaa_ui::{theme, Rect, Response, Ui};
+//! use slmsttaa_ui::{Rect, Response, Ui};
 //!
-//! /// A read-only bar. Nothing here is privileged.
+//! /// A read-only bar. Nothing here is privileged, and nothing here names a
+//! /// literal color — so it restyles with everything else.
 //! fn meter(ui: &mut Ui, label: &str, t: f32) -> Response {
+//!     let theme = *ui.theme();
 //!     let id = ui.next_id(label);
-//!     let row = ui.allocate([0.0, theme::ROW_H]);
+//!     let row = ui.allocate([0.0, theme.control.row_h]);
 //!     let response = ui.interact(row, id);
 //!
-//!     let fill = if response.hovered { theme::COL_ACCENT_HOT } else { theme::COL_ACCENT };
+//!     let fill = if response.hovered { theme.color.accent_hover } else { theme.color.accent };
 //!     let filled = Rect::new(row.x, row.y, row.w * t.clamp(0.0, 1.0), row.h);
-//!     ui.painter().fill_rect(row, theme::RADIUS, theme::COL_TRACK);
-//!     ui.painter().fill_rect(filled, theme::RADIUS, fill);
+//!     ui.painter().fill_rect(row, theme.radius.md, theme.color.surface);
+//!     ui.painter().fill_rect(filled, theme.radius.md, fill);
 //!     response
 //! }
 //! ```
@@ -59,21 +62,23 @@
 //! you. Standalone — which is also how it is tested — you supply the painter:
 //!
 //! ```
-//! use slmsttaa_ui::{theme, Anchor, RecordingPainter, Ui, UiInput, UiState};
+//! use slmsttaa_ui::{Anchor, RecordingPainter, Theme, Ui, UiInput, UiState};
 //!
 //! // Owned by the host, and outlive the frame.
 //! let mut painter = RecordingPainter::default();
 //! let mut state = UiState::default();
 //! let mut erodibility = 0.003_f32;
+//! let theme = Theme::dark();
 //!
 //! let mut ui = Ui::new(&mut painter, UiInput::default(), &mut state);
-//! ui.panel(Anchor::TopLeft, theme::PANEL_W, |ui| {
+//! ui.set_theme(theme);
+//! ui.panel(Anchor::TopLeft, theme.panel_w, |ui| {
 //!     ui.title("Erosion");
 //!     ui.label_value("fps", "60");
 //!     if ui.section("Fluvial").open {
 //!         ui.slider("erodibility", &mut erodibility, 0.0, 0.006).decimals(4).show();
 //!     }
-//!     if ui.button("new seed").clicked { /* reseed */ }
+//!     if ui.button("new seed").show().clicked { /* reseed */ }
 //! });
 //! let recompute = ui.changed();
 //! # let _ = recompute;
@@ -90,7 +95,8 @@ mod widgets;
 pub use interact::{Response, UiInput, UiState};
 pub use layout::Rect;
 pub use painter::{Color, DrawCmd, Layer, Painter, RecordingPainter};
-pub use widgets::{Slider, SliderLayout};
+pub use theme::{Size, Theme, Variant};
+pub use widgets::{Button, Slider, SliderLayout};
 
 use layout::{Dir, Region};
 
@@ -163,6 +169,9 @@ pub struct Ui<'a> {
     painter: &'a mut dyn Painter,
     input: UiInput,
     state: &'a mut UiState,
+    /// Every token the widgets style themselves from. Copied by value into each
+    /// widget that needs it, which is why it is [`Copy`].
+    theme: Theme,
     /// The layout stack; never empty (the root region is pushed on construction).
     regions: Vec<Region>,
     /// The id scope stack; never empty (the root scope is pushed on construction).
@@ -190,6 +199,9 @@ impl<'a> Ui<'a> {
     /// declaring a widget outside any [`panel`](Ui::panel) is not an error — it
     /// simply lands bare in the top-left corner with no background behind it.
     /// That is almost always a mistake, and never a crash.
+    ///
+    /// The frame starts on [`Theme::dark`]; a consumer with its own theme calls
+    /// [`Ui::set_theme`] next.
     pub fn new(painter: &'a mut dyn Painter, input: UiInput, state: &'a mut UiState) -> Self {
         // `hot` is recomputed from scratch every frame; `active` and `focused`
         // deliberately persist.
@@ -201,6 +213,7 @@ impl<'a> Ui<'a> {
             painter,
             input,
             state,
+            theme: Theme::default(),
             regions: vec![Region::vertical(Rect::new(0.0, 0.0, vw, vh))],
             scopes: vec![Scope {
                 id: 0,
@@ -234,9 +247,31 @@ impl<'a> Ui<'a> {
 
     // --- The unprivileged seam ---------------------------------------------
     //
-    // `allocate` / `interact` / `painter` / `next_id` are public *together*,
-    // because a widget needs all four. Anything this crate's own widgets can do,
-    // a consumer's can too (UI roadmap Slice 1).
+    // `allocate` / `interact` / `painter` / `next_id` / `theme` are public
+    // *together*, because a widget needs all five. Anything this crate's own
+    // widgets can do, a consumer's can too (UI roadmap Slice 1).
+
+    /// The tokens this frame is styled from.
+    ///
+    /// Read it the way the built-in widgets do — `let theme = *ui.theme();` up
+    /// front, so the copy outlives the mutable borrow [`Ui::painter`] takes.
+    pub fn theme(&self) -> &Theme {
+        &self.theme
+    }
+
+    /// Restyle the rest of this frame.
+    ///
+    /// Call it once at the top, before any panel. It applies to every widget
+    /// declared afterward, so a mid-frame swap is legal (and is how a consumer
+    /// would theme one panel differently) — it simply isn't retroactive.
+    ///
+    /// Immediate mode all the way down: the theme is not remembered between
+    /// frames, because the consumer already owns the value and re-declaring the
+    /// UI each frame is the premise of the whole design. Nothing style-shaped
+    /// accumulates in [`UiState`].
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
 
     /// Claim the next `[width, height]` of space and return its rectangle.
     ///
@@ -251,14 +286,15 @@ impl<'a> Ui<'a> {
     /// wants a specific size regardless sets it with [`Ui::sized`] first.
     pub fn allocate(&mut self, [width, height]: [f32; 2]) -> Rect {
         let [width, height] = self.next_size.take().unwrap_or([width, height]);
-        self.region_mut().place(width, height, theme::GAP)
+        let gap = self.theme.space.gap;
+        self.region_mut().place(width, height, gap)
     }
 
     /// Force the size of the *next* widget, overriding what it asks for.
     ///
     /// One-shot: it applies to the next [`allocate`](Ui::allocate) and then
     /// clears itself. This is how a row gets uneven cells —
-    /// `ui.sized([80.0, theme::ROW_H]).button("new")` — without every widget
+    /// `ui.sized([80.0, 24.0]).button("new").show()` — without every widget
     /// growing a width argument it would ignore nine times out of ten.
     pub fn sized(&mut self, size: [f32; 2]) -> &mut Self {
         self.next_size = Some(size);
@@ -426,12 +462,12 @@ impl<'a> Ui<'a> {
     /// so they land *behind* everything declared inside it.
     ///
     /// ```
-    /// # use slmsttaa_ui::{theme, Anchor, RecordingPainter, Ui, UiInput, UiState};
+    /// # use slmsttaa_ui::{Anchor, RecordingPainter, Theme, Ui, UiInput, UiState};
     /// # let (mut p, mut s) = (RecordingPainter::default(), UiState::default());
     /// # let input = UiInput { viewport: (1280.0, 720.0), ..UiInput::default() };
     /// # let mut ui = Ui::new(&mut p, input, &mut s);
     /// # let mut wireframe = false;
-    /// ui.panel(Anchor::TopLeft, theme::PANEL_W, |ui| {
+    /// ui.panel(Anchor::TopLeft, Theme::default().panel_w, |ui| {
     ///     ui.title("Terrain");
     /// });
     /// ui.panel(Anchor::TopRight, 170.0, |ui| {
@@ -445,6 +481,9 @@ impl<'a> Ui<'a> {
         width: f32,
         add_contents: impl FnOnce(&mut Ui<'a>) -> R,
     ) -> R {
+        let theme = self.theme;
+        let (margin, pad) = (theme.space.margin, theme.space.pad);
+
         let id = self.next_id(anchor.key());
         self.scopes.push(Scope {
             id,
@@ -453,13 +492,13 @@ impl<'a> Ui<'a> {
 
         // Narrower than its own padding would be a panel with negative content
         // width, which `place` would clamp to zero anyway — say so up front.
-        let width = width.max(2.0 * theme::PAD);
+        let width = width.max(2.0 * pad);
         let (vw, vh) = self.input.viewport;
 
         let x = if anchor.is_right() {
-            vw - theme::MARGIN - width
+            vw - margin - width
         } else {
-            theme::MARGIN
+            margin
         };
         let y = if anchor.is_bottom() {
             // The one place a frame of lag is unavoidable: the contents have to
@@ -467,18 +506,13 @@ impl<'a> Ui<'a> {
             let previous = self
                 .state
                 .panel_rect(id)
-                .map_or(theme::ROW_H + 2.0 * theme::PAD, |r| r.h);
-            vh - theme::MARGIN - previous
+                .map_or(theme.control.row_h + 2.0 * pad, |r| r.h);
+            vh - margin - previous
         } else {
-            theme::MARGIN
+            margin
         };
 
-        let content = Rect::new(
-            x + theme::PAD,
-            y + theme::PAD,
-            width - 2.0 * theme::PAD,
-            (vh - y - theme::PAD).max(0.0),
-        );
+        let content = Rect::new(x + pad, y + pad, width - 2.0 * pad, (vh - y - pad).max(0.0));
         self.regions.push(Region::vertical(content));
         let result = add_contents(self);
         let region = self.regions.pop().expect("panel pushed a region");
@@ -487,15 +521,19 @@ impl<'a> Ui<'a> {
             x,
             y,
             width,
-            theme::PAD + region.consumed_height().max(theme::ROW_H) + theme::PAD,
+            pad + region.consumed_height().max(theme.control.row_h) + pad,
         );
         self.painter.set_layer(Layer::Base);
         self.painter
-            .fill_rect(bg, theme::RADIUS_LG, theme::COL_PANEL);
+            .fill_rect(bg, theme.radius.lg, theme.color.background);
         // A hairline border does the job a drop shadow would, for a fraction of
         // the shader: over a bright patch of terrain the panel still has an edge.
-        self.painter
-            .stroke_rect(bg, theme::RADIUS_LG, theme::BORDER, theme::COL_BORDER);
+        self.painter.stroke_rect(
+            bg,
+            theme.radius.lg,
+            theme.control.border,
+            theme.color.border,
+        );
         self.painter.set_layer(Layer::Panel);
 
         self.state.set_panel_rect(id, bg);
@@ -512,13 +550,13 @@ impl<'a> Ui<'a> {
     /// tallest member.
     ///
     /// ```
-    /// # use slmsttaa_ui::{theme, Anchor, RecordingPainter, Ui, UiInput, UiState};
+    /// # use slmsttaa_ui::{Anchor, RecordingPainter, Theme, Ui, UiInput, UiState};
     /// # let (mut p, mut s) = (RecordingPainter::default(), UiState::default());
     /// # let mut ui = Ui::new(&mut p, UiInput::default(), &mut s);
-    /// # ui.panel(Anchor::TopLeft, theme::PANEL_W, |ui| {
+    /// # ui.panel(Anchor::TopLeft, Theme::default().panel_w, |ui| {
     /// ui.horizontal(|ui| {
-    ///     ui.sized([120.0, theme::ROW_H]).label("seed");
-    ///     ui.button("new");
+    ///     ui.sized([120.0, 24.0]).label("seed");
+    ///     ui.button("new").show();
     /// });
     /// # });
     /// ```
@@ -553,13 +591,13 @@ impl<'a> Ui<'a> {
     /// *tallest* column, so columns of different lengths don't overlap anything.
     ///
     /// ```
-    /// # use slmsttaa_ui::{theme, Anchor, RecordingPainter, Ui, UiInput, UiState};
+    /// # use slmsttaa_ui::{Anchor, RecordingPainter, Theme, Ui, UiInput, UiState};
     /// # let (mut p, mut s) = (RecordingPainter::default(), UiState::default());
     /// # let mut ui = Ui::new(&mut p, UiInput::default(), &mut s);
-    /// # ui.panel(Anchor::TopLeft, theme::PANEL_W, |ui| {
+    /// # ui.panel(Anchor::TopLeft, Theme::default().panel_w, |ui| {
     /// const PRESETS: [&str; 3] = ["alps", "dunes", "mesa"];
     /// ui.columns(3, |ui, i| {
-    ///     if ui.button(PRESETS[i]).clicked { /* load it */ }
+    ///     if ui.button(PRESETS[i]).show().clicked { /* load it */ }
     /// });
     /// # });
     /// ```
@@ -567,13 +605,14 @@ impl<'a> Ui<'a> {
         if count == 0 {
             return;
         }
+        let gap = self.theme.space.gap;
         let line = self.region().next_line();
-        let gaps = theme::GAP * (count - 1) as f32;
+        let gaps = gap * (count - 1) as f32;
         let w = ((line.w - gaps) / count as f32).max(0.0);
 
         let mut tallest: f32 = 0.0;
         for i in 0..count {
-            let x = line.x + (w + theme::GAP) * i as f32;
+            let x = line.x + (w + gap) * i as f32;
             self.regions
                 .push(Region::vertical(Rect::new(x, line.y, w, line.h)));
             cell(self, i);
@@ -583,16 +622,14 @@ impl<'a> Ui<'a> {
         self.region_mut().advance_block(tallest);
     }
 
-    /// Declare widgets stepped in from the left by [`theme::INDENT`], for rows
+    /// Declare widgets stepped in from the left by [`Space::indent`], for rows
     /// that belong to the toggle above them.
+    ///
+    /// [`Space::indent`]: theme::Space::indent
     pub fn indent<R>(&mut self, add_contents: impl FnOnce(&mut Ui<'a>) -> R) -> R {
+        let step = self.theme.space.indent;
         let line = self.region().next_line();
-        let inner = Rect::new(
-            line.x + theme::INDENT,
-            line.y,
-            (line.w - theme::INDENT).max(0.0),
-            line.h,
-        );
+        let inner = Rect::new(line.x + step, line.y, (line.w - step).max(0.0), line.h);
         self.regions.push(Region::vertical(inner));
         let result = add_contents(self);
         let region = self.regions.pop().expect("indent pushed a region");
@@ -614,11 +651,11 @@ impl<'a> Ui<'a> {
     /// unrepresentable.
     ///
     /// ```
-    /// # use slmsttaa_ui::{theme, Anchor, RecordingPainter, Ui, UiInput, UiState};
+    /// # use slmsttaa_ui::{Anchor, RecordingPainter, Theme, Ui, UiInput, UiState};
     /// # let (mut p, mut s) = (RecordingPainter::default(), UiState::default());
     /// # let mut ui = Ui::new(&mut p, UiInput::default(), &mut s);
     /// # let mut value = 0.0_f32;
-    /// # ui.panel(Anchor::TopLeft, theme::PANEL_W, |ui| {
+    /// # ui.panel(Anchor::TopLeft, Theme::default().panel_w, |ui| {
     /// ui.scroll_area("params", 300.0, |ui| {
     ///     for i in 0..40 {
     ///         ui.slider(&format!("knob {i}"), &mut value, 0.0, 1.0).show();
@@ -653,8 +690,8 @@ impl<'a> Ui<'a> {
         let max_offset = (previous_content - max_height).max(0.0);
         let mut offset = self.state.scroll_offset(id).clamp(0.0, max_offset);
         if max_offset > 0.0 && self.input.hits(viewport) {
-            offset =
-                (offset - self.input.scroll_delta * theme::SCROLL_SPEED).clamp(0.0, max_offset);
+            let speed = self.theme.control.scroll_speed;
+            offset = (offset - self.input.scroll_delta * speed).clamp(0.0, max_offset);
         }
         self.state.set_scroll_offset(id, offset);
 
@@ -690,22 +727,25 @@ impl<'a> Ui<'a> {
 
     /// The slim overflow indicator drawn inside a scroll area's right edge.
     fn draw_scrollbar(&mut self, viewport: Rect, offset: f32, content_h: f32) {
+        let theme = self.theme;
+        let bar_w = theme.control.scrollbar_w;
+
         let visible = (viewport.h / content_h).clamp(0.0, 1.0);
         let travel = (content_h - viewport.h).max(f32::EPSILON);
-        let thumb_h = (viewport.h * visible).max(theme::ROW_H);
+        let thumb_h = (viewport.h * visible).max(theme.control.row_h);
         let thumb_y = viewport.y + (viewport.h - thumb_h) * (offset / travel).clamp(0.0, 1.0);
-        let x = viewport.max_x() - theme::SCROLLBAR_W;
+        let x = viewport.max_x() - bar_w;
 
-        let radius = theme::SCROLLBAR_W * 0.5;
+        let radius = bar_w * 0.5;
         self.painter.fill_rect(
-            Rect::new(x, viewport.y, theme::SCROLLBAR_W, viewport.h),
+            Rect::new(x, viewport.y, bar_w, viewport.h),
             radius,
-            theme::COL_TRACK,
+            theme.color.surface,
         );
         self.painter.fill_rect(
-            Rect::new(x, thumb_y, theme::SCROLLBAR_W, thumb_h),
+            Rect::new(x, thumb_y, bar_w, thumb_h),
             radius,
-            theme::COL_MUTED,
+            theme.color.muted,
         );
     }
 }

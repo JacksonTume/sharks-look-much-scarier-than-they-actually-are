@@ -12,9 +12,10 @@ becoming a UI framework with a triangle demo attached.
 Slices [0](ROADMAP.md#slice-0--extraction-the-move) (extraction),
 [1](ROADMAP.md#slice-1--interaction-core--draw-layers) (interaction core),
 [2](ROADMAP.md#slice-2--painter-capabilities-and-the-scroll-region) (painter
-capabilities) and [3](ROADMAP.md#slice-3--layout) (layout) are done. The toolkit
-is a zero-dependency crate the engine re-exports as `slmsttaa::ui`, and it now
-has the machinery that separates a toolkit from a pile of sliders:
+capabilities), [3](ROADMAP.md#slice-3--layout) (layout) and
+[4](ROADMAP.md#slice-4--theme-tokens--variants) (theme tokens) are done. The
+toolkit is a zero-dependency crate the engine re-exports as `slmsttaa::ui`, and it
+now has the machinery that separates a toolkit from a pile of sliders:
 
 - **Ids** — `hash(scope, label)`, with `push_id`/`pop_id`. Never keyed by
   declaration order, so a row appearing above a widget can't steal its identity
@@ -28,15 +29,19 @@ has the machinery that separates a toolkit from a pile of sliders:
 - **Layout** — a stack of regions rather than a `y` cursor. Panels anchored to a
   corner and sized by their caller, plus `horizontal` / `right` / `columns` /
   `indent` / `sized`, all closure-scoped so the stack cannot desync.
+- **Theme tokens** — one `Theme` of semantic colors and four scales, plus
+  `Variant` and `Size`. No widget anywhere names a literal color, and there is a
+  test that says so.
 - **A public seam** — `allocate` / `interact` / `painter` / `theme`, so a widget
   written by a consumer is not second-class.
 
 Widgets: `title` / `section` (collapsible) / `label` / `label_muted` /
 `label_value` / `separator` / `button` / `checkbox` / `slider` / `scroll_area`.
 
-Next is [Slice 4](ROADMAP.md#slice-4--theme-tokens--variants) — a `Theme` struct
-of semantic tokens, and `variant`/`size` on the rest of the roster. The `Slider`
-builder shipped in Slice 3 is the pattern it generalizes.
+Next is [Slice 5](ROADMAP.md#slice-5--typography-polish-labeled) — typography,
+and it is **labeled as polish**. With rounded corners, tokens, and variants in
+place, the 8×8 bitmap font is the loudest remaining tell, and no demo is blocked
+on it.
 
 **New UI code and UI docs belong here, not in the engine.**
 
@@ -119,6 +124,9 @@ third only in translation:
 1. **Design tokens.** Semantic names (`background`, `foreground`, `muted`,
    `accent`, `border`, `ring`, `destructive`), a radius scale, a spacing scale, a
    type scale — held in a `Theme` struct. Widgets never name a literal color.
+   **Shipped in Slice 4**, along with `Variant` and `Size`. The rule is enforced
+   rather than asserted: `tests/theme.rs` styles a frame with sentinel tokens and
+   fails if any color reaches the painter that the theme didn't supply.
 2. **Headless behavior underneath styling.** shadcn gets this from Radix; here it
    is the interaction core — id stack, hot/active/focused, a `Response` returned
    by every widget, and ordered draw layers so popovers land on top of what
@@ -164,8 +172,10 @@ hit-testing were simultaneously the most testable and least verified code here.
 row/column/indent/right-align arithmetic; `tests/interaction.rs` pins press-edge
 versus held semantics and drag capture; `tests/ids.rs` pins that a widget's
 identity survives rows appearing above it; `tests/clipping.rs` pins that a
-scrolled-away row is genuinely invisible. All five drive the crate through its
-public API only, which doubles as a check that a consumer could do the same.
+scrolled-away row is genuinely invisible; `tests/theme.rs` pins that no widget
+draws a color or reads a metric the theme didn't supply. All six drive the crate
+through its public API only, which doubles as a check that a consumer could do
+the same.
 
 They constrain, but they do not replace running the demo. Slice 1's id bug and
 Slice 3's overflowing button label both passed every test and were found the

@@ -489,3 +489,11 @@ here: ordered draw layers in `Overlay::flush` and a `scale_factor`-aware surface
 `Vertex2D` that carries them (UI Slice 2). The overlay is still a single
 `draw_indexed`. The next one the UI is likely to ask for is textured quads, which
 is the same shader work the "no texture support" entry above is waiting on.
+
+The trend since is the point: UI Slice 3 (layout) cost one field — `UiInput`
+gained `viewport`, filled by `Renderer::ui()` from the surface size over the scale
+factor — and UI Slice 4 (theme tokens) cost **nothing at all**. No `Painter`
+method, no shader change, no `Vertex2D` field. A whole styling system landed above
+a seam that speaks in colors and rectangles and does not care where a color came
+from, which is the clearest evidence yet that the seam is drawn in the right
+place.

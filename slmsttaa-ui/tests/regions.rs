@@ -151,7 +151,7 @@ fn columns_split_the_content_width_evenly() {
     let (_, cells) = frame(|ui| {
         let mut cells: Vec<Rect> = Vec::new();
         ui.columns(3, |ui, i| {
-            cells.push(ui.button(["a", "b", "c"][i]).rect);
+            cells.push(ui.button(["a", "b", "c"][i]).show().rect);
         });
         cells
     });

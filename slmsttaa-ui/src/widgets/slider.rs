@@ -5,14 +5,13 @@
 //! track, and "which widget owns the pointer right now" is the only way to know
 //! that the motion belongs to this slider and not to the camera behind it.
 //!
-//! It is also the only widget with a **builder**. Every other one takes its
-//! arguments and draws; this one has a value to format and a row to arrange, and
+//! It was also the **first** widget with a builder. Every other one took its
+//! arguments and drew; this one has a value to format and a row to arrange, and
 //! those are exactly the two things a consumer wants to override. Rather than
 //! grow a `slider_fmt`, then a `slider_fmt_compact`, then a variant that takes a
-//! closure, it gets [`Slider`] — which is also a rehearsal for the `variant` /
-//! `size` builders the whole roster acquires in UI Slice 4.
+//! closure, it got [`Slider`] in Slice 3 — a rehearsal for the
+//! [`Button`](crate::Button) builder Slice 4 generalized it into.
 
-use crate::theme::*;
 use crate::{Rect, Response, Ui};
 
 /// How a [`Slider`] arranges its label, value, and track.
@@ -34,10 +33,10 @@ pub enum SliderLayout {
 /// which is what the `must_use` is guarding.
 ///
 /// ```
-/// # use slmsttaa_ui::{theme, Anchor, RecordingPainter, SliderLayout, Ui, UiInput, UiState};
+/// # use slmsttaa_ui::{Anchor, RecordingPainter, SliderLayout, Theme, Ui, UiInput, UiState};
 /// # let (mut p, mut s) = (RecordingPainter::default(), UiState::default());
 /// # let mut ui = Ui::new(&mut p, UiInput::default(), &mut s);
-/// # ui.panel(Anchor::TopLeft, theme::PANEL_W, |ui| {
+/// # ui.panel(Anchor::TopLeft, Theme::default().panel_w, |ui| {
 /// # let (mut m, mut erodibility) = (0.5_f32, 3.0e-3_f32);
 /// // The plain case.
 /// ui.slider("area exponent m", &mut m, 0.2, 1.0).show();
@@ -121,6 +120,9 @@ impl<'u, 'a, 'v> Slider<'u, 'a, 'v> {
             fmt,
         } = self;
 
+        let theme = *ui.theme();
+        let (px, row_h, track_h) = (theme.text.body, theme.control.row_h, theme.control.track_h);
+
         let text = match &fmt {
             Some(format) => format(*value),
             None => format!("{value:.decimals$}"),
@@ -129,35 +131,36 @@ impl<'u, 'a, 'v> Slider<'u, 'a, 'v> {
 
         let (track, mut response) = match layout {
             SliderLayout::Stacked => {
-                let row = ui.allocate([0.0, ROW_H + TEXT_PX]);
-                let value_w = ui.painter().text_size(&text, TEXT_PX)[0];
+                let row = ui.allocate([0.0, row_h + px]);
+                let value_w = ui.painter().text_size(&text, px)[0];
 
                 // Label left, value hard against the right edge: two runs that
                 // share the width instead of one that outgrows it.
                 let painter = ui.painter();
-                painter.text(row.x, row.y, label, TEXT_PX, COL_TEXT);
-                painter.text(row.max_x() - value_w, row.y, &text, TEXT_PX, COL_MUTED);
+                painter.text(row.x, row.y, label, px, theme.color.foreground);
+                painter.text(row.max_x() - value_w, row.y, &text, px, theme.color.muted);
 
-                let track = Rect::new(row.x, row.y + TEXT_PX + 5.0, row.w, TRACK_H);
+                let track = Rect::new(row.x, row.y + px + 5.0, row.w, track_h);
                 // The hit band is taller than the visible track so it's easy to grab.
-                let band = Rect::new(track.x, track.y - 6.0, track.w, TRACK_H + 12.0);
+                let band = Rect::new(track.x, track.y - 6.0, track.w, track_h + 12.0);
                 (track, ui.interact(band, id))
             }
             SliderLayout::Compact => {
-                let row = ui.allocate([0.0, ROW_H]);
+                let row = ui.allocate([0.0, row_h]);
                 // The row owns a 4-point trailing gap, as a button's does.
-                let face_h = ROW_H - 4.0;
-                let label_w = ui.painter().text_size(label, TEXT_PX)[0];
-                let value_w = ui.painter().text_size(&text, TEXT_PX)[0];
+                let face_h = row_h - 4.0;
+                let gap = theme.space.gap;
+                let label_w = ui.painter().text_size(label, px)[0];
+                let value_w = ui.painter().text_size(&text, px)[0];
 
-                let text_y = row.y + (face_h - TEXT_PX) * 0.5;
+                let text_y = row.y + (face_h - px) * 0.5;
                 let painter = ui.painter();
-                painter.text(row.x, text_y, label, TEXT_PX, COL_TEXT);
-                painter.text(row.max_x() - value_w, text_y, &text, TEXT_PX, COL_MUTED);
+                painter.text(row.x, text_y, label, px, theme.color.foreground);
+                painter.text(row.max_x() - value_w, text_y, &text, px, theme.color.muted);
 
-                let track_x = row.x + label_w + GAP;
-                let track_w = (row.max_x() - value_w - GAP - track_x).max(0.0);
-                let track = Rect::new(track_x, row.y + (face_h - TRACK_H) * 0.5, track_w, TRACK_H);
+                let track_x = row.x + label_w + gap;
+                let track_w = (row.max_x() - value_w - gap - track_x).max(0.0);
+                let track = Rect::new(track_x, row.y + (face_h - track_h) * 0.5, track_w, track_h);
                 let band = Rect::new(track.x, row.y, track.w, face_h);
                 (track, ui.interact(band, id))
             }
@@ -189,25 +192,28 @@ impl<'u, 'a, 'v> Slider<'u, 'a, 'v> {
 /// written against nothing but [`Ui::painter`] — a consumer's own slider can
 /// call the same sequence and match.
 fn draw_track(ui: &mut Ui, track: Rect, t: f32, response: &Response) {
-    let cap = TRACK_H * 0.5;
-    let knob_x = (track.x + track.w * t - KNOB_W * 0.5)
-        .clamp(track.x, (track.max_x() - KNOB_W).max(track.x));
-    let knob = Rect::new(knob_x, track.y - 4.0, KNOB_W, TRACK_H + 8.0);
+    let theme = *ui.theme();
+    let (track_h, knob_w) = (theme.control.track_h, theme.control.knob_w);
+
+    let cap = track_h * 0.5;
+    let knob_x = (track.x + track.w * t - knob_w * 0.5)
+        .clamp(track.x, (track.max_x() - knob_w).max(track.x));
+    let knob = Rect::new(knob_x, track.y - 4.0, knob_w, track_h + 8.0);
     let knob_col = if response.held || response.hovered {
-        COL_ACCENT_HOT
+        theme.color.accent_hover
     } else {
-        COL_TEXT
+        theme.color.foreground
     };
 
     let painter = ui.painter();
-    painter.fill_rect(track, cap, COL_TRACK);
+    painter.fill_rect(track, cap, theme.color.surface);
     painter.fill_rect(
-        Rect::new(track.x, track.y, track.w * t, TRACK_H),
+        Rect::new(track.x, track.y, track.w * t, track_h),
         cap,
-        COL_ACCENT,
+        theme.color.accent,
     );
-    painter.fill_rect(knob, KNOB_W * 0.5, knob_col);
+    painter.fill_rect(knob, knob_w * 0.5, knob_col);
     if response.focused {
-        painter.stroke_rect(knob, KNOB_W * 0.5, BORDER, COL_RING);
+        painter.stroke_rect(knob, knob_w * 0.5, theme.control.border, theme.color.ring);
     }
 }

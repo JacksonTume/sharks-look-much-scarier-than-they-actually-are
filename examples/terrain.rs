@@ -21,16 +21,22 @@
 //! Controls: **drag the left mouse button** over the 3D view to orbit, **scroll**
 //! to zoom, arrow keys also orbit. The panel on the left edits every parameter
 //! live; moving a slider regenerates the terrain. Toggle **wireframe** to inspect
-//! the underlying grid, and **click a section heading** to collapse it.
+//! the underlying grid, **click a section heading** to collapse it, and **reset
+//! all** at the bottom of the panel throws every parameter back to its default.
 //!
 //! The panel also carries [`log_slider`] — a widget written *here*, in the demo,
 //! from the toolkit's public API alone. That it can be is the point.
+//!
+//! The HUD's **light** toggle swaps one [`Theme`] value and restyles the whole
+//! UI — both panels, every built-in widget, and `log_slider` with them. That is
+//! the demo's half of the toolkit's design-token claim: if any widget had kept a
+//! hard-coded color, this is where it would stay dark.
 //!
 //! Run it:
 //!   native — `cargo run --example terrain`
 //!   web    — `cargo xtask serve terrain`, then open the printed URL.
 
-use slmsttaa::ui::{theme, Anchor, Rect, Response, Ui};
+use slmsttaa::ui::{Anchor, Rect, Response, Size, Theme, Ui, Variant};
 use slmsttaa::{run, Application, Key, Mesh, MouseButton, RenderMode, Renderer, Vertex};
 
 #[path = "terrain/erosion.rs"]
@@ -49,12 +55,23 @@ use heightmap::{Heightmap, NoiseParams};
 /// the toolkit's *unprivileged widget* rule: nothing below uses anything a
 /// consumer can't reach. [`Ui::next_id`] for identity, [`Ui::allocate`] for
 /// space, [`Ui::interact`] for hit-testing and drag capture, [`Ui::painter`] to
-/// draw, and `theme` so it matches the widgets that ship with the crate.
+/// draw, and [`Ui::theme`] for the tokens that make it match the widgets that
+/// ship with the crate.
+///
+/// That last one is what Slice 4 changed here, and it is worth reading as the
+/// proof it is: this widget names **no literal color and no literal metric**, so
+/// it restyles with the theme exactly like a built-in does. Toggle *light* in
+/// the HUD and watch this track change with everything else — nothing in the
+/// crate knows this widget exists.
 ///
 /// If this needed private access, the seam would be wrong (UI roadmap Slice 1).
 fn log_slider(ui: &mut Ui, label: &str, value: &mut f32, min: f32, max: f32) -> Response {
+    let theme = *ui.theme();
+    let px = theme.text.body;
+    let track_h = theme.control.track_h;
+
     let id = ui.next_id(label);
-    let row = ui.allocate([0.0, theme::ROW_H + theme::TEXT_PX]);
+    let row = ui.allocate([0.0, theme.control.row_h + px]);
 
     // Work in log space: the knob position is linear in log10(value).
     let (lmin, lmax) = (min.max(1e-9).log10(), max.log10());
@@ -63,24 +80,24 @@ fn log_slider(ui: &mut Ui, label: &str, value: &mut f32, min: f32, max: f32) -> 
     // Label left, value right — measured through the same public `text_size` the
     // built-in slider uses, so this row lines up with the ones above it.
     let readout = format!("{value:.1e}");
-    let readout_w = ui.painter().text_size(&readout, theme::TEXT_PX)[0];
+    let readout_w = ui.painter().text_size(&readout, px)[0];
     let painter = ui.painter();
-    painter.text(row.x, row.y, label, theme::TEXT_PX, theme::COL_TEXT);
+    painter.text(row.x, row.y, label, px, theme.color.foreground);
     painter.text(
         row.max_x() - readout_w,
         row.y,
         &readout,
-        theme::TEXT_PX,
-        theme::COL_MUTED,
+        px,
+        theme.color.muted,
     );
 
-    let track_y = row.y + theme::TEXT_PX + 5.0;
-    let band = Rect::new(row.x, track_y - 6.0, row.w, theme::TRACK_H + 12.0);
+    let track_y = row.y + px + 5.0;
+    let band = Rect::new(row.x, track_y - 6.0, row.w, track_h + 12.0);
     let mut response = ui.interact(band, id);
 
     if response.held {
-        if let Some((px, _)) = ui.input().cursor {
-            let t = ((px - row.x) / row.w).clamp(0.0, 1.0);
+        if let Some((cx, _)) = ui.input().cursor {
+            let t = ((cx - row.x) / row.w).clamp(0.0, 1.0);
             let new_val = 10f32.powf(lmin + t * span);
             if (new_val - *value).abs() > f32::EPSILON {
                 *value = new_val;
@@ -92,29 +109,29 @@ fn log_slider(ui: &mut Ui, label: &str, value: &mut f32, min: f32, max: f32) -> 
 
     let t = ((value.max(1e-9).log10() - lmin) / span).clamp(0.0, 1.0);
     let knob_col = if response.held || response.hovered {
-        theme::COL_ACCENT_HOT
+        theme.color.accent_hover
     } else {
-        theme::COL_TEXT
+        theme.color.foreground
     };
     // Capsule track and knob, matching the built-in slider — which the demo can
-    // do because `theme` and the rounded-rect painter are both public.
-    let cap = theme::TRACK_H * 0.5;
-    let knob_x =
-        (row.x + row.w * t - theme::KNOB_W * 0.5).clamp(row.x, row.max_x() - theme::KNOB_W);
+    // do because the tokens and the rounded-rect painter are both public.
+    let cap = track_h * 0.5;
+    let knob_w = theme.control.knob_w;
+    let knob_x = (row.x + row.w * t - knob_w * 0.5).clamp(row.x, row.max_x() - knob_w);
     let painter = ui.painter();
     painter.fill_rect(
-        Rect::new(row.x, track_y, row.w, theme::TRACK_H),
+        Rect::new(row.x, track_y, row.w, track_h),
         cap,
-        theme::COL_TRACK,
+        theme.color.surface,
     );
     painter.fill_rect(
-        Rect::new(row.x, track_y, row.w * t, theme::TRACK_H),
+        Rect::new(row.x, track_y, row.w * t, track_h),
         cap,
-        theme::COL_ACCENT,
+        theme.color.accent,
     );
     painter.fill_rect(
-        Rect::new(knob_x, track_y - 4.0, theme::KNOB_W, theme::TRACK_H + 8.0),
-        theme::KNOB_W * 0.5,
+        Rect::new(knob_x, track_y - 4.0, knob_w, track_h + 8.0),
+        knob_w * 0.5,
         knob_col,
     );
 
@@ -146,10 +163,11 @@ const HUD_W: f32 = 210.0;
 /// existence — three of them side by side is not expressible with a cursor that
 /// only moves down.
 ///
-/// The names are short because a third of the content width is 101 points, which
-/// is six glyphs and a bit: the toolkit does not fit or ellipsize text (that is
-/// deliberately out of UI Slice 3), so a caller putting a button in a column
-/// still has to know what will fit in one.
+/// The names are short because a third of the content width is 101 points: the
+/// toolkit does not fit or ellipsize text (still deliberately out of scope), so
+/// a caller putting a button in a column has to know what will fit in one. Slice
+/// 4 bought some slack without changing that — these are drawn at [`Size::Sm`],
+/// whose 13-point text fits seven glyphs where the standard 16 fits six.
 const SHAPE_PRESETS: [(&str, f32, u32, f32); 3] = [
     ("hills", 2.5, 4, 1.0),
     ("alps", 3.5, 5, 1.4),
@@ -159,6 +177,8 @@ const SHAPE_PRESETS: [(&str, f32, u32, f32); 3] = [
 /// Grid resolution bounds (cells per side); snapped to a multiple of 8.
 const RES_MIN: f32 = 32.0;
 const RES_MAX: f32 = 256.0;
+/// The resolution the demo starts at, and the one "reset all" returns to.
+const RES_DEFAULT: usize = 128;
 
 /// The terrain consumer: owns the layer parameters, the heightmaps, and the
 /// orbit-camera state.
@@ -179,6 +199,12 @@ struct TerrainDemo {
 
     /// Draw the terrain as a wireframe instead of shaded triangles.
     wireframe: bool,
+    /// Which theme the UI is drawn with, re-applied at the top of every frame.
+    ///
+    /// The consumer owns this, not the toolkit — immediate mode all the way
+    /// down. It is one value, and swapping it restyles every widget in both
+    /// panels, `log_slider` included.
+    theme: Theme,
 
     /// Deferred-rebuild flags. Erosion costs ~100ms, so rather than recompute on
     /// every slider tick we mark what changed and apply it once the drag ends (the
@@ -198,7 +224,7 @@ struct TerrainDemo {
 
 impl TerrainDemo {
     fn new() -> Self {
-        let n = 128usize;
+        let n = RES_DEFAULT;
         let params = NoiseParams::default();
         let erosion = ErosionParams::default();
         let hm = Heightmap::generate(n, &params);
@@ -210,6 +236,7 @@ impl TerrainDemo {
             n: hm.n,
             res: n as f32,
             wireframe: false,
+            theme: Theme::dark(),
             pending_base: false,
             pending_erode: false,
             yaw: 0.7,
@@ -316,140 +343,181 @@ impl TerrainDemo {
     fn build_ui(&mut self, renderer: &mut Renderer) -> (bool, bool, bool) {
         let fps = self.fps;
         let n = self.n;
+        let theme = self.theme;
 
         let pending = self.pending_base || self.pending_erode;
 
         let mut ui = renderer.ui();
+        // One line, at the top of the frame, and the whole UI is styled. Nothing
+        // style-shaped is retained by the toolkit between frames.
+        ui.set_theme(theme);
 
         // The parameter panel, top-left.
-        let (mut base, erode, new_seed, preset) = ui.panel(Anchor::TopLeft, theme::PANEL_W, |ui| {
-            ui.title("Terrain");
-            if pending {
-                ui.label_muted("release to rebuild...");
-            }
-            ui.separator();
-
-            // Everything below the header scrolls. Sections collapse too
-            // (click a heading) — between them the panel stays on screen
-            // however many knobs it grows.
-            ui.scroll_area("params", PANEL_SCROLL_MAX, |ui| {
-                // --- Layer 1: the Perlin base shape ---
-                let mut base = false;
-                let mut preset = None;
-                if ui.section("Base shape").open {
-                    // The button row. Each cell is its own column, so the
-                    // three hit-test to their own thirds of the width.
-                    ui.columns(SHAPE_PRESETS.len(), |ui, i| {
-                        if ui.button(SHAPE_PRESETS[i].0).clicked {
-                            preset = Some(i);
-                        }
-                    });
-                    base |= ui
-                        .slider("frequency", &mut self.params.frequency, 0.5, 8.0)
-                        .show()
-                        .changed;
-                    let mut octaves = self.params.octaves as f32;
-                    if ui
-                        .slider("octaves", &mut octaves, 1.0, 8.0)
-                        .decimals(0)
-                        .show()
-                        .changed
-                    {
-                        self.params.octaves = octaves.round() as u32;
-                        base = true;
-                    }
-                    base |= ui
-                        .slider("lacunarity", &mut self.params.lacunarity, 1.5, 3.0)
-                        .show()
-                        .changed;
-                    base |= ui
-                        .slider("persistence", &mut self.params.persistence, 0.2, 0.8)
-                        .show()
-                        .changed;
-                    base |= ui
-                        .slider("ridge (peaks)", &mut self.params.ridge, 0.5, 3.0)
-                        .show()
-                        .changed;
+        let (mut base, erode, new_seed, preset, reset) =
+            ui.panel(Anchor::TopLeft, theme.panel_w, |ui| {
+                ui.title("Terrain");
+                if pending {
+                    ui.label_muted("release to rebuild...");
                 }
                 ui.separator();
 
-                // --- Layer 2: erosion ---
-                let mut erode = false;
-                if ui.section("Fluvial erosion").open {
-                    let mut iters = self.erosion.iterations as f32;
-                    if ui
-                        .slider("passes", &mut iters, 0.0, 120.0)
-                        .decimals(0)
-                        .show()
-                        .changed
-                    {
-                        self.erosion.iterations = iters.round() as u32;
-                        erode = true;
-                    }
-                    // The demo's own widget: erodibility is only tunable on
-                    // a log track.
-                    erode |= log_slider(
-                        ui,
-                        "erodibility",
-                        &mut self.erosion.erodibility,
-                        1.0e-5,
-                        6.0e-3,
-                    )
-                    .changed;
-                    erode |= ui
-                        .slider("area exponent m", &mut self.erosion.m, 0.2, 1.0)
-                        .show()
-                        .changed;
-                }
-
-                if ui.section("Thermal erosion").open {
-                    erode |= ui
-                        .checkbox("enable talus", &mut self.erosion.thermal)
-                        .changed;
-                    if self.erosion.thermal {
-                        // Indented because these belong to the toggle above
-                        // them — which used to be faked with two leading
-                        // spaces inside the label string.
-                        erode |= ui.indent(|ui| {
-                            let talus = ui
-                                .slider("talus (slope)", &mut self.erosion.talus, 0.3, 4.0)
+                // Everything below the header scrolls. Sections collapse too
+                // (click a heading) — between them the panel stays on screen
+                // however many knobs it grows.
+                ui.scroll_area("params", PANEL_SCROLL_MAX, |ui| {
+                    // --- Layer 1: the Perlin base shape ---
+                    let mut base = false;
+                    let mut preset = None;
+                    if ui.section("Base shape").open {
+                        // The button row. Each cell is its own column, so the
+                        // three hit-test to their own thirds of the width.
+                        // Secondary and small: three equivalent choices, none of
+                        // which is *the* action of the panel.
+                        ui.columns(SHAPE_PRESETS.len(), |ui, i| {
+                            if ui
+                                .button(SHAPE_PRESETS[i].0)
+                                .variant(Variant::Secondary)
+                                .size(Size::Sm)
                                 .show()
-                                .changed;
-                            let rate = ui
-                                .slider("rate", &mut self.erosion.thermal_rate, 0.0, 0.5)
-                                .show()
-                                .changed;
-                            talus || rate
+                                .clicked
+                            {
+                                preset = Some(i);
+                            }
                         });
+                        base |= ui
+                            .slider("frequency", &mut self.params.frequency, 0.5, 8.0)
+                            .show()
+                            .changed;
+                        let mut octaves = self.params.octaves as f32;
+                        if ui
+                            .slider("octaves", &mut octaves, 1.0, 8.0)
+                            .decimals(0)
+                            .show()
+                            .changed
+                        {
+                            self.params.octaves = octaves.round() as u32;
+                            base = true;
+                        }
+                        base |= ui
+                            .slider("lacunarity", &mut self.params.lacunarity, 1.5, 3.0)
+                            .show()
+                            .changed;
+                        base |= ui
+                            .slider("persistence", &mut self.params.persistence, 0.2, 0.8)
+                            .show()
+                            .changed;
+                        base |= ui
+                            .slider("ridge (peaks)", &mut self.params.ridge, 0.5, 3.0)
+                            .show()
+                            .changed;
                     }
-                }
-                ui.separator();
+                    ui.separator();
 
-                // --- Grid ---
-                let mut new_seed = false;
-                if ui.section("Grid").open {
-                    ui.slider("resolution", &mut self.res, RES_MIN, RES_MAX)
-                        .decimals(0)
-                        .show();
-                    new_seed = ui.button("new seed").clicked;
-                }
+                    // --- Layer 2: erosion ---
+                    let mut erode = false;
+                    if ui.section("Fluvial erosion").open {
+                        let mut iters = self.erosion.iterations as f32;
+                        if ui
+                            .slider("passes", &mut iters, 0.0, 120.0)
+                            .decimals(0)
+                            .show()
+                            .changed
+                        {
+                            self.erosion.iterations = iters.round() as u32;
+                            erode = true;
+                        }
+                        // The demo's own widget: erodibility is only tunable on
+                        // a log track.
+                        erode |= log_slider(
+                            ui,
+                            "erodibility",
+                            &mut self.erosion.erodibility,
+                            1.0e-5,
+                            6.0e-3,
+                        )
+                        .changed;
+                        erode |= ui
+                            .slider("area exponent m", &mut self.erosion.m, 0.2, 1.0)
+                            .show()
+                            .changed;
+                    }
 
-                (base, erode, new_seed, preset)
-            })
-        });
+                    if ui.section("Thermal erosion").open {
+                        erode |= ui
+                            .checkbox("enable talus", &mut self.erosion.thermal)
+                            .changed;
+                        if self.erosion.thermal {
+                            // Indented because these belong to the toggle above
+                            // them — which used to be faked with two leading
+                            // spaces inside the label string.
+                            erode |= ui.indent(|ui| {
+                                let talus = ui
+                                    .slider("talus (slope)", &mut self.erosion.talus, 0.3, 4.0)
+                                    .show()
+                                    .changed;
+                                let rate = ui
+                                    .slider("rate", &mut self.erosion.thermal_rate, 0.0, 0.5)
+                                    .show()
+                                    .changed;
+                                talus || rate
+                            });
+                        }
+                    }
+                    ui.separator();
+
+                    // --- Grid ---
+                    let mut new_seed = false;
+                    if ui.section("Grid").open {
+                        ui.slider("resolution", &mut self.res, RES_MIN, RES_MAX)
+                            .decimals(0)
+                            .show();
+                        new_seed = ui.button("new seed").show().clicked;
+                    }
+                    ui.separator();
+
+                    // The one control that throws work away. Before variants this
+                    // would have been an ordinary blue button beside "new seed",
+                    // indistinguishable from it right up until it was clicked — or
+                    // a hand-colored rectangle, which is the thing tokens exist to
+                    // stop. `Variant::Destructive` says what it *is*, and the theme
+                    // decides what that looks like.
+                    let reset = ui
+                        .button("reset all")
+                        .variant(Variant::Destructive)
+                        .show()
+                        .clicked;
+
+                    (base, erode, new_seed, preset, reset)
+                })
+            });
 
         // The HUD, top-right — its own panel now, not the first three rows of
         // the parameter panel. Right-aligned readouts keep the numbers in a
         // column and stop the line growing past the border.
+        // `light` is the theme proof, and it lives here rather than in the
+        // toolkit because a theme is the consumer's to choose. It takes effect
+        // on the next frame — the UI for *this* frame was styled before the
+        // checkbox existed — which is invisible at 60fps and is just immediate
+        // mode being consistent.
+        let mut light = self.theme == Theme::light();
         ui.panel(Anchor::TopRight, HUD_W, |ui| {
             ui.label_value("fps", &format!("{fps:.0}"));
             ui.label_value("grid", &format!("{n}x{n}"));
             ui.checkbox("wireframe", &mut self.wireframe);
+            ui.checkbox("light", &mut light);
         });
 
         let wants_pointer = ui.wants_pointer();
         drop(ui);
 
+        self.theme = if light { Theme::light() } else { Theme::dark() };
+
+        if reset {
+            self.params = NoiseParams::default();
+            self.erosion = ErosionParams::default();
+            self.res = RES_DEFAULT as f32;
+            base = true;
+        }
         if let Some(i) = preset {
             let (_, frequency, octaves, ridge) = SHAPE_PRESETS[i];
             self.params.frequency = frequency;

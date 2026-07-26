@@ -93,11 +93,14 @@ slmsttaa-ui/          The UI toolkit, as its own zero-dependency workspace membe
 │   │                 scroll offsets, panel rects), and the Response every widget
 │   │                 returns.
 │   ├── layout.rs     Rect + the stack of layout regions widgets are placed in.
-│   ├── theme.rs      Every metric and color in one place — public, so a widget
-│   │                 written by a consumer can match the built-in ones.
+│   ├── theme.rs      Theme: semantic color tokens plus the radius/spacing/type/
+│   │                 control scales, with Variant and Size. Public, so a widget
+│   │                 written by a consumer can match the built-in ones — and no
+│   │                 widget anywhere names a literal color.
 │   └── widgets/      One file per widget: text.rs, button.rs, slider.rs.
-└── tests/            The project's only tests — layout + ids + hit-testing, driven
-                      against RecordingPainter. No GPU, no window, no async.
+└── tests/            The project's only tests — layout + ids + hit-testing +
+                      theming, driven against RecordingPainter. No GPU, no window,
+                      no async.
 
 xtask/                Dev tooling (a separate workspace member, no deps). `cargo
 └── src/main.rs       xtask serve [example]` builds the example natively and for

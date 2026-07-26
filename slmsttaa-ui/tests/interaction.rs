@@ -62,7 +62,7 @@ fn button_fires_only_on_a_press_inside_it() {
     // The first widget's row starts one pad below the panel top.
     let inside = (CONTENT_X + 40.0, MARGIN + PAD + 8.0);
     let press = |painter: &mut RecordingPainter, state: &mut UiState, input| {
-        panel(painter, state, input, |ui| ui.button("go").clicked)
+        panel(painter, state, input, |ui| ui.button("go").show().clicked)
     };
 
     let click_inside = press(&mut painter, &mut state, clicking(inside.0, inside.1));
@@ -293,7 +293,7 @@ fn every_widget_reports_where_it_landed() {
     let (label, button, check, slider, readout) = ui.panel(Anchor::TopLeft, PANEL_W, |ui| {
         // Even a label: a consumer needs its rectangle to hang a tooltip on it.
         let label = ui.label("read only");
-        let button = ui.button("go");
+        let button = ui.button("go").show();
         let check = ui.checkbox("on", &mut flag);
         let slider = ui.slider("t", &mut value, 0.0, 1.0).show();
         let readout = ui.label_value("fps", "60");
@@ -319,8 +319,8 @@ fn widgets_sharing_a_row_report_side_by_side_rectangles() {
     let mut ui = Ui::new(&mut painter, UiInput::default(), &mut state);
     let (left, right) = ui.panel(Anchor::TopLeft, PANEL_W, |ui| {
         ui.horizontal(|ui| {
-            let left = ui.sized([100.0, ROW_H]).button("a");
-            let right = ui.button("b");
+            let left = ui.sized([100.0, ROW_H]).button("a").show();
+            let right = ui.button("b").show();
             (left, right)
         })
     });
