@@ -8,3 +8,5 @@
 mod button;
 mod slider;
 mod text;
+
+pub use slider::{Slider, SliderLayout};

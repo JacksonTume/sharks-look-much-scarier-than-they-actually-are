@@ -506,15 +506,15 @@ impl Renderer {
 
     /// Begin a UI frame and return the immediate-mode [`Ui`] builder.
     ///
-    /// Call this from `Application::update`, declare your panel's widgets, then
-    /// read [`Ui::changed`]. The widgets draw into the overlay (composited over
-    /// the 3D scene by [`Renderer::render`]) and read this frame's [`Input`].
-    /// The returned `Ui` borrows the renderer mutably, so drive the camera first.
+    /// Call this from `Application::update`, declare your panels, then read
+    /// [`Ui::changed`]. The widgets draw into the overlay (composited over the
+    /// 3D scene by [`Renderer::render`]) and read this frame's [`Input`]. The
+    /// returned `Ui` borrows the renderer mutably, so drive the camera first.
     ///
     /// This is where the two halves meet. The toolkit lives in its own crate and
     /// cannot see [`Input`] (that would be a dependency cycle — see
-    /// `slmsttaa-ui/README.md`), so the engine copies this frame's pointer state
-    /// into the toolkit's own [`UiInput`] snapshot. Three assignments, in
+    /// `slmsttaa-ui/README.md`), so the engine copies this frame's host state
+    /// into the toolkit's own [`UiInput`] snapshot. Four assignments, in
     /// exchange for a UI crate that has no dependencies at all.
     pub fn ui(&mut self) -> Ui<'_> {
         // The toolkit works in logical points, so the cursor is converted on the
@@ -531,6 +531,13 @@ impl Renderer {
             // Scroll is shared with whatever else the consumer does with the
             // wheel; `Ui::wants_pointer` is how it decides who gets it.
             scroll_delta: self.input.scroll_delta(),
+            // Points, for the same reason: a right-anchored panel measures from
+            // the window's right edge, and that edge has to mean the same thing
+            // as the metrics in `theme`.
+            viewport: (
+                self.size.width as f32 / scale,
+                self.size.height as f32 / scale,
+            ),
         };
         self.overlay.set_scale(scale);
         Ui::new(&mut self.overlay, input, &mut self.ui_state)

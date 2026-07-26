@@ -9,11 +9,12 @@ becoming a UI framework with a triangle demo attached.
 
 ## Status
 
-Slices [0](ROADMAP.md#slice-0--extraction-the-move) (extraction) and
-[1](ROADMAP.md#slice-1--interaction-core--draw-layers) (interaction core) are
-done. The toolkit is a zero-dependency crate the engine re-exports as
-`slmsttaa::ui`, and it now has the machinery that separates a toolkit from a
-pile of sliders:
+Slices [0](ROADMAP.md#slice-0--extraction-the-move) (extraction),
+[1](ROADMAP.md#slice-1--interaction-core--draw-layers) (interaction core),
+[2](ROADMAP.md#slice-2--painter-capabilities-and-the-scroll-region) (painter
+capabilities) and [3](ROADMAP.md#slice-3--layout) (layout) are done. The toolkit
+is a zero-dependency crate the engine re-exports as `slmsttaa::ui`, and it now
+has the machinery that separates a toolkit from a pile of sliders:
 
 - **Ids** — `hash(scope, label)`, with `push_id`/`pop_id`. Never keyed by
   declaration order, so a row appearing above a widget can't steal its identity
@@ -22,15 +23,20 @@ pile of sliders:
   widget.
 - **Draw layers** — base / panel / popup / tooltip, flushed in order, still one
   draw call.
+- **Painter capabilities** — rounded rects, strokes, and nesting clip regions
+  that intersect rather than replace.
+- **Layout** — a stack of regions rather than a `y` cursor. Panels anchored to a
+  corner and sized by their caller, plus `horizontal` / `right` / `columns` /
+  `indent` / `sized`, all closure-scoped so the stack cannot desync.
 - **A public seam** — `allocate` / `interact` / `painter` / `theme`, so a widget
   written by a consumer is not second-class.
 
 Widgets: `title` / `section` (collapsible) / `label` / `label_muted` /
-`separator` / `button` / `checkbox` / `slider`.
+`label_value` / `separator` / `button` / `checkbox` / `slider` / `scroll_area`.
 
-Next is [Slice 2](ROADMAP.md#slice-2--painter-capabilities-and-the-scroll-region):
-rounded rects, borders, and clipping — plus the scroll region that clipping
-unblocks.
+Next is [Slice 4](ROADMAP.md#slice-4--theme-tokens--variants) — a `Theme` struct
+of semantic tokens, and `variant`/`size` on the rest of the roster. The `Slider`
+builder shipped in Slice 3 is the pattern it generalizes.
 
 **New UI code and UI docs belong here, not in the engine.**
 
@@ -66,15 +72,21 @@ slmsttaa-ui/     zero dependencies. Owns Painter, Color, Rect, Theme, Ui,
    │ path dep
    │
 slmsttaa/        depends on slmsttaa-ui. impl Painter for Overlay;
-                 translates engine Input → UiInput once per frame;
-                 re-exports the toolkit as `slmsttaa::ui`.
+                 translates engine Input + surface size → UiInput once
+                 per frame; re-exports the toolkit as `slmsttaa::ui`.
 ```
 
-This crate defines its *own* minimal input snapshot — `UiInput { cursor,
-primary_held, primary_pressed }` — and the engine copies into it each frame in
-`Renderer::ui()`. Three field assignments, nothing measurable, and it buys a leaf
-crate with no `wgpu`, no `winit`, no `glam`, and therefore no reason to ever grow
-a `#[cfg(target_arch = "wasm32")]` branch.
+This crate defines its *own* minimal host snapshot — `UiInput { cursor,
+primary_held, primary_pressed, scroll_delta, viewport }` — and the engine copies
+into it each frame in `Renderer::ui()`. Four field assignments, nothing
+measurable, and it buys a leaf crate with no `wgpu`, no `winit`, no `glam`, and
+therefore no reason to ever grow a `#[cfg(target_arch = "wasm32")]` branch.
+
+`viewport` is the whole of what edge anchoring needs: a `TopRight` panel has to
+know where the right edge is, and this is how it finds out without the toolkit
+ever learning what a window is. Like the cursor, it arrives already divided by
+the scale factor, so everything in `theme` keeps meaning one thing on every
+display.
 
 It is narrower than the engine's `Input` on purpose: one pointer, one button, no
 keys, because that is all any widget reads today. Typed characters and modifiers
@@ -148,9 +160,17 @@ draw commands into a `Vec`, so layout math and hit-testing are asserted directly
 
 These are the project's first and only tests, which is fair: layout and
 hit-testing were simultaneously the most testable and least verified code here.
-`tests/layout.rs` pins where widgets land; `tests/interaction.rs` pins press-edge
-versus held semantics and drag capture. Both drive the crate through its public
-API only, which doubles as a check that a consumer could do the same.
+`tests/layout.rs` pins where panels and widgets land; `tests/regions.rs` pins the
+row/column/indent/right-align arithmetic; `tests/interaction.rs` pins press-edge
+versus held semantics and drag capture; `tests/ids.rs` pins that a widget's
+identity survives rows appearing above it; `tests/clipping.rs` pins that a
+scrolled-away row is genuinely invisible. All five drive the crate through its
+public API only, which doubles as a check that a consumer could do the same.
+
+They constrain, but they do not replace running the demo. Slice 1's id bug and
+Slice 3's overflowing button label both passed every test and were found the
+first time a human looked at the screen — because a test declares a fixed set of
+widgets with strings it chose itself, and the demo does not.
 
 ## See also
 

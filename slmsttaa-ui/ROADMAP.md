@@ -172,7 +172,7 @@ merely unpolished — and clipping is precisely what Slice 2 adds. Collapsible
 sections solve the stated roadblock (the panel running off the bottom) on their
 own, so nothing is blocked by waiting.
 
-## Slice 2 — Painter capabilities (and the scroll region)
+## Slice 2 — Painter capabilities (and the scroll region) ✅ done
 
 *Roadblock:* the scroll region deferred out of Slice 1 needs clipping, which the
 painter cannot do — it draws axis-aligned solid rectangles and nothing else. The
@@ -199,7 +199,58 @@ outside the clip. One extra attribute pair; the single-draw-call design survives
 region — identical on native and web. The focus ring is also the first thing to
 *read* the `focused` id Slice 1 already tracks.
 
-## Slice 3 — Layout
+**What shipped, and what it cost:**
+
+- **The painter grew four methods**, and `rect` became a convenience default over
+  `fill_rect(rect, 0.0, color)`: `fill_rect(rect, radius, color)`,
+  `stroke_rect(rect, radius, width, color)`, and `push_clip` / `pop_clip`. Clip
+  regions **intersect** rather than replace as they nest, so an inner region can
+  only ever shrink what is visible — the alternative silently lets a nested
+  widget escape its parent's bounds.
+- **It cost one shader and 80 bytes a vertex, and no draw calls.** `Vertex2D`
+  carries its rect (center + half-size), radius, border width, and clip rect;
+  `overlay.wgsl` evaluates a rounded-box SDF, subtracts an inset SDF for strokes,
+  and discards outside the clip. The prediction in the slice above held — the
+  overlay is still a single `draw_indexed`, and the parity risk did not
+  materialize.
+- **`scroll_area(label, max_height, |ui| …)` takes a closure, not `begin`/`end`.**
+  An unbalanced pair would desync the clip stack, and a closure makes that
+  unrepresentable. It sizes its viewport from *last* frame's content height, so a
+  brand-new scroll area takes its full height on frame one and settles on frame
+  two; the slim scrollbar appears only when there is genuinely overflow.
+- **Rounding was applied, not just enabled** — which is the difference between a
+  capability and a look. A two-step radius scale (`RADIUS_LG` 8, `RADIUS` 4)
+  covers panels versus controls; slider tracks and knobs are capsules (radius at
+  half the shorter side); the panel gained a hairline border.
+- **Focus rings are the first thing to read Slice 1's `focused` id**, which until
+  now was tracked and ignored. Buttons, checkboxes, and slider knobs all ring.
+
+**Soft shadows were declined, not forgotten.** They were in this slice's bullet
+list. A hairline border at 10% white separates the panel from a busy 3D scene
+just as legibly, for one stroke instead of a blurred fill, and without the
+multi-tap blur or offscreen pass a real shadow wants. Recorded here so it isn't
+re-litigated as an oversight; revisit only if a floating popup needs to read as
+*above* the panel rather than merely distinct from it.
+
+**On testing what a clip does.** Clipping is invisible in a recorded draw list —
+a clipped-away widget is still *drawn*, it just doesn't survive the fragment
+shader. So `RecordingPainter` records the clip in force on every primitive, and
+`visible_texts()` reports what a viewer would actually read. That is the
+assertion that a scrolled-away row is gone, and it is why the tests could catch
+scroll behavior at all without a GPU.
+
+*Verified on both targets:* native, and web under `BrowserWebGpu` in a Chromium
+browser — rounded corners, hairline border, focus rings, and a scroll region
+whose bottom heading is cut **mid-glyph** by the clip rect.
+
+**What it exposed.** Clipping turned an invisible bug into a visible one: long
+labels ("Fluvial erosion (rive…", "area exponent m: 0.5") are now truncated at
+the viewport's right edge, where before they quietly overran the panel and drew
+across the 3D scene. Both are wrong; only one is obvious. This is Slice 3's
+roadblock arriving with evidence attached, and it is the argument for
+right-aligned readouts rather than one long label string per row.
+
+## Slice 3 — Layout ✅ done
 
 *Roadblock:* the terrain panel wants a preset row (several buttons side by side)
 and right-aligned value readouts. Neither is expressible when layout is
@@ -210,8 +261,72 @@ and right-aligned value readouts. Neither is expressible when layout is
 - Panels anchored to any edge, so the HUD and the parameter panel stop being the
   same fixed rectangle.
 
-*Proof:* the terrain demo shows a button row, right-aligned values, and a second
-panel anchored opposite the first.
+*Proof:* the terrain demo shows a three-button preset row (`hills` / `alps` /
+`peaks`), right-aligned values on every slider, thermal-erosion rows genuinely
+indented rather than faked with leading spaces in the label, and the HUD living
+in its own 210-point panel in the opposite corner. Verified on native and on web
+under `BrowserWebGpu`.
+
+**What shipped, and what it cost:**
+
+- **Layout is a stack of regions.** `Layout { origin_y, cursor_y }` became
+  `Region { avail, cursor, dir, line_h, origin }` and `Ui` holds a `Vec` of them.
+  Every container — panel, row, column, indent, scroll area — is push, run a
+  closure, pop, and advance the parent by what the child consumed. All the
+  interesting arithmetic lives in one function, `Region::place`.
+- **`allocate([0.0, h])` changed meaning without changing behavior.** It used to
+  mean "the full content width"; it now means **"whatever is left"**, which is
+  the same thing in a vertical region and the rest of the line inside a row. That
+  is what lets one widget fill a panel on its own line and share a row when it is
+  on one — and it is why `examples/terrain.rs`'s `log_slider` still compiles
+  untouched, since it only ever derived geometry from the `Rect` it was handed.
+- **`Ui` stopped being the panel and became the frame.** Panels are
+  `ui.panel(anchor, width, |ui| …)`, and their width is a parameter rather than
+  `PANEL_W`. There is still exactly one `Ui` per frame, which is what keeps hover
+  and focus coherent across panels and lets `wants_pointer` union all of them —
+  the alternative (a second `Ui`) would have had the second one clear the first's
+  `hot` id on construction. `PANEL_X` / `PANEL_Y` / `CONTENT_X` / `CONTENT_W` are
+  gone: they are per-panel now, and computed.
+- **Edge anchoring cost one field at the seam.** `UiInput` gained
+  `viewport: (f32, f32)`, filled by `Renderer::ui()` from the surface size over
+  the scale factor — the same points conversion the cursor already went through.
+  The toolkit still never learns what a window is.
+- **Right alignment is a direction, not a special case.** `ui.right(|ui| …)` is a
+  region that packs from the right edge inward, so it composes with `horizontal`
+  instead of being a flag on every widget. `label_value(label, value)` is the row
+  built on it, and it is what retires `format!("{label}: {value}")` — two runs
+  anchored to opposite edges fit in 304 points where one run needed 336.
+- **The slider grew a builder, pulling part of Slice 4 forward.** `slider_fmt` was
+  about to become `slider_fmt_compact` and then a variant taking a closure, so it
+  became `ui.slider(..).decimals(n).value_fmt(f).layout(l).show()` instead. This
+  is Slice 4's `variant`/`size` pattern arriving early, deliberately: the two
+  things a consumer wants to override on a slider are how the value reads and how
+  the row is arranged, and both are presentation. It is a breaking change to every
+  call site, which is the cost of having one surface rather than two.
+
+**Top and bottom anchors are not symmetric, and that is load-bearing.** A
+top-anchored panel knows where its first row goes before it lays anything out. A
+bottom-anchored one cannot — it has to place its contents before its height
+exists — so it positions from *last* frame's height and settles on the second
+frame. This is the same one-frame lag Slice 1 retired for the panel background,
+and it is not a regression of that fix: it is now confined to the one case that
+genuinely cannot avoid it, documented on `Anchor`, and covered by a test that
+asserts the settling. The demo uses only `TopLeft` and `TopRight`, so nothing
+shipped depends on it.
+
+**Containers deliberately do not scope ids.** It was tempting to have `columns`
+push the cell index as an id scope. That is exactly the position-in-the-id bug
+`interact::hash_id` exists to prevent, wearing a different hat, so `columns`
+hands the caller its index and lets it `push_id` when the labels genuinely
+repeat.
+
+**What it exposed.** Deferring text fitting has a price, and the preset row is
+where it came due: a third of the content width is 101 points, which is six
+glyphs and change, so `"rolling"` overflowed its button face the first time the
+demo ran. The fix was to pick shorter names — which is the *right* fix under this
+slice's stated scope, and also the clearest possible argument that a `fit_text`
+helper has now been asked for twice. It is still not scheduled; it is recorded
+under *Waiting on a roadblock* with the evidence attached.
 
 ## Slice 4 — Theme tokens + variants
 
@@ -266,6 +381,18 @@ finally demands one, not as a to-build list:
   preset picker is the likely first.
 - **Tabs, accordion, card, badge, modal** — the shadcn roster proper. None has a
   roadblock yet, and the roster is the part most likely to become the project.
+- **Text fitting (`fit_text` / ellipsis)** — asked for twice now and declined
+  twice. Slice 2's clipping made long section headings truncate mid-glyph; Slice
+  3's preset row made a button label overflow its cell. Both were answered by
+  shortening the string, which works and is honest, but the third time will be
+  the one where the caller can't shorten it. The shape is known and small: with
+  monospace `Painter::text_size` and a real available rect, clamping a run to its
+  width with a trailing `…` is a dozen lines. It waits for a consumer whose
+  strings aren't its own to edit.
+- **Draggable panel edges** — panel *width* is a parameter as of Slice 3, so a
+  consumer can already resize one by passing a different number. A grab handle
+  that lets the *user* do it at runtime is a separate thing, and stays under the
+  "no" below until something wants it.
 - **A transport / timeline scrubber** — play, pause, single-step, and seek along a
   time axis, with tick marks or event markers. The driver is real and close: the
   engine's [Slice 11](../ROADMAP.md#slice-11--fixed-timestep-clock--time-control)

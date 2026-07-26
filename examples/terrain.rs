@@ -30,7 +30,7 @@
 //!   native — `cargo run --example terrain`
 //!   web    — `cargo xtask serve terrain`, then open the printed URL.
 
-use slmsttaa::ui::{theme, Rect, Response, Ui};
+use slmsttaa::ui::{theme, Anchor, Rect, Response, Ui};
 use slmsttaa::{run, Application, Key, Mesh, MouseButton, RenderMode, Renderer, Vertex};
 
 #[path = "terrain/erosion.rs"]
@@ -60,9 +60,19 @@ fn log_slider(ui: &mut Ui, label: &str, value: &mut f32, min: f32, max: f32) -> 
     let (lmin, lmax) = (min.max(1e-9).log10(), max.log10());
     let span = (lmax - lmin).max(f32::EPSILON);
 
-    let header = format!("{label}: {value:.5}");
-    ui.painter()
-        .text(row.x, row.y, &header, theme::TEXT_PX, theme::COL_TEXT);
+    // Label left, value right — measured through the same public `text_size` the
+    // built-in slider uses, so this row lines up with the ones above it.
+    let readout = format!("{value:.1e}");
+    let readout_w = ui.painter().text_size(&readout, theme::TEXT_PX)[0];
+    let painter = ui.painter();
+    painter.text(row.x, row.y, label, theme::TEXT_PX, theme::COL_TEXT);
+    painter.text(
+        row.max_x() - readout_w,
+        row.y,
+        &readout,
+        theme::TEXT_PX,
+        theme::COL_MUTED,
+    );
 
     let track_y = row.y + theme::TEXT_PX + 5.0;
     let band = Rect::new(row.x, track_y - 6.0, row.w, theme::TRACK_H + 12.0);
@@ -117,10 +127,34 @@ const HALF: f32 = 2.5;
 const VHEIGHT: f32 = 1.3;
 /// How tall the panel's scrolling body is allowed to get, in UI points.
 ///
-/// A constant rather than "whatever fits the window": the toolkit can't anchor a
-/// panel to a window edge yet (UI Slice 3), so the demo picks a budget that
-/// leaves the 3D view usable at the default 1280x720.
+/// A constant rather than "whatever fits the window": a panel is anchored to a
+/// corner and sized by its caller, not stretched to the viewport, so the demo
+/// picks a budget that leaves the 3D view usable at the default 1280x720.
 const PANEL_SCROLL_MAX: f32 = 420.0;
+/// Width of the HUD panel in the opposite corner. Narrow on purpose — it holds
+/// two readouts and a toggle, and a 340-point slab for that would be absurd.
+///
+/// Not arbitrary: `label_value` puts the label at the left edge and the value at
+/// the right, so the panel has to be wider than the two together or they meet in
+/// the middle. `"grid"` + `"128x128"` is 11 glyphs at 16 points = 176, and this
+/// leaves a comfortable gap.
+const HUD_W: f32 = 210.0;
+
+/// Base-shape presets: `(name, frequency, octaves, ridge)`.
+///
+/// The row of buttons these drive is what pulled horizontal layout into
+/// existence — three of them side by side is not expressible with a cursor that
+/// only moves down.
+///
+/// The names are short because a third of the content width is 101 points, which
+/// is six glyphs and a bit: the toolkit does not fit or ellipsize text (that is
+/// deliberately out of UI Slice 3), so a caller putting a button in a column
+/// still has to know what will fit in one.
+const SHAPE_PRESETS: [(&str, f32, u32, f32); 3] = [
+    ("hills", 2.5, 4, 1.0),
+    ("alps", 3.5, 5, 1.4),
+    ("peaks", 5.0, 7, 2.2),
+];
 
 /// Grid resolution bounds (cells per side); snapped to a multiple of 8.
 const RES_MIN: f32 = 32.0;
@@ -286,91 +320,143 @@ impl TerrainDemo {
         let pending = self.pending_base || self.pending_erode;
 
         let mut ui = renderer.ui();
-        ui.title("Terrain");
-        ui.label_muted(&format!("{fps:.0} fps   {n}x{n} grid"));
-        if pending {
-            ui.label_muted("release to rebuild...");
-        }
-        ui.checkbox("wireframe", &mut self.wireframe);
-        ui.separator();
 
-        // Everything below the header scrolls. Sections collapse too (click a
-        // heading) — between them the panel stays on screen however many knobs
-        // it grows.
-        let (mut base, erode, new_seed) = ui.scroll_area("params", PANEL_SCROLL_MAX, |ui| {
-            // --- Layer 1: the Perlin base shape ---
-            let mut base = false;
-            if ui.section("Base shape (Perlin)").open {
-                base |= ui
-                    .slider_fmt("frequency", &mut self.params.frequency, 0.5, 8.0, 2)
-                    .changed;
-                let mut octaves = self.params.octaves as f32;
-                if ui.slider_fmt("octaves", &mut octaves, 1.0, 8.0, 0).changed {
-                    self.params.octaves = octaves.round() as u32;
-                    base = true;
-                }
-                base |= ui
-                    .slider_fmt("lacunarity", &mut self.params.lacunarity, 1.5, 3.0, 2)
-                    .changed;
-                base |= ui
-                    .slider_fmt("persistence", &mut self.params.persistence, 0.2, 0.8, 2)
-                    .changed;
-                base |= ui
-                    .slider_fmt("ridge (peaks)", &mut self.params.ridge, 0.5, 3.0, 2)
-                    .changed;
+        // The parameter panel, top-left.
+        let (mut base, erode, new_seed, preset) = ui.panel(Anchor::TopLeft, theme::PANEL_W, |ui| {
+            ui.title("Terrain");
+            if pending {
+                ui.label_muted("release to rebuild...");
             }
             ui.separator();
 
-            // --- Layer 2: erosion ---
-            let mut erode = false;
-            if ui.section("Fluvial erosion (rivers)").open {
-                let mut iters = self.erosion.iterations as f32;
-                if ui.slider_fmt("passes", &mut iters, 0.0, 120.0, 0).changed {
-                    self.erosion.iterations = iters.round() as u32;
-                    erode = true;
-                }
-                // The demo's own widget: erodibility is only tunable on a log track.
-                erode |= log_slider(
-                    ui,
-                    "erodibility",
-                    &mut self.erosion.erodibility,
-                    1.0e-5,
-                    6.0e-3,
-                )
-                .changed;
-                erode |= ui
-                    .slider_fmt("area exponent m", &mut self.erosion.m, 0.2, 1.0, 2)
-                    .changed;
-            }
-
-            if ui.section("Thermal erosion").open {
-                erode |= ui
-                    .checkbox("enable talus", &mut self.erosion.thermal)
-                    .changed;
-                if self.erosion.thermal {
-                    erode |= ui
-                        .slider_fmt("  talus (slope)", &mut self.erosion.talus, 0.3, 4.0, 2)
+            // Everything below the header scrolls. Sections collapse too
+            // (click a heading) — between them the panel stays on screen
+            // however many knobs it grows.
+            ui.scroll_area("params", PANEL_SCROLL_MAX, |ui| {
+                // --- Layer 1: the Perlin base shape ---
+                let mut base = false;
+                let mut preset = None;
+                if ui.section("Base shape").open {
+                    // The button row. Each cell is its own column, so the
+                    // three hit-test to their own thirds of the width.
+                    ui.columns(SHAPE_PRESETS.len(), |ui, i| {
+                        if ui.button(SHAPE_PRESETS[i].0).clicked {
+                            preset = Some(i);
+                        }
+                    });
+                    base |= ui
+                        .slider("frequency", &mut self.params.frequency, 0.5, 8.0)
+                        .show()
                         .changed;
-                    erode |= ui
-                        .slider_fmt("  rate", &mut self.erosion.thermal_rate, 0.0, 0.5, 2)
+                    let mut octaves = self.params.octaves as f32;
+                    if ui
+                        .slider("octaves", &mut octaves, 1.0, 8.0)
+                        .decimals(0)
+                        .show()
+                        .changed
+                    {
+                        self.params.octaves = octaves.round() as u32;
+                        base = true;
+                    }
+                    base |= ui
+                        .slider("lacunarity", &mut self.params.lacunarity, 1.5, 3.0)
+                        .show()
+                        .changed;
+                    base |= ui
+                        .slider("persistence", &mut self.params.persistence, 0.2, 0.8)
+                        .show()
+                        .changed;
+                    base |= ui
+                        .slider("ridge (peaks)", &mut self.params.ridge, 0.5, 3.0)
+                        .show()
                         .changed;
                 }
-            }
-            ui.separator();
+                ui.separator();
 
-            // --- Grid ---
-            let mut new_seed = false;
-            if ui.section("Grid").open {
-                ui.slider_fmt("resolution", &mut self.res, RES_MIN, RES_MAX, 0);
-                new_seed = ui.button("new seed").clicked;
-            }
+                // --- Layer 2: erosion ---
+                let mut erode = false;
+                if ui.section("Fluvial erosion").open {
+                    let mut iters = self.erosion.iterations as f32;
+                    if ui
+                        .slider("passes", &mut iters, 0.0, 120.0)
+                        .decimals(0)
+                        .show()
+                        .changed
+                    {
+                        self.erosion.iterations = iters.round() as u32;
+                        erode = true;
+                    }
+                    // The demo's own widget: erodibility is only tunable on
+                    // a log track.
+                    erode |= log_slider(
+                        ui,
+                        "erodibility",
+                        &mut self.erosion.erodibility,
+                        1.0e-5,
+                        6.0e-3,
+                    )
+                    .changed;
+                    erode |= ui
+                        .slider("area exponent m", &mut self.erosion.m, 0.2, 1.0)
+                        .show()
+                        .changed;
+                }
 
-            (base, erode, new_seed)
+                if ui.section("Thermal erosion").open {
+                    erode |= ui
+                        .checkbox("enable talus", &mut self.erosion.thermal)
+                        .changed;
+                    if self.erosion.thermal {
+                        // Indented because these belong to the toggle above
+                        // them — which used to be faked with two leading
+                        // spaces inside the label string.
+                        erode |= ui.indent(|ui| {
+                            let talus = ui
+                                .slider("talus (slope)", &mut self.erosion.talus, 0.3, 4.0)
+                                .show()
+                                .changed;
+                            let rate = ui
+                                .slider("rate", &mut self.erosion.thermal_rate, 0.0, 0.5)
+                                .show()
+                                .changed;
+                            talus || rate
+                        });
+                    }
+                }
+                ui.separator();
+
+                // --- Grid ---
+                let mut new_seed = false;
+                if ui.section("Grid").open {
+                    ui.slider("resolution", &mut self.res, RES_MIN, RES_MAX)
+                        .decimals(0)
+                        .show();
+                    new_seed = ui.button("new seed").clicked;
+                }
+
+                (base, erode, new_seed, preset)
+            })
+        });
+
+        // The HUD, top-right — its own panel now, not the first three rows of
+        // the parameter panel. Right-aligned readouts keep the numbers in a
+        // column and stop the line growing past the border.
+        ui.panel(Anchor::TopRight, HUD_W, |ui| {
+            ui.label_value("fps", &format!("{fps:.0}"));
+            ui.label_value("grid", &format!("{n}x{n}"));
+            ui.checkbox("wireframe", &mut self.wireframe);
         });
 
         let wants_pointer = ui.wants_pointer();
         drop(ui);
 
+        if let Some(i) = preset {
+            let (_, frequency, octaves, ridge) = SHAPE_PRESETS[i];
+            self.params.frequency = frequency;
+            self.params.octaves = octaves;
+            self.params.ridge = ridge;
+            base = true;
+        }
         if new_seed {
             self.params.seed = self.params.seed.wrapping_add(1);
             base = true;

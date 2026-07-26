@@ -21,7 +21,8 @@
 
 use crate::Rect;
 
-/// One frame of pointer input, as the UI sees it.
+/// One frame of host state, as the UI sees it: where the pointer is, and how
+/// big the window is.
 ///
 /// The host fills this in each frame. Coordinates are **logical points** with
 /// the origin at the top-left, matching what a [`Painter`](crate::Painter) draws
@@ -43,6 +44,12 @@ pub struct UiInput {
     /// something else (the terrain demo zooms its camera with it) decides who
     /// wins by checking [`Ui::wants_pointer`](crate::Ui::wants_pointer).
     pub scroll_delta: f32,
+    /// The drawable area's `(width, height)` in points.
+    ///
+    /// Only edge anchoring reads it: a `TopRight` panel has to know where the
+    /// right edge *is*. A host that only ever puts panels in the top-left corner
+    /// can leave it at `(0.0, 0.0)` and nothing will notice.
+    pub viewport: (f32, f32),
 }
 
 impl UiInput {
@@ -110,9 +117,12 @@ pub struct UiState {
     pub(crate) active: Option<u64>,
     /// The widget that would receive keyboard input.
     pub(crate) focused: Option<u64>,
-    /// Last frame's panel height, so `wants_pointer` still knows the panel's
-    /// extent before this frame's widgets have been declared.
-    pub(crate) panel_height: f32,
+    /// Where each panel ended up last frame, keyed by panel id.
+    ///
+    /// A bottom-anchored panel is the reason this exists: it has to position its
+    /// contents *before* laying them out, so it borrows last frame's height and
+    /// settles on the second frame. Top-anchored panels never read it.
+    pub(crate) panels: Vec<(u64, Rect)>,
     /// Collapsed/expanded state per section id.
     ///
     /// A `Vec` rather than a `HashMap`: a panel has a handful of sections, a
@@ -154,6 +164,19 @@ impl UiState {
         match self.scroll.iter_mut().find(|(k, _)| *k == id) {
             Some((_, v)) => *v = offset,
             None => self.scroll.push((id, offset)),
+        }
+    }
+
+    /// Where panel `id` was last frame, if it has ever been laid out.
+    pub(crate) fn panel_rect(&self, id: u64) -> Option<Rect> {
+        self.panels.iter().find(|(k, _)| *k == id).map(|(_, r)| *r)
+    }
+
+    /// Remember where panel `id` ended up this frame.
+    pub(crate) fn set_panel_rect(&mut self, id: u64, rect: Rect) {
+        match self.panels.iter_mut().find(|(k, _)| *k == id) {
+            Some((_, r)) => *r = rect,
+            None => self.panels.push((id, rect)),
         }
     }
 }

@@ -18,14 +18,20 @@ use crate::Color;
 
 // --- Metrics ---------------------------------------------------------------
 
-/// Panel left edge, in points from the window's left.
-pub const PANEL_X: f32 = 12.0;
-/// Panel top edge.
-pub const PANEL_Y: f32 = 12.0;
-/// Panel width. Fixed — anchored, resizable panels are UI Slice 3.
+/// The gap between a panel and the window edge it is anchored to.
+pub const MARGIN: f32 = 12.0;
+/// The default panel width, for a caller with no opinion.
+///
+/// Only a default: [`Ui::panel`](crate::Ui::panel) takes the width it should
+/// use, because a HUD showing "60 fps" and a parameter panel full of sliders
+/// want very different rectangles.
 pub const PANEL_W: f32 = 340.0;
 /// Padding between the panel edge and its contents.
 pub const PAD: f32 = 10.0;
+/// The gap between two widgets sharing a row.
+pub const GAP: f32 = 8.0;
+/// How far [`Ui::indent`](crate::Ui::indent) steps in.
+pub const INDENT: f32 = 16.0;
 
 /// Body text cell size.
 pub const TEXT_PX: f32 = 16.0;
@@ -40,11 +46,6 @@ pub const ROW_H: f32 = 24.0;
 pub const TRACK_H: f32 = 8.0;
 /// Slider knob width.
 pub const KNOB_W: f32 = 10.0;
-
-/// The content width available inside the panel's padding.
-pub const CONTENT_W: f32 = PANEL_W - 2.0 * PAD;
-/// The x every widget's content starts at.
-pub const CONTENT_X: f32 = PANEL_X + PAD;
 
 /// Width of the scroll indicator drawn beside an overflowing panel body.
 pub const SCROLLBAR_W: f32 = 4.0;

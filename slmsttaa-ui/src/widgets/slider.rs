@@ -4,78 +4,210 @@
 //! grab the knob the drag has to follow the cursor even when it leaves the
 //! track, and "which widget owns the pointer right now" is the only way to know
 //! that the motion belongs to this slider and not to the camera behind it.
+//!
+//! It is also the only widget with a **builder**. Every other one takes its
+//! arguments and draws; this one has a value to format and a row to arrange, and
+//! those are exactly the two things a consumer wants to override. Rather than
+//! grow a `slider_fmt`, then a `slider_fmt_compact`, then a variant that takes a
+//! closure, it gets [`Slider`] — which is also a rehearsal for the `variant` /
+//! `size` builders the whole roster acquires in UI Slice 4.
 
 use crate::theme::*;
 use crate::{Rect, Response, Ui};
 
-impl Ui<'_> {
-    /// A labeled, draggable float slider over `[min, max]`. Edits `value` in
-    /// place; read [`Response::changed`].
-    ///
-    /// Renders as a `label: value` line over a track with a draggable knob.
-    pub fn slider(&mut self, label: &str, value: &mut f32, min: f32, max: f32) -> Response {
-        self.slider_fmt(label, value, min, max, 2)
-    }
+/// How a [`Slider`] arranges its label, value, and track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SliderLayout {
+    /// Label and value on one line, full-width track underneath. Two rows tall,
+    /// and the default: it gives the track the whole panel to work with, which
+    /// is what makes a value pickable.
+    #[default]
+    Stacked,
+    /// Label, track, and value all on one row. Half the height, at the cost of
+    /// a track only as wide as the label and value leave it.
+    Compact,
+}
 
-    /// [`Ui::slider`] with control over how many decimals the value shows.
-    pub fn slider_fmt(
-        &mut self,
-        label: &str,
-        value: &mut f32,
+/// A draggable float slider over `[min, max]`, configured then shown.
+///
+/// Built by [`Ui::slider`]. Nothing is drawn until [`Slider::show`] is called,
+/// which is what the `must_use` is guarding.
+///
+/// ```
+/// # use slmsttaa_ui::{theme, Anchor, RecordingPainter, SliderLayout, Ui, UiInput, UiState};
+/// # let (mut p, mut s) = (RecordingPainter::default(), UiState::default());
+/// # let mut ui = Ui::new(&mut p, UiInput::default(), &mut s);
+/// # ui.panel(Anchor::TopLeft, theme::PANEL_W, |ui| {
+/// # let (mut m, mut erodibility) = (0.5_f32, 3.0e-3_f32);
+/// // The plain case.
+/// ui.slider("area exponent m", &mut m, 0.2, 1.0).show();
+///
+/// // Overridden: a value that needs scientific notation, on one row.
+/// ui.slider("erodibility", &mut erodibility, 1.0e-5, 6.0e-3)
+///     .value_fmt(|v| format!("{v:.1e}"))
+///     .layout(SliderLayout::Compact)
+///     .show();
+/// # });
+/// ```
+#[must_use = "a slider draws nothing until `.show()` is called"]
+pub struct Slider<'u, 'a, 'v> {
+    ui: &'u mut Ui<'a>,
+    label: &'u str,
+    value: &'v mut f32,
+    min: f32,
+    max: f32,
+    decimals: usize,
+    layout: SliderLayout,
+    fmt: Option<Box<dyn Fn(f32) -> String + 'u>>,
+}
+
+impl<'a> Ui<'a> {
+    /// Begin a draggable float slider over `[min, max]`, editing `value` in
+    /// place.
+    ///
+    /// Returns a [`Slider`] to configure; call [`Slider::show`] to draw it and
+    /// get the [`Response`], whose `changed` says whether the value moved.
+    pub fn slider<'u, 'v>(
+        &'u mut self,
+        label: &'u str,
+        value: &'v mut f32,
         min: f32,
         max: f32,
-        decimals: usize,
-    ) -> Response {
-        let id = self.next_id(label);
-        let row = self.allocate([0.0, ROW_H + TEXT_PX]);
+    ) -> Slider<'u, 'a, 'v> {
+        Slider {
+            ui: self,
+            label,
+            value,
+            min,
+            max,
+            decimals: 2,
+            layout: SliderLayout::default(),
+            fmt: None,
+        }
+    }
+}
 
-        // Header line: "label: value".
-        let header = format!("{label}: {value:.decimals$}");
-        self.painter.text(row.x, row.y, &header, TEXT_PX, COL_TEXT);
+impl<'u, 'a, 'v> Slider<'u, 'a, 'v> {
+    /// How many decimal places the readout shows. Defaults to 2, and is ignored
+    /// once [`Slider::value_fmt`] is set.
+    pub fn decimals(mut self, decimals: usize) -> Self {
+        self.decimals = decimals;
+        self
+    }
 
-        let track_y = row.y + TEXT_PX + 5.0;
-        // The hit band is taller than the visible track so it's easy to grab.
-        let band = Rect::new(row.x, track_y - 6.0, row.w, TRACK_H + 12.0);
-        let mut response = self.interact(band, id);
+    /// Format the readout yourself, for a value that decimals can't describe —
+    /// scientific notation, a unit suffix, an enum name.
+    pub fn value_fmt(mut self, format: impl Fn(f32) -> String + 'u) -> Self {
+        self.fmt = Some(Box::new(format));
+        self
+    }
+
+    /// Arrange the row differently. See [`SliderLayout`].
+    pub fn layout(mut self, layout: SliderLayout) -> Self {
+        self.layout = layout;
+        self
+    }
+
+    /// Lay the slider out, draw it, and report what the pointer did.
+    pub fn show(self) -> Response {
+        let Slider {
+            ui,
+            label,
+            value,
+            min,
+            max,
+            decimals,
+            layout,
+            fmt,
+        } = self;
+
+        let text = match &fmt {
+            Some(format) => format(*value),
+            None => format!("{value:.decimals$}"),
+        };
+        let id = ui.next_id(label);
+
+        let (track, mut response) = match layout {
+            SliderLayout::Stacked => {
+                let row = ui.allocate([0.0, ROW_H + TEXT_PX]);
+                let value_w = ui.painter().text_size(&text, TEXT_PX)[0];
+
+                // Label left, value hard against the right edge: two runs that
+                // share the width instead of one that outgrows it.
+                let painter = ui.painter();
+                painter.text(row.x, row.y, label, TEXT_PX, COL_TEXT);
+                painter.text(row.max_x() - value_w, row.y, &text, TEXT_PX, COL_MUTED);
+
+                let track = Rect::new(row.x, row.y + TEXT_PX + 5.0, row.w, TRACK_H);
+                // The hit band is taller than the visible track so it's easy to grab.
+                let band = Rect::new(track.x, track.y - 6.0, track.w, TRACK_H + 12.0);
+                (track, ui.interact(band, id))
+            }
+            SliderLayout::Compact => {
+                let row = ui.allocate([0.0, ROW_H]);
+                // The row owns a 4-point trailing gap, as a button's does.
+                let face_h = ROW_H - 4.0;
+                let label_w = ui.painter().text_size(label, TEXT_PX)[0];
+                let value_w = ui.painter().text_size(&text, TEXT_PX)[0];
+
+                let text_y = row.y + (face_h - TEXT_PX) * 0.5;
+                let painter = ui.painter();
+                painter.text(row.x, text_y, label, TEXT_PX, COL_TEXT);
+                painter.text(row.max_x() - value_w, text_y, &text, TEXT_PX, COL_MUTED);
+
+                let track_x = row.x + label_w + GAP;
+                let track_w = (row.max_x() - value_w - GAP - track_x).max(0.0);
+                let track = Rect::new(track_x, row.y + (face_h - TRACK_H) * 0.5, track_w, TRACK_H);
+                let band = Rect::new(track.x, row.y, track.w, face_h);
+                (track, ui.interact(band, id))
+            }
+        };
 
         let span = (max - min).max(f32::EPSILON);
-        if response.held {
-            if let Some((px, _)) = self.input.cursor {
-                let t = ((px - row.x) / row.w).clamp(0.0, 1.0);
+        if response.held && track.w > 0.0 {
+            if let Some((px, _)) = ui.input().cursor {
+                let t = ((px - track.x) / track.w).clamp(0.0, 1.0);
                 let new_val = min + t * span;
                 if (new_val - *value).abs() > f32::EPSILON {
                     *value = new_val;
                     response.changed = true;
-                    self.changed = true;
+                    ui.mark_changed();
                 }
             }
         }
 
-        // Track, filled portion, and knob — all capsules (a radius at half the
-        // shorter side rounds the ends off completely).
         let t = ((*value - min) / span).clamp(0.0, 1.0);
-        let track = Rect::new(row.x, track_y, row.w, TRACK_H);
-        let cap = TRACK_H * 0.5;
-        self.painter.fill_rect(track, cap, COL_TRACK);
-        self.painter.fill_rect(
-            Rect::new(row.x, track_y, row.w * t, TRACK_H),
-            cap,
-            COL_ACCENT,
-        );
-
-        let knob_x = (row.x + row.w * t - KNOB_W * 0.5).clamp(row.x, row.max_x() - KNOB_W);
-        let knob = Rect::new(knob_x, track_y - 4.0, KNOB_W, TRACK_H + 8.0);
-        let knob_col = if response.held || response.hovered {
-            COL_ACCENT_HOT
-        } else {
-            COL_TEXT
-        };
-        self.painter.fill_rect(knob, KNOB_W * 0.5, knob_col);
-        if response.focused {
-            self.painter
-                .stroke_rect(knob, KNOB_W * 0.5, BORDER, COL_RING);
-        }
-
+        draw_track(ui, track, t, &response);
         response
+    }
+}
+
+/// Track, filled portion, and knob — all capsules (a radius at half the shorter
+/// side rounds the ends off completely).
+///
+/// Split out because both layouts draw the identical control, and because it is
+/// written against nothing but [`Ui::painter`] — a consumer's own slider can
+/// call the same sequence and match.
+fn draw_track(ui: &mut Ui, track: Rect, t: f32, response: &Response) {
+    let cap = TRACK_H * 0.5;
+    let knob_x = (track.x + track.w * t - KNOB_W * 0.5)
+        .clamp(track.x, (track.max_x() - KNOB_W).max(track.x));
+    let knob = Rect::new(knob_x, track.y - 4.0, KNOB_W, TRACK_H + 8.0);
+    let knob_col = if response.held || response.hovered {
+        COL_ACCENT_HOT
+    } else {
+        COL_TEXT
+    };
+
+    let painter = ui.painter();
+    painter.fill_rect(track, cap, COL_TRACK);
+    painter.fill_rect(
+        Rect::new(track.x, track.y, track.w * t, TRACK_H),
+        cap,
+        COL_ACCENT,
+    );
+    painter.fill_rect(knob, KNOB_W * 0.5, knob_col);
+    if response.focused {
+        painter.stroke_rect(knob, KNOB_W * 0.5, BORDER, COL_RING);
     }
 }

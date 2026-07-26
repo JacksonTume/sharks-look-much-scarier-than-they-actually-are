@@ -41,8 +41,9 @@ src/
     │                 solid + wireframe render pipelines (RenderMode), the depth
     │                 buffer, the consumer's mesh draw-list, the overlay, the UI
     │                 state + clock, and per-frame begin_frame()/update()/render().
-    │                 Renderer::ui() also translates Input -> ui::UiInput, which is
-    │                 what keeps the UI crate free of any dependency on the engine.
+    │                 Renderer::ui() also translates Input + the surface size ->
+    │                 ui::UiInput, which is what keeps the UI crate free of any
+    │                 dependency on the engine.
     ├── mesh.rs       Mesh (vertices + indices): the CPU-side geometry a consumer
     │                 builds and hands over via Renderer::set_meshes.
     ├── vertex.rs     Vertex (position + color) and its buffer layout.
@@ -82,14 +83,16 @@ slmsttaa-ui/          The UI toolkit, as its own zero-dependency workspace membe
 ├── WISHLIST.md       `slmsttaa::ui`; it never depends on the engine, so it sees
 ├── src/              no wgpu and no winit. UI planning lives in its ROADMAP,
 │   ├── lib.rs        not the engine's. Ui: the id stack, the public
-│   │                 allocate/interact/painter seam, and the frame's layout.
+│   │                 allocate/interact/painter seam, the region stack, and the
+│   │                 panel / row / column containers.
 │   ├── painter.rs    Painter (the drawing seam), Layer (the four ordered draw
 │   │                 buckets), + RecordingPainter, the headless test double that
 │   │                 makes layout assertable without a GPU.
-│   ├── interact.rs   UiInput (this frame's pointer, filled in by the host),
-│   │                 UiState (hot/active/focused + collapsed sections), and the
-│   │                 Response every widget returns.
-│   ├── layout.rs     Rect + the vertical placement cursor.
+│   ├── interact.rs   UiInput (this frame's pointer + viewport size, filled in by
+│   │                 the host), UiState (hot/active/focused, collapsed sections,
+│   │                 scroll offsets, panel rects), and the Response every widget
+│   │                 returns.
+│   ├── layout.rs     Rect + the stack of layout regions widgets are placed in.
 │   ├── theme.rs      Every metric and color in one place — public, so a widget
 │   │                 written by a consumer can match the built-in ones.
 │   └── widgets/      One file per widget: text.rs, button.rs, slider.rs.
@@ -178,24 +181,38 @@ render graph will eventually grow. The design holds two boundaries at once:
   identical on native and web (KISS).
 
 - **`Painter` is the seam, and it is the engine's only obligation to the UI.**
-  The toolkit talks to the overlay *only* through that trait (`rect` / `text` /
-  `text_size`) and never sees `wgpu`; the overlay is just one implementation, and
-  a headless recorder in the UI crate's tests is another. Everything above the
-  trait — widgets, layout, theming, interaction — is
+  The toolkit talks to the overlay *only* through that trait (`fill_rect` /
+  `stroke_rect` / `text` / `text_size` / `set_layer` / `push_clip` / `pop_clip`)
+  and never sees `wgpu`; the overlay is just one implementation, and a headless
+  recorder in the UI crate's tests is another. Everything above the trait —
+  widgets, layout, theming, interaction — is
   [`slmsttaa-ui`](slmsttaa-ui/README.md)'s business and is documented there.
 
   Input crosses the same boundary, in the opposite direction and by copy. The
   toolkit cannot `use crate::input::Input` — it doesn't depend on the engine, and
   reaching back would be a dependency cycle — so it declares its own `UiInput`
-  snapshot and `Renderer::ui()` fills one in each frame from this frame's
-  `Input`. Three field assignments buys a UI crate with no dependencies at all.
+  snapshot and `Renderer::ui()` fills one in each frame from this frame's `Input`
+  and the surface size (the latter so a panel can anchor to a window edge without
+  the toolkit ever learning what a window is). Four field assignments buys a UI
+  crate with no dependencies at all.
 
   What lives on *this* side of the seam is the part that touches the GPU: the
   overlay pipeline, the glyph atlas, the 2D vertex format, and draw ordering. So
-  when the UI needs a capability the painter lacks — rounded corners, clipping,
-  ordered draw layers — the work lands here, in `overlay.rs` / `overlay.wgsl` /
-  `Vertex2D`, as a deliberate widening of the trait. That funnel is the point of
-  the crate split, and UI Slice 1 was the first time it was used in anger.
+  when the UI needs a capability the painter lacks, the work lands here, in
+  `overlay.rs` / `overlay.wgsl` / `Vertex2D`, as a deliberate widening of the
+  trait. That funnel is the point of the crate split; UI Slice 1 was the first
+  time it was used in anger (ordered draw layers), and UI Slice 2 the second
+  (rounded corners, borders, and clipping).
+
+- **Rounded corners and clipping are per-vertex parameters, not extra passes.**
+  `Vertex2D` carries the rect it belongs to (center + half-size), a corner
+  radius, a border width, and a clip rectangle — 80 bytes a vertex. The fragment
+  shader evaluates a rounded-box SDF for the shape, subtracts an inset SDF for a
+  stroke, and discards outside the clip rect. Because all of it is per-vertex
+  rather than per-draw, a panel with rounded corners, a hairline border, and a
+  clipped scroll region inside it is still **one** `draw_indexed`. Clip
+  rectangles intersect rather than replace as they nest, so an inner region can
+  only ever shrink what is visible.
 
 - **Draw layers cost one index vector, not one draw call.** `Painter::set_layer`
   directs primitives into one of four buckets (base / panel / popup / tooltip).
@@ -285,11 +302,10 @@ The scaffold leaves obvious seams:
 - A small **render-graph**: there are now two passes (3D + overlay) wired by hand
   in `render()`. A second consumer wanting its own pass is the roadblock that turns
   this into a real graph.
-- **Overlay capabilities the UI crate will ask for**: rounded-rect and clip
-  support in `overlay.wgsl` (both fit in the fragment shader via an SDF plus a
-  per-vertex clip rect, with no draw-call splitting), ordered draw layers in
-  `Overlay::flush`, and a `scale_factor`-aware surface — nothing reads it today,
-  so the UI renders at half size on a 2× display. These are sequenced in the
+- **Further overlay capabilities the UI crate may ask for**: soft shadows (looked
+  at in UI Slice 2 and deliberately declined — a hairline border reads as
+  well for a fraction of the fill cost), and textured quads for icons, which
+  wait on consumer-supplied textures. Sequenced in the
   [UI roadmap](slmsttaa-ui/ROADMAP.md), since that's what demands them; widgets
   themselves are no longer an engine concern.
 
@@ -299,4 +315,8 @@ camera** fed by a winit-free `Input` (Slice 3), the **terrain vertical** (Slice 
 rebuilt in Slice 6 as a layered Perlin + hydro-thermal pipeline), a **screen-space
 overlay pass + decoupled immediate-mode UI** with an embedded bitmap font and a
 wasm-safe frame clock (Slice 5), and a **portable wireframe render mode**
-(`RenderMode`, line topology — Slice 6).
+(`RenderMode`, line topology — Slice 6). On the overlay side specifically:
+**ordered draw layers** in `Overlay::flush` and a **`scale_factor`-aware
+surface** (UI Slice 1 — the toolkit speaks logical points and the overlay scales
+on the way to vertices), plus **rounded-rect, border, and clip support** in
+`overlay.wgsl` (UI Slice 2).

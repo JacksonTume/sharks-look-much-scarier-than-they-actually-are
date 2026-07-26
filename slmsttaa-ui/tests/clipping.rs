@@ -5,18 +5,18 @@
 //! shader. So these assert on the clip rectangle attached to each primitive,
 //! which is exactly what the painter hands the GPU.
 
-use slmsttaa_ui::{DrawCmd, Painter, RecordingPainter, Rect, Ui, UiInput, UiState};
+use slmsttaa_ui::{Anchor, DrawCmd, Painter, RecordingPainter, Rect, Ui, UiInput, UiState};
 
-const PANEL_X: f32 = 12.0;
-const PANEL_Y: f32 = 12.0;
+const MARGIN: f32 = 12.0;
+const PANEL_W: f32 = 340.0;
 const PAD: f32 = 10.0;
-const CONTENT_X: f32 = PANEL_X + PAD;
+const CONTENT_X: f32 = MARGIN + PAD;
 const ROW_H: f32 = 24.0;
 
 /// A pointer parked over the panel, scrolling by `notches`.
 fn wheel(notches: f32) -> UiInput {
     UiInput {
-        cursor: Some((CONTENT_X + 10.0, PANEL_Y + PAD + 10.0)),
+        cursor: Some((CONTENT_X + 10.0, MARGIN + PAD + 10.0)),
         scroll_delta: notches,
         ..Default::default()
     }
@@ -74,10 +74,12 @@ fn scroll_area_clips_its_contents_to_the_viewport() {
 
     {
         let mut ui = Ui::new(&mut painter, UiInput::default(), &mut state);
-        ui.scroll_area("body", 100.0, |ui| {
-            for i in 0..20 {
-                ui.label(&format!("row {i}"));
-            }
+        ui.panel(Anchor::TopLeft, PANEL_W, |ui| {
+            ui.scroll_area("body", 100.0, |ui| {
+                for i in 0..20 {
+                    ui.label(&format!("row {i}"));
+                }
+            });
         });
     }
 
@@ -97,14 +99,16 @@ fn scrolling_moves_the_contents_and_stops_at_the_ends() {
     let mut state = UiState::default();
 
     // 20 rows of content in a 100-point viewport.
-    let mut frame = |input: UiInput, p: &mut RecordingPainter, s: &mut UiState| {
+    let frame = |input: UiInput, p: &mut RecordingPainter, s: &mut UiState| {
         p.clear();
         {
             let mut ui = Ui::new(p, input, s);
-            ui.scroll_area("body", 100.0, |ui| {
-                for i in 0..20 {
-                    ui.label(&format!("row {i}"));
-                }
+            ui.panel(Anchor::TopLeft, PANEL_W, |ui| {
+                ui.scroll_area("body", 100.0, |ui| {
+                    for i in 0..20 {
+                        ui.label(&format!("row {i}"));
+                    }
+                });
             });
         }
         // The y of the first row, which is what moves as we scroll.
@@ -151,13 +155,15 @@ fn a_scroll_area_that_fits_does_not_scroll() {
     let mut painter = RecordingPainter::default();
     let mut state = UiState::default();
 
-    let mut frame = |input: UiInput, p: &mut RecordingPainter, s: &mut UiState| {
+    let frame = |input: UiInput, p: &mut RecordingPainter, s: &mut UiState| {
         p.clear();
         {
             let mut ui = Ui::new(p, input, s);
-            ui.scroll_area("body", 500.0, |ui| {
-                ui.label("only");
-                ui.label("two rows");
+            ui.panel(Anchor::TopLeft, PANEL_W, |ui| {
+                ui.scroll_area("body", 500.0, |ui| {
+                    ui.label("only");
+                    ui.label("two rows");
+                });
             });
         }
         p.cmds
@@ -179,19 +185,21 @@ fn a_scroll_area_that_fits_does_not_scroll() {
 
 #[test]
 fn a_scroll_area_does_not_swallow_the_panels_height() {
-    // The scroll area rewrites the layout cursor to place its contents. If it
-    // clobbered the layout's *origin* too, the panel background would be
-    // measured from the wrong place and come out the wrong height.
+    // The scroll area lays its contents out in a child region, shifted by the
+    // scroll offset. If that shift leaked into the enclosing panel's cursor, the
+    // background would be measured from the wrong place and come out wrong.
     let mut painter = RecordingPainter::default();
     let mut state = UiState::default();
 
     {
         let mut ui = Ui::new(&mut painter, UiInput::default(), &mut state);
-        ui.label("header");
-        ui.scroll_area("body", 100.0, |ui| {
-            for i in 0..20 {
-                ui.label(&format!("row {i}"));
-            }
+        ui.panel(Anchor::TopLeft, PANEL_W, |ui| {
+            ui.label("header");
+            ui.scroll_area("body", 100.0, |ui| {
+                for i in 0..20 {
+                    ui.label(&format!("row {i}"));
+                }
+            });
         });
     }
 

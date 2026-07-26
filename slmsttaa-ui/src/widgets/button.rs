@@ -67,7 +67,7 @@ impl Ui<'_> {
             self.painter.stroke_rect(well, RADIUS, BORDER, COL_RING);
         }
         self.painter
-            .text(well.max_x() + 8.0, row.y, label, TEXT_PX, COL_TEXT);
+            .text(well.max_x() + GAP, row.y, label, TEXT_PX, COL_TEXT);
 
         response
     }

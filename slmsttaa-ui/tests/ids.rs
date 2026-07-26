@@ -6,7 +6,10 @@
 //! *an id depends on a widget's position within its section, not within the
 //! whole panel*.
 
-use slmsttaa_ui::{RecordingPainter, Ui, UiInput, UiState};
+use slmsttaa_ui::{Anchor, RecordingPainter, Ui, UiInput, UiState};
+
+/// The default panel width, restated as elsewhere in this suite.
+const PANEL_W: f32 = 340.0;
 
 /// Run `declare` against a throwaway panel and return whatever ids it picked
 /// out. `next_id` is public, so a test asks for ids exactly like a widget does.
@@ -130,10 +133,12 @@ fn a_row_appearing_above_a_slider_mid_drag_does_not_break_the_drag() {
     let mut frame = |input: UiInput, show_status: bool, v: &mut f32| {
         painter.clear();
         let mut ui = Ui::new(&mut painter, input, &mut state);
-        if show_status {
-            ui.label("release to rebuild...");
-        }
-        ui.slider("erodibility", v, 0.0, 100.0)
+        ui.panel(Anchor::TopLeft, PANEL_W, |ui| {
+            if show_status {
+                ui.label("release to rebuild...");
+            }
+            ui.slider("erodibility", v, 0.0, 100.0).show()
+        })
     };
 
     // Frame 1: press at the far left of the track. No status row yet.
@@ -171,11 +176,13 @@ fn a_section_stays_collapsed_when_a_row_is_added_above_it() {
     let frame = |extra_row: bool, p: &mut RecordingPainter, s: &mut UiState| {
         p.clear();
         let mut ui = Ui::new(p, UiInput::default(), s);
-        ui.label("fps");
-        if extra_row {
-            ui.label("a row added later");
-        }
-        ui.section("Grid").open
+        ui.panel(Anchor::TopLeft, PANEL_W, |ui| {
+            ui.label("fps");
+            if extra_row {
+                ui.label("a row added later");
+            }
+            ui.section("Grid").open
+        })
     };
     let click_heading = |p: &mut RecordingPainter, s: &mut UiState| {
         p.clear();
@@ -190,8 +197,10 @@ fn a_section_stays_collapsed_when_a_row_is_added_above_it() {
             },
             s,
         );
-        ui.label("fps");
-        ui.section("Grid").open
+        ui.panel(Anchor::TopLeft, PANEL_W, |ui| {
+            ui.label("fps");
+            ui.section("Grid").open
+        })
     };
 
     assert!(frame(false, &mut painter, &mut state), "starts expanded");
@@ -214,13 +223,15 @@ fn two_sections_with_the_same_label_collapse_independently() {
     let frame = |input: UiInput, p: &mut RecordingPainter, s: &mut UiState| {
         p.clear();
         let mut ui = Ui::new(p, input, s);
-        ui.push_id("fluvial");
-        let a = ui.section("Detail").open;
-        ui.pop_id();
-        ui.push_id("thermal");
-        let b = ui.section("Detail").open;
-        ui.pop_id();
-        (a, b)
+        ui.panel(Anchor::TopLeft, PANEL_W, |ui| {
+            ui.push_id("fluvial");
+            let a = ui.section("Detail").open;
+            ui.pop_id();
+            ui.push_id("thermal");
+            let b = ui.section("Detail").open;
+            ui.pop_id();
+            (a, b)
+        })
     };
 
     assert_eq!(

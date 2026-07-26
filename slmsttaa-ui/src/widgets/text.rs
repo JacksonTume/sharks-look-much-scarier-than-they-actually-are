@@ -31,13 +31,15 @@ impl Ui<'_> {
     /// says whether the section's contents should be declared:
     ///
     /// ```
-    /// # use slmsttaa_ui::{RecordingPainter, Ui, UiInput, UiState};
+    /// # use slmsttaa_ui::{theme, Anchor, RecordingPainter, Ui, UiInput, UiState};
     /// # let (mut p, mut s) = (RecordingPainter::default(), UiState::default());
     /// # let mut ui = Ui::new(&mut p, UiInput::default(), &mut s);
     /// # let mut frequency = 1.0_f32;
+    /// # ui.panel(Anchor::TopLeft, theme::PANEL_W, |ui| {
     /// if ui.section("Base shape").open {
-    ///     ui.slider("frequency", &mut frequency, 0.5, 8.0);
+    ///     ui.slider("frequency", &mut frequency, 0.5, 8.0).show();
     /// }
+    /// # });
     /// ```
     ///
     /// Sections start expanded, and clicking the heading toggles it. The state
@@ -69,7 +71,7 @@ impl Ui<'_> {
         self.painter
             .text(row.x, row.y + 2.0, caret, SECTION_PX, color);
         self.painter
-            .text(row.x + SECTION_PX, row.y + 2.0, text, SECTION_PX, color);
+            .text(row.x + INDENT, row.y + 2.0, text, SECTION_PX, color);
 
         response
     }
@@ -82,6 +84,33 @@ impl Ui<'_> {
     /// A muted text row, for secondary readouts and hints.
     pub fn label_muted(&mut self, text: &str) -> Response {
         self.text_row(text, COL_MUTED)
+    }
+
+    /// A row with `label` at the left edge and `value` right-aligned against the
+    /// right edge.
+    ///
+    /// This is the row that retired `format!("{label}: {value}")`. One string
+    /// grows until it runs out of panel and gets cut mid-glyph by the clip rect;
+    /// two runs anchored to opposite edges use the whole width and put the
+    /// numbers in a column the eye can scan. `"area exponent m"` plus `"0.50"`
+    /// is 304 points where `"area exponent m: 0.50"` is 336 — the difference
+    /// between fitting and not.
+    ///
+    /// The value is measured with [`Painter::text_size`](crate::Painter::text_size),
+    /// so it is only ever as right-aligned as the font's metrics are honest.
+    pub fn label_value(&mut self, label: &str, value: &str) -> Response {
+        // Seeded with a constant for the same reason `text_row` is: the value
+        // side is usually a live number, and hashing it would hand the row a new
+        // id every frame.
+        let id = self.next_id("label_value");
+        let row = self.allocate([0.0, ROW_H]);
+        let response = self.interact(row, id);
+
+        let value_w = self.painter.text_size(value, TEXT_PX)[0];
+        self.painter.text(row.x, row.y, label, TEXT_PX, COL_TEXT);
+        self.painter
+            .text(row.max_x() - value_w, row.y, value, TEXT_PX, COL_MUTED);
+        response
     }
 
     /// A thin horizontal divider.
