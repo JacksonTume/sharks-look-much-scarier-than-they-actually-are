@@ -41,8 +41,8 @@ this list isn't mistaken for a gap analysis:
 | Hot/active/focused, `Response`, id stack | [Slice 1](ROADMAP.md#slice-1--interaction-core--draw-layers) |
 | Draw layers (popovers above their spawner) | [Slice 1](ROADMAP.md#slice-1--interaction-core--draw-layers) |
 | DPI / `scale_factor` correctness | [Slice 1](ROADMAP.md#slice-1--interaction-core--draw-layers) |
-| Clipping, rounded rects, borders, focus rings | [Slice 2](ROADMAP.md#slice-2--painter-capabilities) |
-| Scroll regions | [Slice 2](ROADMAP.md#slice-2--painter-capabilities) |
+| Clipping, rounded rects, borders, focus rings | [Slice 2](ROADMAP.md#slice-2--painter-capabilities-and-the-scroll-region) |
+| Scroll regions | [Slice 2](ROADMAP.md#slice-2--painter-capabilities-and-the-scroll-region) |
 | Horizontal/columns/indent layout, edge-anchored panels | [Slice 3](ROADMAP.md#slice-3--layout) |
 | Semantic theme tokens, variants, type scale | [Slice 4](ROADMAP.md#slice-4--theme-tokens--variants) |
 | Proportional text at multiple sizes | [Slice 5](ROADMAP.md#slice-5--typography-polish-labeled) |

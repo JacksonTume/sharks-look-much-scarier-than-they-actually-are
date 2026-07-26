@@ -84,11 +84,12 @@ cargo run --example gallery             # switch between scenes (auto-cycles on 
 ```
 
 In the `terrain` demo, drag the left mouse button over the 3D view to orbit and
-scroll to zoom; the panel on the left edits the Perlin base shape and the
-stream-power erosion live (release a slider to rebuild), with a **wireframe**
-toggle to inspect the grid. Press
-<kbd>Esc</kbd> or close the window to quit. Set `RUST_LOG=slmsttaa=debug` for more
-output.
+scroll to zoom. The panel on the left edits the Perlin base shape and the
+stream-power erosion live (release a slider to rebuild), with three shape presets
+across the top of it and collapsible sections over a scrolling body; a smaller
+HUD in the top-right corner reads out the frame rate and grid size and carries a
+**wireframe** toggle for inspecting the mesh. Press <kbd>Esc</kbd> or close the
+window to quit. Set `RUST_LOG=slmsttaa=debug` for more output.
 
 ## Run it (browser / WebGPU)
 

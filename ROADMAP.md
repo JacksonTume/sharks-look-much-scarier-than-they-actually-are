@@ -481,8 +481,11 @@ for a consumer to ask:
   render graph; it is named in [UI `WISHLIST.md`](slmsttaa-ui/WISHLIST.md) as
   engine-side work.
 
-Painter capabilities the UI crate will demand of the overlay (rounded-rect and
-clip support in `overlay.wgsl`, ordered draw layers in `Overlay::flush`, a
-`scale_factor`-aware surface) are engine seams too — but they're sequenced in the
-[UI roadmap](slmsttaa-ui/ROADMAP.md), since that's what pulls them into
-existence.
+Painter capabilities the UI crate demands of the overlay are engine seams too —
+but they're sequenced in the [UI roadmap](slmsttaa-ui/ROADMAP.md), since that's
+what pulls them into existence. Three have already landed there and been paid for
+here: ordered draw layers in `Overlay::flush` and a `scale_factor`-aware surface
+(UI Slice 1), then rounded-rect and clip support in `overlay.wgsl` and the wider
+`Vertex2D` that carries them (UI Slice 2). The overlay is still a single
+`draw_indexed`. The next one the UI is likely to ask for is textured quads, which
+is the same shader work the "no texture support" entry above is waiting on.

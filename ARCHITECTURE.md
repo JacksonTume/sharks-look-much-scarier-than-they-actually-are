@@ -204,6 +204,13 @@ render graph will eventually grow. The design holds two boundaries at once:
   time it was used in anger (ordered draw layers), and UI Slice 2 the second
   (rounded corners, borders, and clipping).
 
+  UI Slice 3 is the useful counter-example: a rewrite of the whole layout system
+  — regions, rows, columns, edge-anchored panels, right-aligned readouts — that
+  widened the `Painter` trait by **nothing at all**. Everything it needed was
+  already there, `text_size` included. The only engine-side change was one more
+  field copied into `UiInput` (the viewport, for anchoring). A seam that absorbs
+  a change that size without moving is a seam in roughly the right place.
+
 - **Rounded corners and clipping are per-vertex parameters, not extra passes.**
   `Vertex2D` carries the rect it belongs to (center + half-size), a corner
   radius, a border width, and a clip rectangle — 80 bytes a vertex. The fragment
