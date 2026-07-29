@@ -278,45 +278,26 @@ proved the vertical worked end-to-end (the thing that mattered then). Slice 6 ke
 that win and trades the algorithm for one that honors the "compose, don't solve"
 and "always something visible" principles.
 
-### Slice 7 — Erosion you can watch: animated timestepping + a water surface ✅ done
+### Slice 7 — A water surface: lakes and rivers ✅ done
 
-*Roadblock:* **the most interesting thing this demo does has never been on
-screen.** A landscape carving itself out of noise is the payoff of two slices of
-work, and you cannot see it happen — `terrain.rs` debounces the rebuild until the
-mouse button comes up, then runs all 60 passes in one ~100ms hitch. The terrain
-teleports from *before* to *after*. There is no in-between, and the in-between is
-the whole show.
+*Roadblock:* the water is **computed every pass and thrown away**. `flow_route`
+(`terrain/erosion.rs`) floods every depression to build `filled[]`, and the
+drainage accumulation builds `area[]`. Lake depth is `filled[c] - z[c]`; rivers
+are the cells where `area` is large. Both already exist, once per pass, and both
+are dropped on the floor when the pass ends. The demo has been simulating water it
+never draws — a terrain shaped entirely by rivers, with no rivers on it.
 
-And the water doing the carving is **computed every pass and thrown away**.
-`flow_route` (`terrain/erosion.rs`) floods every depression to build `filled[]`,
-and the drainage accumulation builds `area[]`. Lake depth is `filled[c] - z[c]`;
-rivers are the cells where `area` is large. Both already exist, once per pass,
-and both are dropped on the floor when the pass ends. The demo has been
-simulating water it never draws.
+One change, **entirely in the demo**: `erode` hands back the final pass's water as
+a `Water { depth, area }`, and the demo builds a second `Mesh` from it —
+lake surfaces at the flooded height wherever `filled > z`, river ribbons wherever
+`area` crosses a threshold, both lifted by an ε to sit off the terrain rather than
+z-fight with it. Blue vertex color, opaque. `set_meshes(&[terrain, water])`.
 
-The goal of this slice is stated as a picture, not a feature: **water visibly
-chipping away at the terrain, cutting rivers down the valleys and pooling into
-lakes**, live, while you watch.
-
-Two changes, both **entirely in the demo**:
-
-- **Step the solver instead of batching it.** `erode` gains a one-pass entry
-  point; `update` advances a pass (or a few) per frame and re-uploads the mesh,
-  which `set_meshes` already supports — it is what `cube.rs` does every frame
-  today. The "passes" slider stops being a batch size and becomes a *target the
-  animation walks toward*, so it scrubs a timeline rather than triggering a
-  hitch. With it: play/pause, and reset-to-noise so you can watch it again.
-- **Draw the water.** A second `Mesh` in `set_meshes(&[terrain, water])`, built
-  from the data above: lake surfaces at `filled` height wherever `filled > z`,
-  river ribbons wherever `area` crosses a threshold, both lifted by an ε to sit
-  off the terrain rather than z-fight with it. Blue vertex color. Opaque.
-
-*On "droplets":* this is the flow-accumulation model **animated**, not a particle
-system. `erosion.rs`'s module docs already record why droplet-hydraulics was
-tried and abandoned — independent droplets never pool into a connected network,
-so they roughen noise instead of carving valleys. Nothing about that ruling
-changes here. What makes water visible is that the river network *already exists
-on every pass*; the animation just shows it deepening.
+*This is not a particle system.* `erosion.rs`'s module docs record why
+droplet-hydraulics was tried and abandoned — independent droplets never pool into
+a connected network, so they roughen noise instead of carving valleys. Nothing
+about that ruling changed. The water drawn here is the flow-accumulation network
+the model was already using.
 
 *What this slice deliberately does not do:* **add anything to the engine.** No new
 public API, no `Painter` method, no shader change. That is unusual enough to
@@ -325,50 +306,49 @@ principle 5 (always keep something on screen) and constrained by principle 2:
 water demands no engine work, so water gets none. If it turns out to demand some,
 that discovery is the slice's real output.
 
-*The one thing to watch:* a full mesh re-upload per frame at 256² plus a
-priority-flood per pass is the demo's own performance ceiling, and it may bite.
-If it does, **that** is the honest roadblock for the fixed-timestep clock (Slice
-12) arriving early — erosion stepped per *frame* is frame-rate coupled by
-construction, which is exactly the wall that slice exists to answer.
+*Drawing lakes changed the erosion model, which was not expected.* The implicit
+update raises a pit toward the rim it was breached from, so **one pass used to
+pack every depression with rock** — the reason there were no lakes to draw.
+Skipping submerged cells fixes that and is the honest reading anyway (no stream
+over a lake bed, so nothing to cut with). But on its own it nearly stopped the
+model: a fifth of the map sat underwater and inert, and sixty passes moved the
+mean height 2.5%.
 
-*Proof:* `cargo run --example terrain` opens on raw Perlin noise and carves it
-down over ~8 seconds — lakes pooling in every depression, silting up, spilling,
-and leaving a dendritic river network in sediment-floored valleys — with
-pause/replay, a scrubable pass count, and a speed control, at 75fps on a 128²
-grid. `wgpu`/`winit` are still nowhere in the demo, and **the engine is unchanged**:
-no new public API, no `Painter` method, no shader edit. `set_meshes` turned out to
-already take a slice, so the water went in beside the terrain as a second element
-of a call that has existed since Slice 1.
+The missing term was **deposition**. Rivers drop their load where they meet
+standing water, so lakes silt up, spill, and hand their basins to the drainage
+network — *drainage integration*, the mechanism the Cordonnier reference is built
+on, arrived at from the wrong end. With it, lake coverage falls from 22% at pass 0
+to 13% by pass 60 to nothing by pass 120, which is why the pass count now doubles
+as a wetness control: a low count leaves lakes, a high one leaves only rivers.
 
-*What it cost to find out, and both things were the model's fault, not the
-engine's.* Neither was predictable from the plan above, which is the argument for
-building the slice rather than specifying it harder:
-
-- **A pass is not a frame.** The first build advanced one pass per frame, which is
-  the obvious reading of "animate it" and is useless: sixty passes at 75fps is over
-  in eight hundred milliseconds, so the landscape still teleported — just via a
-  blur. Passes are now spent off an accumulator at a *passes-per-second* rate the
-  user sets. Worth noting this is the frame-rate coupling Slice 12 exists to fix,
-  met early and papered over with a wall clock: the pacing is stable, the *result*
-  still is not reproducible across machines.
-- **Lakes need sediment or the whole model stalls.** Preserving depressions (so
-  they can hold water at all) meant not letting the implicit update raise every pit
-  to its rim. That worked and lakes appeared — and then almost nothing happened:
-  22% of the map sat under water, submerged cells don't incise, and over sixty
-  passes the mean height moved 2.5%. Pass 12 and pass 60 were indistinguishable on
-  screen. The missing term was **deposition**: rivers drop their load where they
-  meet standing water, so lakes silt up, spill, and hand their basins to the
-  drainage network. Adding it took lake coverage from a flat 18% to 22% → 0% over
-  120 passes, which *is* the animation — and it is drainage integration, the
-  mechanism the Cordonnier reference is built on, arrived at from the wrong end.
-
-*Diagnosis note for future slices:* both were found by a throwaway probe example
-that ran the solver headless and printed relief, lake fraction, and per-pass
-movement every twenty passes. Neither was visible from a screenshot — the terrain
-looked *fine* in both broken versions, just static. When a simulation looks wrong,
+*Diagnosis note for future slices:* that stall was found with a throwaway probe
+example that ran the solver headless and printed relief, lake fraction, and
+per-pass movement every twenty passes. It was **not** visible in a screenshot —
+the terrain looked fine, it just wasn't changing. When a simulation looks wrong,
 measure it before re-tuning it.
 
+*Proof:* `cargo run --example terrain` shows lakes standing in the basins and a
+dendritic river network threading the valleys of the eroded terrain, wireframe
+included, at 92fps on a 128² grid. `wgpu`/`winit` are still nowhere in the demo,
+and **the engine is unchanged**: no new public API, no `Painter` method, no shader
+edit. `set_meshes` turned out to already take a slice, so the water went in beside
+the terrain as a second element of a call that has existed since Slice 1.
+
 *Deferred out of this slice, on purpose:*
+
+- **Animating it.** The original plan for this slice was the erosion *running* on
+  screen — passes spent off a clock, the mesh rebuilt every frame, lakes visibly
+  silting up and draining. It was built, and it was pulled: it looked bad. Worth
+  recording what was learned before it went, because the next attempt starts here
+  rather than from scratch. **A pass is not a frame** — one pass per frame sounds
+  right and is useless, since sixty passes at 75fps is over in 800ms and the
+  terrain still teleports, just via a blur; pacing has to come off a wall clock at
+  a passes-per-second rate. And that pacing is a *paper-over* of the frame-rate
+  coupling Slice 12 exists to fix: it stabilises how fast you watch, not what you
+  get. The mesh work is all reusable — `erode` is a loop over a private one-pass
+  `step`, so re-exposing it is a one-line change. What is missing is a reason to
+  believe the result is worth watching, and that is a question about how the water
+  and terrain *look* in motion, not about the stepping.
 
 - **Translucent water** waits for Slice 10 (per-instance material). It needs
   alpha, which the engine has nowhere to put — `Vertex` is position + RGB and the
@@ -507,11 +487,12 @@ hand-written vertex arrays.
 single-step, and scrub the scene, and `Renderer::dt()` (raw wall-clock) cannot
 express any of that.
 
-*Terrain gets here first.* Slice 7 advances erosion passes per *frame*, which
-means the same slider position erodes further on a fast machine than a slow one —
-the identical defect, arrived at from the other vertical, and with a landscape's
-worth of state behind it rather than a rotation angle. If that is visibly wrong
-while animating the water, this slice moves up.
+*Terrain will want this too.* Slice 7's deferred animation is blocked on exactly
+this: advancing erosion passes on the frame clock means the same settings erode
+further on a fast machine than a slow one — the identical defect, arrived at from
+the other vertical, and with a landscape's worth of state behind it rather than a
+rotation angle. If the erosion animation is retried before `scene.rs` exists, this
+slice moves up to meet it.
 
 - An **accumulator** driving a fixed-step hook at a consumer-chosen rate, plus an
   **interpolation alpha** so rendering between steps is smooth rather than juddery.
@@ -521,8 +502,8 @@ while animating the water, this slice moves up.
   result regardless of frame rate — the engine stops being the source of
   wall-clock nondeterminism. It does not make the consumer deterministic; that is
   the consumer's job.
-- Terrain benefits too, and after Slice 7 it is no longer a nice-to-have: the
-  erosion animation *is* a simulation advancing on the frame clock.
+- Terrain benefits too: any retry of its erosion animation is a simulation
+  advancing on the frame clock, which is this slice's whole subject.
 
 *Proof:* `scene.rs` runs identically at capped and uncapped frame rates, and its
 transport controls (play/pause/step/scrub) drive the scene from the UI panel.

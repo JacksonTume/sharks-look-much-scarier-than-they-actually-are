@@ -37,7 +37,7 @@
 //!
 //! Iterate. More passes = a more deeply incised, mature landscape.
 //!
-//! ## The water (Slice 7)
+//! ## The water
 //!
 //! Steps 1 and 2 compute, every single pass, exactly the two fields you need to
 //! *draw* water — and this module used to throw both away when the pass ended:
@@ -51,13 +51,16 @@
 //!   incision is proportional to, which is why the rivers you see are exactly the
 //!   ones doing the carving.
 //!
-//! Both now come back out of [`step`] as a [`Water`], and [`survey`] computes them
-//! without eroding anything (for the first frame, before any pass has run).
+//! Both now come back out of [`erode`] as a [`Water`], describing the terrain it
+//! hands you rather than being dropped on the floor.
 //!
-//! Note this is the flow model **animated**, not a droplet particle system — see
-//! the section above for why droplets were tried and abandoned. Nothing about that
-//! ruling changed; the network was always there, once per pass, and the animation
-//! simply shows it deepening rather than discarding every frame but the last.
+//! Drawing them needed one change to the model itself: **lakes have to survive the
+//! pass that finds them**. The implicit update raises a pit toward the rim it was
+//! breached from, so a single pass used to pack every depression with rock — the
+//! reason this demo had no lakes to draw. Skipping submerged cells fixes that and
+//! is the honest reading anyway (no stream over a lake bed, so no incision), but
+//! on its own it stalls the whole model: a fifth of the map ends up underwater and
+//! inert. [`ErosionParams::deposition`] is the term that resolves it.
 //!
 //! Like the rest of the demo this lives **entirely in the consumer** (roadmap
 //! principle 3): the engine never sees a heightmap, only the mesh built from one.
@@ -66,13 +69,17 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 /// Tunable erosion parameters — the knobs the UI exposes.
-///
-/// *How many* passes to run is deliberately **not** in here any more. It used to
-/// be (`iterations`), back when erosion was a batch you asked for all at once;
-/// now that the demo advances one pass per frame, the pass count is a property of
-/// the *animation* rather than of the model, and the demo owns it.
 #[derive(Debug, Clone, Copy)]
 pub struct ErosionParams {
+    /// Number of erosion timesteps. The headline "how eroded" control: more
+    /// passes cut deeper, more mature valley networks.
+    ///
+    /// It also decides how much **water** survives, which is worth knowing before
+    /// reaching for it. Lakes silt up as the landscape matures (see
+    /// [`deposition`](Self::deposition)), so the default 60 leaves a landscape with
+    /// both lakes and rivers in it; push much past 100 and the lakes are gone and
+    /// only the river network is left.
+    pub iterations: u32,
     /// Fluvial erodibility `K` (folds in the timestep): how strongly rivers pull
     /// the terrain down toward their outlet each step.
     pub erodibility: f32,
@@ -82,12 +89,11 @@ pub struct ErosionParams {
 
     /// Fraction of a lake's depth filled with sediment each pass — **siltation**.
     ///
-    /// This is the term that makes the water animate rather than sit there, and it
-    /// was added because leaving it out was visibly wrong. Without deposition every
-    /// depression in the noise survives forever, the map stays carved into dozens
-    /// of closed basins, and no basin ever grows a long enough river to incise
-    /// quickly: the landscape barely moved over sixty passes and the terrain looked
-    /// flooded rather than eroded.
+    /// This term was added because leaving it out was measurably wrong, not for
+    /// looks. Preserving depressions (so lakes exist at all) means submerged cells
+    /// never incise — and with a fifth of the map underwater and inert, the whole
+    /// model nearly stops: sixty passes moved the mean height 2.5% and the terrain
+    /// read as flooded rather than eroded.
     ///
     /// Rivers carry sediment and drop it where they slow down, which is exactly
     /// where they meet standing water. So lakes silt up, spill over, and their
@@ -110,6 +116,7 @@ pub struct ErosionParams {
 impl Default for ErosionParams {
     fn default() -> Self {
         Self {
+            iterations: 60,
             erodibility: 0.004,
             m: 0.5,
             deposition: 0.05,
@@ -123,7 +130,7 @@ impl Default for ErosionParams {
 }
 
 /// The standing water and river network riding on the terrain — the byproduct of
-/// flow routing that the model has always computed and that Slice 7 finally draws.
+/// flow routing that the model has always computed and now hands back to be drawn.
 ///
 /// Both fields are `n × n`, row-major, indexed exactly like the heightmap.
 #[derive(Debug, Clone, Default)]
@@ -148,14 +155,29 @@ impl Water {
     }
 }
 
-/// Advance `heights` (an `n × n` grid, modified in place) by **one** timestep of
-/// flow-routed stream-power incision plus optional thermal relaxation, and hand
-/// back the [`Water`] that drove it. See the module docs for the model.
+/// Erode `heights` (an `n × n` grid, modified in place) under `params`, and hand
+/// back the [`Water`] left standing on the result.
 ///
-/// One pass rather than a batch loop is the whole of this function's Slice 7
-/// change: the caller advances a pass per frame, so the landscape carves itself
-/// on screen instead of teleporting from noise to finished in a single hitch.
-pub fn step(heights: &mut [f32], n: usize, params: &ErosionParams) -> Water {
+/// The returned water is the *last* pass's — the lakes and rivers belonging to the
+/// terrain you get back, which is exactly what the caller wants to draw. Earlier
+/// passes' water is intermediate state and nobody sees it.
+pub fn erode(heights: &mut [f32], n: usize, params: &ErosionParams) -> Water {
+    if n < 3 {
+        return Water::empty(heights.len());
+    }
+    let mut water = None;
+    for _ in 0..params.iterations {
+        water = Some(step(heights, n, params));
+    }
+    // Zero passes still has water on it: raw Perlin noise is full of depressions,
+    // and they hold just as much water for never having been eroded.
+    water.unwrap_or_else(|| analyze(heights, n).1)
+}
+
+/// Advance `heights` by **one** timestep of flow-routed stream-power incision,
+/// siltation, and optional thermal relaxation, returning the [`Water`] that drove
+/// it. See the module docs for the model.
+fn step(heights: &mut [f32], n: usize, params: &ErosionParams) -> Water {
     if n < 3 {
         return Water::empty(heights.len());
     }
@@ -182,9 +204,8 @@ pub fn step(heights: &mut [f32], n: usize, params: &ErosionParams) -> Water {
         // — a lake bed has no stream running over it to cut with.
         //
         // What still erodes is the lake's *outlet*, which is dry and drains
-        // downhill like anything else. So spillways cut down over time and lakes
-        // slowly drain themselves, which is the nicest thing in the animation and
-        // came out of the model rather than being put in by hand.
+        // downhill like anything else — so spillways cut down over the run and
+        // lakes partly drain themselves, without that being put in by hand.
         if water.depth[c] > MIN_POND || heights[r] >= heights[c] {
             continue;
         }
@@ -212,18 +233,6 @@ pub fn step(heights: &mut [f32], n: usize, params: &ErosionParams) -> Water {
     }
 
     water
-}
-
-/// Compute the [`Water`] on `heights` **without eroding anything**.
-///
-/// This is what the first frame draws: at pass zero the terrain is raw noise that
-/// has never been routed, and it still has lakes and rivers on it — you should be
-/// able to see them before pressing play.
-pub fn survey(heights: &[f32], n: usize) -> Water {
-    if n < 3 {
-        return Water::empty(heights.len());
-    }
-    analyze(heights, n).1
 }
 
 /// The shared first half of a pass: route the flow, accumulate drainage area, and
