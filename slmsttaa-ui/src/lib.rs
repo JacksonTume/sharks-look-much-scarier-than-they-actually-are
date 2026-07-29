@@ -720,7 +720,7 @@ impl<'a> Ui<'a> {
         let previous = self.state.measured(id);
         // Clip only while genuinely mid-transition and there is a measurement to
         // clip against.
-        let clip_h = (t < 1.0 && previous > 0.0).then(|| previous * t);
+        let clip_h = (t < 1.0 && previous > 0.0).then_some(previous * t);
 
         if let Some(h) = clip_h {
             self.painter.push_clip(Rect::new(line.x, line.y, line.w, h));
