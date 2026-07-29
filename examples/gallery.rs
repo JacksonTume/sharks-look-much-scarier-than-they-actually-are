@@ -8,7 +8,9 @@
 //!
 //! - **It owns several scenes** (a triangle, a quad, a spinning cube, and an
 //!   orbitable terrain grid) and swaps the engine's draw-list between them at
-//!   runtime via [`Renderer::set_meshes`] — no engine restart, no page reload.
+//!   runtime via [`Renderer::set_instances`] — no engine restart, no page reload.
+//!   Every scene's geometry is uploaded once up front, so switching scenes moves
+//!   no vertices at all: it names a different [`MeshHandle`].
 //! - **The grid scene is camera-driven.** It reads the engine's winit-free input
 //!   via [`Renderer::input`] and aims the camera with [`Renderer::camera_mut`]:
 //!   drag the left mouse button to orbit, scroll to zoom (it drifts on its own
@@ -31,7 +33,9 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use slmsttaa::{run, Application, Mesh, MouseButton, Renderer, Vertex};
+use slmsttaa::{
+    run, Application, Instance, Mesh, MeshHandle, MouseButton, Renderer, Transform, Vertex,
+};
 
 /// The scenes the gallery can show, in button order.
 const SCENES: [Scene; 4] = [Scene::Triangle, Scene::Quad, Scene::Cube, Scene::Grid];
@@ -41,7 +45,7 @@ const SCENES: [Scene; 4] = [Scene::Triangle, Scene::Quad, Scene::Cube, Scene::Gr
 const NATIVE_CYCLE_FRAMES: u32 = 180;
 
 /// One selectable scene. Each knows its button label, whether it animates, and how
-/// to build its [`Mesh`] (rotated by `angle` for the ones that spin).
+/// to build its [`Mesh`] in object space.
 #[derive(Clone, Copy)]
 enum Scene {
     Triangle,
@@ -62,8 +66,8 @@ impl Scene {
         }
     }
 
-    /// Whether the scene animates its *geometry* and so must be re-uploaded every
-    /// frame. (The grid moves only the camera, so it stays `false`.)
+    /// Whether the scene turns on the spot. (The grid moves only the camera, so
+    /// it stays `false`.) Spinning is a transform now, not a re-upload.
     fn spins(self) -> bool {
         matches!(self, Scene::Cube)
     }
@@ -74,8 +78,9 @@ impl Scene {
         matches!(self, Scene::Grid)
     }
 
-    /// Build the scene's geometry at rotation `angle` (ignored by static scenes).
-    fn build(self, angle: f32) -> Mesh {
+    /// Build the scene's geometry, in object space. Scenes that turn do so via a
+    /// [`Transform`], so nothing here depends on a rotation any more.
+    fn build(self) -> Mesh {
         match self {
             Scene::Triangle => Mesh::new(
                 vec![
@@ -116,7 +121,7 @@ impl Scene {
                 // Two triangles, wound CCW (front toward the camera).
                 vec![0, 1, 2, 0, 2, 3],
             ),
-            Scene::Cube => cube_mesh(angle),
+            Scene::Cube => cube_mesh(),
             Scene::Grid => grid_mesh(),
         }
     }
@@ -145,21 +150,11 @@ const CUBE_INDICES: [u32; 36] = [
     0, 1, 5,  0, 5, 4, // bottom (-y)
 ];
 
-/// Build the cube rotated by `angle` (yaw about Y, plus a gentler pitch about X).
-fn cube_mesh(angle: f32) -> Mesh {
-    let (sy, cy) = angle.sin_cos();
-    let (sp, cp) = (angle * 0.6).sin_cos();
+/// Build the cube in object space. The spin is a transform (see `Scene::spins`).
+fn cube_mesh() -> Mesh {
     let vertices = CUBE_CORNERS
         .iter()
-        .map(|&(p, color)| {
-            let x = p[0] * cy + p[2] * sy;
-            let z = -p[0] * sy + p[2] * cy;
-            let y = p[1];
-            Vertex {
-                position: [x, y * cp - z * sp, y * sp + z * cp],
-                color,
-            }
-        })
+        .map(|&(position, color)| Vertex { position, color })
         .collect();
     Mesh::new(vertices, CUBE_INDICES.to_vec())
 }
@@ -218,12 +213,16 @@ fn grid_mesh() -> Mesh {
     Mesh::new(vertices, indices)
 }
 
-/// The gallery consumer: tracks which scene is selected and re-uploads on change.
+/// The gallery consumer: tracks which scene is selected and points the draw-list
+/// at it.
 struct GalleryDemo {
     /// Selected scene index. On the web, button clicks write to this; `update`
     /// reads it. Shared via `Rc` so the DOM click closures can hold their own clone.
     selected: Rc<Cell<usize>>,
-    /// The scene currently uploaded, so we only re-upload when it changes.
+    /// Every scene's geometry, uploaded once in `init` and indexed by scene.
+    /// Switching scenes is now a change of handle, not a re-upload.
+    meshes: Vec<MeshHandle>,
+    /// The scene currently shown, so a switch can reset the camera and rotation.
     current: usize,
     /// Rotation accumulator for animated scenes.
     angle: f32,
@@ -240,6 +239,7 @@ impl GalleryDemo {
     fn new() -> Self {
         Self {
             selected: Rc::new(Cell::new(0)),
+            meshes: Vec::new(),
             current: 0,
             angle: 0.0,
             yaw: 0.7,
@@ -294,9 +294,17 @@ impl Application for GalleryDemo {
         #[cfg(target_arch = "wasm32")]
         create_buttons(&self.selected);
 
+        // Upload every scene up front. Four meshes is a trivial amount of GPU
+        // memory, and it makes switching free — the alternative (upload on
+        // switch) re-does the same work every time you cycle past a scene.
+        self.meshes = SCENES
+            .iter()
+            .map(|scene| renderer.upload_mesh(&scene.build()))
+            .collect();
+
         let sel = self.selected.get();
-        renderer.set_meshes(&[SCENES[sel].build(0.0)]);
         self.current = sel;
+        renderer.set_instances(&[Instance::at(self.meshes[sel])]);
     }
 
     fn update(&mut self, renderer: &mut Renderer) {
@@ -312,19 +320,24 @@ impl Application for GalleryDemo {
 
         let sel = self.selected.get();
         if sel != self.current {
-            // Scene changed (button click or auto-cycle): swap geometry.
+            // Scene changed (button click or auto-cycle): point at another handle.
             self.current = sel;
             self.angle = 0.0;
             // Start the orbit scene from a pleasant three-quarter view.
             self.yaw = 0.7;
             self.pitch = 0.6;
             self.distance = 6.0;
-            renderer.set_meshes(&[SCENES[sel].build(0.0)]);
-        } else if SCENES[self.current].spins() {
-            // Same scene, but it animates: advance and re-upload.
-            self.angle += 0.01;
-            renderer.set_meshes(&[SCENES[self.current].build(self.angle)]);
         }
+
+        let scene = SCENES[self.current];
+        let transform = if scene.spins() {
+            self.angle += 0.01;
+            // Yaw about Y, plus a gentler pitch about X.
+            Transform::IDENTITY.with_rotation([self.angle * 0.6, self.angle, 0.0])
+        } else {
+            Transform::IDENTITY
+        };
+        renderer.set_instances(&[Instance::new(self.meshes[self.current], transform)]);
 
         // Aim the camera (orbit the grid; fixed front view otherwise).
         self.drive_camera(renderer);

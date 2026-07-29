@@ -40,7 +40,7 @@ pub use app::App;
 pub use application::Application;
 pub use camera::Camera;
 pub use input::{Input, Key, MouseButton};
-pub use renderer::{Mesh, RenderMode, Renderer, Vertex};
+pub use renderer::{Instance, Mesh, MeshHandle, RenderMode, Renderer, Transform, Vertex};
 pub use ui::{Color, Painter, Ui};
 
 use winit::event_loop::{ControlFlow, EventLoop};

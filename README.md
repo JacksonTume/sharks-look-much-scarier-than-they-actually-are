@@ -66,6 +66,7 @@ it's going and why.
 | `src/time.rs`            | Cross-platform frame clock (`Renderer::dt`).             |
 | `examples/triangle.rs`   | Reference consumer: draws one triangle (native + web).   |
 | `examples/cube.rs`       | Spinning solid cube: indexed mesh + depth + culling.     |
+| `examples/scene.rs`      | One mesh, dozens of moving objects: per-object transforms. |
 | `examples/gallery.rs`    | Scene switcher: web buttons swap demos; native cycles.   |
 | `examples/grid.rs`       | Orbitable terrain grid: the input + camera seam.         |
 | `examples/terrain.rs`    | **Capstone**: Perlin + stream-power erosion, live panel.  |
@@ -80,6 +81,7 @@ it's going and why.
 cargo run --example terrain             # the capstone: layered Perlin + stream-power erosion
 cargo run --example triangle            # the smallest consumer
 cargo run --example cube                # spinning solid cube (depth + culling)
+cargo run --example scene                # one mesh, many independently moving objects
 cargo run --example gallery             # switch between scenes (auto-cycles on native)
 ```
 
@@ -120,21 +122,43 @@ across examples), and hosts `web/` from a tiny built-in static server. See
 Implement `Application` and hand it to `run`:
 
 ```rust
-use slmsttaa::{run, Application, Mesh, Renderer, Vertex};
+use slmsttaa::{run, Application, Instance, Mesh, Renderer, Transform, Vertex};
 
-struct MyApp;
+#[derive(Default)]
+struct MyApp {
+    thing: Option<slmsttaa::MeshHandle>,
+    angle: f32,
+}
+
 impl Application for MyApp {
     fn init(&mut self, renderer: &mut Renderer) {
+        // Upload once, in object space, and keep the handle.
         let mesh = Mesh::new(vec![/* your vertices */], vec![/* your indices */]);
-        renderer.set_meshes(&[mesh]);
+        self.thing = Some(renderer.upload_mesh(&mesh));
     }
-    // `update(&mut self, renderer)` runs every frame (optional).
+
+    fn update(&mut self, renderer: &mut Renderer) {
+        // Every frame: say where things are. No geometry moves.
+        let Some(thing) = self.thing else { return };
+        self.angle += renderer.dt();
+        renderer.set_instances(&[
+            Instance::at(thing),
+            Instance::new(
+                thing,
+                Transform::from_position([2.0, 0.0, 0.0])
+                    .with_rotation([0.0, self.angle, 0.0]),
+            ),
+        ]);
+    }
 }
 
 fn main() {
-    run(MyApp).unwrap();
+    run(MyApp::default()).unwrap();
 }
 ```
+
+One uploaded mesh, drawn twice, one of them turning — and the engine batches both
+into a single instanced draw call.
 
 ## Performance notes
 

@@ -39,13 +39,17 @@ src/
 └── renderer/
     ├── mod.rs        Renderer: wgpu instance/adapter/device/queue/surface, the
     │                 solid + wireframe render pipelines (RenderMode), the depth
-    │                 buffer, the consumer's mesh draw-list, the overlay, the UI
-    │                 state + clock, and per-frame begin_frame()/update()/render().
+    │                 buffer, the mesh registry + instance draw-list, the overlay,
+    │                 the UI state + clock, and per-frame
+    │                 begin_frame()/update()/render().
     │                 Renderer::ui() also translates Input + the surface size ->
     │                 ui::UiInput, which is what keeps the UI crate free of any
     │                 dependency on the engine.
     ├── mesh.rs       Mesh (vertices + indices): the CPU-side geometry a consumer
-    │                 builds and hands over via Renderer::set_meshes.
+    │                 builds and hands over via Renderer::upload_mesh.
+    ├── instance.rs   Transform (position/euler rotation/scale), MeshHandle, and
+    │                 Instance: where an uploaded mesh is drawn. Plus the private
+    │                 InstanceRaw + its instance-step buffer layout.
     ├── vertex.rs     Vertex (position + color) and its buffer layout.
     ├── shader.wgsl   3D vertex/fragment shaders (WGSL).
     ├── overlay.rs    Overlay: the screen-space 2D pass (UI/HUD). Owns its own
@@ -61,11 +65,16 @@ examples/
 ├── triangle.rs       Reference consumer: implements Application and uploads one
 │                     triangle. Native fn main + a #[wasm_bindgen(start)] hook.
 ├── cube.rs           Spinning solid cube: proves indexed meshes, depth testing,
-│                     and back-face culling. Rotates its corners on the CPU and
-│                     re-uploads the mesh each frame.
-├── gallery.rs        Multi-scene switcher. Owns several scenes and swaps the
-│                     draw-list between them; on the web it builds DOM buttons
-│                     (web-sys) that drive the selection, on native it auto-cycles.
+│                     and back-face culling. Uploaded once; the spin is one
+│                     Transform per frame.
+├── scene.rs          The instancing demo (Slice 8): one box mesh drawn as dozens
+│                     of independently moving objects over a ground plane that is
+│                     a unit quad scaled to fit. Two meshes, two draw calls, zero
+│                     vertex uploads per frame — the HUD reports all three.
+├── gallery.rs        Multi-scene switcher. Uploads every scene up front and
+│                     points the draw-list at one of them; on the web it builds DOM
+│                     buttons (web-sys) that drive the selection, on native it
+│                     auto-cycles.
 ├── grid.rs           Orbitable height-mapped terrain grid: proves the input +
 │                     camera seam (Slice 3). Keeps its own orbit state and aims
 │                     the camera from Renderer::input() each frame.
@@ -131,8 +140,9 @@ xtask/                Dev tooling (a separate workspace member, no deps). `cargo
    driving the camera via `Renderer::camera_mut`, and building its UI via
    `Renderer::ui()`). Then `Renderer::update()` re-uploads the camera uniform, and
    `Renderer::render()` records **two** passes into one command encoder: the 3D
-   pass (clear color + depth → `draw_indexed` each mesh in the draw-list, using the
-   solid or wireframe pipeline per the current `RenderMode`) and then the
+   pass (clear color + depth → one instanced `draw_indexed` per mesh in the
+   draw-list, using the solid or wireframe pipeline per the current `RenderMode`)
+   and then the
    **overlay pass** (load, not clear → draw the accumulated 2D UI), and
    presents. Finally `Input::end_frame` clears the per-frame deltas/press-edges.
    Depth testing and back-face culling are on for the 3D pass; the overlay ignores
@@ -308,6 +318,18 @@ These are subtle and easy to reintroduce, so they're documented here:
   including the WebGL2 fallback); both the texture and the pipeline read one
   `DEPTH_FORMAT` constant, so swapping to `Depth24Plus` is a one-line change.
 
+- **WebGL2 has no non-zero `first_instance`, and no storage buffers.** Both
+  constrain how per-object data reaches the shader, and both bite in the same
+  place. Per-instance data rides an **instance-step vertex buffer**
+  (`VertexStepMode::Instance`, the model matrix as four `vec4` columns at
+  locations 2–5) rather than the storage buffer most tutorials reach for —
+  `downlevel_webgl2_defaults` does not have those at all. And when several meshes
+  share one instance buffer, each mesh's run is selected by **offsetting the
+  buffer binding** (`set_vertex_buffer(1, buf.slice(byte_offset..))`, then always
+  drawing `0..count`), *not* by passing a non-zero start to `draw_indexed`'s
+  instance range. The obvious version works on native and fails in the browser
+  fallback, which is the worst kind of bug this file exists to prevent.
+
 - **Match the WebGPU spec; keep wgpu current.** Browsers track the live WebGPU
   spec and reject limits/fields they no longer recognize (e.g. a stale
   `maxInterStageShaderComponents` caused `requestDevice` to fail). Prefer a
@@ -319,6 +341,14 @@ These are subtle and easy to reintroduce, so they're documented here:
 - Camera data updated with `Queue::write_buffer` — no per-frame buffer
   allocation. The overlay's 2D buffers are written once per frame and only
   reallocated (to the next power of two) when the UI geometry outgrows them.
+- **Moving an object costs a matrix, not a mesh.** `set_instances` writes one
+  64-byte model matrix per object into a single instance buffer (grown to the next
+  power of two, same rule as the overlay) and touches no vertex or index buffer.
+  Geometry is uploaded by `upload_mesh` and only ever re-uploaded by
+  `update_mesh`, for a consumer whose geometry genuinely changes shape.
+- **One draw call per mesh, not per object.** The draw-list is sorted by handle so
+  every instance of a mesh is contiguous, so `examples/scene.rs` draws 25 objects
+  over a ground plane in two calls.
 - `PowerPreference::HighPerformance` + `MemoryHints::Performance`.
 - `AutoVsync` by default; flip to `AutoNoVsync` in `renderer/mod.rs` to measure
   uncapped frame rates.
@@ -329,11 +359,16 @@ These are subtle and easy to reintroduce, so they're documented here:
 The scaffold leaves obvious seams:
 
 - **MSAA** (`multisample` is currently the 1-sample default).
-- A **material** abstraction beyond the single shared pipeline, **per-mesh
-  transforms** (meshes are uploaded in world space today; the demo rotates on the
-  CPU and re-uploads), and **vertex normals + a lighting model** (the terrain demo
-  bakes diffuse shading into vertex color CPU-side, which is fine for one consumer
-  but a second lit demo would justify pushing normals into the pipeline).
+- **Vertex normals + a lighting model.** Now the sharper of the two, because
+  per-object transforms broke the trick the terrain demo relies on: it bakes
+  diffuse shading into vertex color CPU-side, which is only correct while a mesh
+  never moves. Rotate an object whose lighting is painted into its vertices and
+  the highlight turns with it, which `examples/scene.rs` shows. Lighting has to be
+  evaluated after the model transform, i.e. in the shader.
+- A **material** abstraction beyond the single shared pipeline. Color lives in the
+  shared vertex buffer, so every instance of a mesh is identical by construction —
+  `scene.rs`'s boxes cannot be told apart, and duplicating the mesh per color would
+  undo the point of instancing.
 - A small **render-graph**: there are now two passes (3D + overlay) wired by hand
   in `render()`. A second consumer wanting its own pass is the roadblock that turns
   this into a real graph.
@@ -349,8 +384,10 @@ Already in place (earlier seams now filled): an indexed `Mesh` + draw-list
 camera** fed by a winit-free `Input` (Slice 3), the **terrain vertical** (Slice 4,
 rebuilt in Slice 6 as a layered Perlin + hydro-thermal pipeline), a **screen-space
 overlay pass + decoupled immediate-mode UI** with a wasm-safe frame clock
-(Slice 5), and a **portable wireframe render mode** (`RenderMode`, line topology —
-Slice 6). On the overlay side specifically: **ordered draw layers** in
+(Slice 5), a **portable wireframe render mode** (`RenderMode`, line topology —
+Slice 6), and **per-object transforms + an instance draw-list** (Slice 8 — meshes
+are uploaded once for a handle and placed by `Transform`, so nothing re-uploads
+geometry to move it). On the overlay side specifically: **ordered draw layers** in
 `Overlay::flush` and a **`scale_factor`-aware surface** (UI Slice 1 — the toolkit
 speaks logical points and the overlay scales on the way to vertices),
 **rounded-rect, border, and clip support** in `overlay.wgsl` (UI Slice 2), and a

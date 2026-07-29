@@ -20,7 +20,7 @@
 //! Everything physical here — the noise, the erosion, the shading — lives in this
 //! consumer crate (it can only see `slmsttaa`'s public API). The engine just:
 //!
-//! - uploads the mesh we build ([`Renderer::set_meshes`]),
+//! - uploads the mesh we build ([`Renderer::upload_mesh`]),
 //! - draws it solid or as a wireframe on demand ([`Renderer::set_render_mode`]),
 //! - lets us drive the orbit camera ([`Renderer::camera_mut`] + [`Renderer::input`]),
 //! - draws our parameter panel and HUD ([`Renderer::ui`]), and
@@ -47,7 +47,9 @@
 //!   web    — `cargo xtask serve terrain`, then open the printed URL.
 
 use slmsttaa::ui::{font, Anchor, Rect, Response, Size, Theme, Ui, Variant};
-use slmsttaa::{run, Application, Key, Mesh, MouseButton, RenderMode, Renderer, Vertex};
+use slmsttaa::{
+    run, Application, Instance, Key, Mesh, MeshHandle, MouseButton, RenderMode, Renderer, Vertex,
+};
 
 #[path = "terrain/erosion.rs"]
 mod erosion;
@@ -275,6 +277,10 @@ struct TerrainDemo {
 
     /// Smoothed frames-per-second for the HUD.
     fps: f32,
+
+    /// Handles to the uploaded terrain and water meshes, claimed on the first
+    /// upload and refilled in place afterwards. `None` until `init` runs.
+    handles: Option<(MeshHandle, MeshHandle)>,
 }
 
 impl TerrainDemo {
@@ -301,6 +307,7 @@ impl TerrainDemo {
             pitch: 0.62,
             distance: 6.5,
             fps: 60.0,
+            handles: None,
         };
         demo.apply_erosion();
         demo
@@ -325,15 +332,43 @@ impl TerrainDemo {
 
     /// Upload the current terrain, and the water on it, as the engine's draw-list.
     ///
-    /// Two meshes rather than one, which the engine has supported since Slice 1 and
-    /// nothing had needed until now — `set_meshes` takes a slice, and this is the
-    /// first consumer to hand it more than a single element.
-    fn upload(&self, renderer: &mut Renderer) {
-        let mut meshes = vec![self.build_mesh()];
-        if let Some(water) = self.build_water_mesh() {
-            meshes.push(water);
+    /// Two meshes rather than one: the landscape and its lakes and rivers. Both
+    /// sit at the origin in the same world space, so both are identity instances —
+    /// this demo is the case a transform *can't* help with. Erosion changes the
+    /// terrain's shape, not its placement, so the geometry behind each handle is
+    /// refilled with [`Renderer::update_mesh`] and the handles themselves never
+    /// change.
+    fn upload(&mut self, renderer: &mut Renderer) {
+        let terrain = self.build_mesh();
+        let water = self.build_water_mesh();
+
+        let (terrain_handle, water_handle) = match self.handles {
+            Some(handles) => {
+                renderer.update_mesh(handles.0, &terrain);
+                if let Some(water) = &water {
+                    renderer.update_mesh(handles.1, water);
+                }
+                handles
+            }
+            None => {
+                // First upload: claim a handle for each. The water gets one even
+                // if the landscape is currently dry, so it has somewhere to go
+                // when a parameter change floods a basin.
+                let empty = Mesh::default();
+                let handles = (
+                    renderer.upload_mesh(&terrain),
+                    renderer.upload_mesh(water.as_ref().unwrap_or(&empty)),
+                );
+                self.handles = Some(handles);
+                handles
+            }
+        };
+
+        let mut instances = vec![Instance::at(terrain_handle)];
+        if water.is_some() {
+            instances.push(Instance::at(water_handle));
         }
-        renderer.set_meshes(&meshes);
+        renderer.set_instances(&instances);
     }
 
     /// Build the renderable mesh from the current heights: an `n × n` grid with a

@@ -5,12 +5,16 @@
 //! camera-transformed mesh supplied by the consumer, with clear seams where a
 //! real engine would grow (material system, mesh registry, render graph, etc.).
 
+mod instance;
 mod mesh;
 mod overlay;
 mod vertex;
 
+pub use instance::{Instance, MeshHandle, Transform};
 pub use mesh::Mesh;
 pub use vertex::Vertex;
+
+use instance::InstanceRaw;
 
 use std::sync::Arc;
 
@@ -63,23 +67,26 @@ struct GpuMesh {
 impl GpuMesh {
     /// Upload a CPU-side [`Mesh`] into fresh GPU buffers.
     fn upload(device: &wgpu::Device, mesh: &Mesh) -> Self {
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mesh vertex buffer"),
-            contents: bytemuck::cast_slice(&mesh.vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mesh index buffer"),
-            contents: bytemuck::cast_slice(&mesh.indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
+        let vertex_buffer = buffer_from(
+            device,
+            "mesh vertex buffer",
+            &mesh.vertices,
+            wgpu::BufferUsages::VERTEX,
+        );
+        let index_buffer = buffer_from(
+            device,
+            "mesh index buffer",
+            &mesh.indices,
+            wgpu::BufferUsages::INDEX,
+        );
         // Derive a deduplicated edge list once, so wireframe is a buffer swap.
         let line_indices = edge_indices(&mesh.indices);
-        let line_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mesh line index buffer"),
-            contents: bytemuck::cast_slice(&line_indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
+        let line_index_buffer = buffer_from(
+            device,
+            "mesh line index buffer",
+            &line_indices,
+            wgpu::BufferUsages::INDEX,
+        );
         Self {
             vertex_buffer,
             index_buffer,
@@ -89,6 +96,53 @@ impl GpuMesh {
         }
     }
 }
+
+/// Create a GPU buffer holding `data`.
+///
+/// An **empty** slice gets a minimum-size buffer rather than a zero-size one:
+/// backends reject a zero-length allocation, and an empty mesh is a perfectly
+/// ordinary state for a consumer to be in (the terrain demo's water surface is
+/// empty whenever the landscape has no standing water). Nothing draws from it —
+/// [`Renderer::render`] skips a mesh with no indices.
+fn buffer_from<T: bytemuck::Pod>(
+    device: &wgpu::Device,
+    label: &str,
+    data: &[T],
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
+    if data.is_empty() {
+        return device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: std::mem::size_of::<T>() as wgpu::BufferAddress,
+            usage,
+            mapped_at_creation: false,
+        });
+    }
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(label),
+        contents: bytemuck::cast_slice(data),
+        usage,
+    })
+}
+
+/// One instanced draw call: a run of consecutive instances in the instance
+/// buffer that all share a mesh.
+///
+/// `byte_offset` rather than a first-instance index is deliberate. WebGL2 has no
+/// equivalent of a non-zero `first_instance`, so the portable way to draw the
+/// second mesh's run is to *bind the buffer offset* and always draw from instance
+/// zero. See `ARCHITECTURE.md`.
+struct InstanceDraw {
+    /// Index into [`Renderer::meshes`].
+    mesh: usize,
+    /// Where this run starts in the instance buffer, in bytes.
+    byte_offset: wgpu::BufferAddress,
+    /// How many instances are in the run.
+    count: u32,
+}
+
+/// Instances the instance buffer is sized for on creation; it grows on demand.
+const INITIAL_INSTANCE_CAPACITY: usize = 64;
 
 /// Build a deduplicated line-list index buffer from a triangle-list one.
 ///
@@ -109,6 +163,16 @@ fn edge_indices(tris: &[u32]) -> Vec<u32> {
         }
     }
     edges
+}
+
+/// Create an instance buffer with room for `capacity` instances.
+fn create_instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("instance buffer"),
+        size: (capacity * std::mem::size_of::<InstanceRaw>()) as wgpu::BufferAddress,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 /// Create a depth texture sized to the surface and return its default view.
@@ -157,7 +221,9 @@ fn create_scene_pipeline(
         vertex: wgpu::VertexState {
             module: shader,
             entry_point: Some("vs_main"),
-            buffers: &[Vertex::layout()],
+            // Two buffers: the mesh's vertices, then the per-object instance
+            // data that steps once per draw rather than once per vertex.
+            buffers: &[Vertex::layout(), InstanceRaw::layout()],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
@@ -212,10 +278,18 @@ pub struct Renderer {
     line_pipeline: wgpu::RenderPipeline,
     /// Whether meshes draw filled or as edges. Defaults to [`RenderMode::Solid`].
     render_mode: RenderMode,
-    /// The draw-list: every mesh the consumer has handed over via
-    /// [`Renderer::set_meshes`]. Empty until set; the engine just clears the
-    /// screen until then.
+    /// Every mesh uploaded via [`Renderer::upload_mesh`], indexed by
+    /// [`MeshHandle`]. Append-only, so a handle stays valid forever.
     meshes: Vec<GpuMesh>,
+    /// The instance buffer backing this frame's draw-list, grown as needed and
+    /// reused between frames.
+    instance_buffer: wgpu::Buffer,
+    /// How many instances [`Renderer::instance_buffer`] can currently hold.
+    instance_capacity: usize,
+    /// The draw-list proper: one instanced draw per mesh that appears in it.
+    /// Empty until [`Renderer::set_instances`]; the engine just clears the screen
+    /// until then.
+    draws: Vec<InstanceDraw>,
     /// Depth attachment for occlusion testing; resized with the surface.
     depth_view: wgpu::TextureView,
 
@@ -395,6 +469,8 @@ impl Renderer {
 
         let depth_view = create_depth_view(&device, &config);
 
+        let instance_buffer = create_instance_buffer(&device, INITIAL_INSTANCE_CAPACITY);
+
         let overlay = Overlay::new(&device, &queue, config.format, width, height);
 
         Self {
@@ -408,6 +484,9 @@ impl Renderer {
             render_mode: RenderMode::default(),
             // No geometry yet — the consumer supplies it in `Application::init`.
             meshes: Vec::new(),
+            instance_buffer,
+            instance_capacity: INITIAL_INSTANCE_CAPACITY,
+            draws: Vec::new(),
             depth_view,
             camera,
             camera_uniform,
@@ -451,19 +530,98 @@ impl Renderer {
             .resize(&self.queue, new_size.width, new_size.height);
     }
 
-    /// Replace the draw-list with `meshes`, uploading each to the GPU.
+    /// Upload a [`Mesh`] to the GPU and return a handle to it.
     ///
-    /// The consumer builds [`Mesh`]es CPU-side and hands them over; the engine
-    /// owns the GPU buffers. This *replaces* the previous draw-list, so calling
-    /// it every frame (to animate geometry) re-uploads rather than accumulating.
-    pub fn set_meshes(&mut self, meshes: &[Mesh]) {
-        // Build into a local first so we aren't borrowing `self.device` while
-        // assigning into `self.meshes`.
-        let gpu: Vec<GpuMesh> = meshes
-            .iter()
-            .map(|mesh| GpuMesh::upload(&self.device, mesh))
-            .collect();
-        self.meshes = gpu;
+    /// The consumer builds meshes CPU-side and hands them over; the engine owns
+    /// the GPU buffers. Uploading is the *expensive* half, so do it once — in
+    /// `Application::init`, usually — and then place the result as many times as
+    /// you like with [`Renderer::set_instances`], which costs no vertex traffic
+    /// at all.
+    ///
+    /// Handles are never invalidated; see [`MeshHandle`].
+    pub fn upload_mesh(&mut self, mesh: &Mesh) -> MeshHandle {
+        let gpu = GpuMesh::upload(&self.device, mesh);
+        self.meshes.push(gpu);
+        MeshHandle(self.meshes.len() - 1)
+    }
+
+    /// Replace the geometry behind `handle`, keeping the handle valid.
+    ///
+    /// For geometry that genuinely *changes shape* — the terrain demo rebuilding
+    /// its heightmap when you drag a parameter — as opposed to geometry that only
+    /// moves, which wants [`Renderer::set_instances`] instead. Every instance
+    /// naming this handle draws the new mesh from the next frame on.
+    ///
+    /// This reallocates the mesh's buffers rather than writing into them, since
+    /// the new mesh may be any size. It is a full upload: don't call it every
+    /// frame for something a transform could express.
+    ///
+    /// # Panics
+    ///
+    /// If `handle` did not come from this renderer's [`Renderer::upload_mesh`].
+    pub fn update_mesh(&mut self, handle: MeshHandle, mesh: &Mesh) {
+        assert!(
+            handle.0 < self.meshes.len(),
+            "mesh handle {:?} is not from this renderer",
+            handle,
+        );
+        self.meshes[handle.0] = GpuMesh::upload(&self.device, mesh);
+    }
+
+    /// Replace the draw-list: what to draw, and where.
+    ///
+    /// One [`MeshHandle`] may appear any number of times at different
+    /// [`Transform`]s — that is the whole point, and the engine batches the
+    /// repeats into a single instanced draw call per mesh. The list is *retained*
+    /// until replaced, so static scenes set it once in `Application::init` and a
+    /// moving one re-sends it each frame. Re-sending is cheap: it writes one
+    /// matrix per instance, and touches no vertex or index buffer.
+    ///
+    /// # Panics
+    ///
+    /// If any instance names a handle this renderer didn't issue.
+    pub fn set_instances(&mut self, instances: &[Instance]) {
+        self.draws.clear();
+        if instances.is_empty() {
+            return;
+        }
+
+        // Group by mesh so each mesh becomes one instanced draw. Sorting by
+        // handle (stably, so a consumer's own ordering survives within a mesh) is
+        // enough — instances of a mesh end up contiguous, which is exactly what
+        // one draw call needs.
+        let mut sorted: Vec<&Instance> = instances.iter().collect();
+        sorted.sort_by_key(|i| i.mesh.0);
+
+        let mut raw: Vec<InstanceRaw> = Vec::with_capacity(sorted.len());
+        for instance in &sorted {
+            assert!(
+                instance.mesh.0 < self.meshes.len(),
+                "instance names mesh handle {:?}, which is not from this renderer",
+                instance.mesh,
+            );
+            // Extend the run in progress, or start a new one.
+            match self.draws.last_mut() {
+                Some(draw) if draw.mesh == instance.mesh.0 => draw.count += 1,
+                _ => self.draws.push(InstanceDraw {
+                    mesh: instance.mesh.0,
+                    byte_offset: (raw.len() * std::mem::size_of::<InstanceRaw>())
+                        as wgpu::BufferAddress,
+                    count: 1,
+                }),
+            }
+            raw.push(InstanceRaw::from_instance(instance));
+        }
+
+        // Grow the buffer if this frame needs more room than the last one did.
+        // It is only ever reallocated upward, so a scene with a steady object
+        // count settles after one frame and never allocates again.
+        if raw.len() > self.instance_capacity {
+            self.instance_capacity = raw.len().next_power_of_two();
+            self.instance_buffer = create_instance_buffer(&self.device, self.instance_capacity);
+        }
+        self.queue
+            .write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&raw));
     }
 
     /// Choose whether meshes draw filled or as a wireframe (see [`RenderMode`]).
@@ -636,9 +794,9 @@ impl Renderer {
                 multiview_mask: None,
             });
 
-            // Draw every mesh in the consumer's draw-list; if it's empty the pass
-            // above still clears the screen.
-            if !self.meshes.is_empty() {
+            // Draw the consumer's draw-list, one instanced call per mesh in it;
+            // if it's empty the pass above still clears the screen.
+            if !self.draws.is_empty() {
                 let wireframe = self.render_mode == RenderMode::Wireframe;
                 pass.set_pipeline(if wireframe {
                     &self.line_pipeline
@@ -646,15 +804,26 @@ impl Renderer {
                     &self.pipeline
                 });
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                for mesh in &self.meshes {
-                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                for draw in &self.draws {
+                    let mesh = &self.meshes[draw.mesh];
                     let (buffer, count) = if wireframe {
                         (&mesh.line_index_buffer, mesh.line_index_count)
                     } else {
                         (&mesh.index_buffer, mesh.index_count)
                     };
+                    // An empty mesh is a legal thing to hold a handle to; it just
+                    // has nothing to draw.
+                    if count == 0 {
+                        continue;
+                    }
+                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                    // The run's offset rides on the *buffer binding*, and the draw
+                    // always starts at instance 0 — WebGL2 has no non-zero
+                    // `first_instance`, so the obvious `draw_indexed(.., first..last)`
+                    // would work on native and fail in the browser fallback.
+                    pass.set_vertex_buffer(1, self.instance_buffer.slice(draw.byte_offset..));
                     pass.set_index_buffer(buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..count, 0, 0..1);
+                    pass.draw_indexed(0..count, 0, 0..draw.count);
                 }
             }
         }

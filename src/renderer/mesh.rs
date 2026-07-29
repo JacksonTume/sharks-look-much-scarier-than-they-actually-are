@@ -5,8 +5,10 @@ use crate::renderer::Vertex;
 /// A triangle mesh: a pool of [`Vertex`]es plus the indices that connect them.
 ///
 /// The consumer builds this CPU-side and hands it to the engine via
-/// [`Renderer::set_meshes`](crate::Renderer::set_meshes); the engine owns the GPU
-/// buffers. `indices` reference into `vertices` (three per triangle), so a corner
+/// [`Renderer::upload_mesh`](crate::Renderer::upload_mesh), which returns a
+/// [`MeshHandle`](crate::MeshHandle) to place with
+/// [`Renderer::set_instances`](crate::Renderer::set_instances); the engine owns
+/// the GPU buffers. `indices` reference into `vertices` (three per triangle), so a corner
 /// shared by several triangles — every interior vertex of a grid, every corner of
 /// a cube — is stored once instead of duplicated per face.
 ///

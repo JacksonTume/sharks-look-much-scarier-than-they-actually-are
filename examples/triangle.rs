@@ -9,7 +9,7 @@
 //!   native — `cargo run --example triangle`
 //!   web    — build for wasm and run `wasm-bindgen` (see `README.md`).
 
-use slmsttaa::{run, Application, Mesh, Renderer, Vertex};
+use slmsttaa::{run, Application, Instance, Mesh, Renderer, Vertex};
 
 /// A consumer that hands the engine one triangle and otherwise does nothing.
 struct TriangleDemo;
@@ -34,7 +34,10 @@ impl Application for TriangleDemo {
             ],
             vec![0, 1, 2],
         );
-        renderer.set_meshes(&[mesh]);
+        // Upload once, then place it. `Instance::at` is the whole draw-list for
+        // geometry that never moves: draw this mesh, at the origin, unrotated.
+        let triangle = renderer.upload_mesh(&mesh);
+        renderer.set_instances(&[Instance::at(triangle)]);
     }
 }
 

@@ -23,7 +23,7 @@
 //!   web    — build for wasm and run `wasm-bindgen` (see `README.md`), substituting
 //!            `grid` for `triangle`.
 
-use slmsttaa::{run, Application, Key, Mesh, MouseButton, Renderer, Vertex};
+use slmsttaa::{run, Application, Instance, Key, Mesh, MouseButton, Renderer, Vertex};
 
 /// Vertices per side of the grid. `N * N` vertices, `(N-1)^2 * 2` triangles.
 const N: usize = 64;
@@ -109,8 +109,10 @@ impl Default for GridDemo {
 
 impl Application for GridDemo {
     fn init(&mut self, renderer: &mut Renderer) {
-        // Static geometry: upload once. Only the camera moves after this.
-        renderer.set_meshes(&[grid_mesh()]);
+        // Static geometry: upload once and place it once. Only the camera moves
+        // after this, so the draw-list is never touched again.
+        let grid = renderer.upload_mesh(&grid_mesh());
+        renderer.set_instances(&[Instance::at(grid)]);
     }
 
     fn update(&mut self, renderer: &mut Renderer) {

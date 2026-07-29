@@ -129,6 +129,8 @@ it, and the current pipeline has no index buffer.
 *Proof:* `Mesh` (`src/renderer/mesh.rs`) + `Renderer::set_meshes` upload a vertex
 + index buffer per mesh; `render()` iterates the draw-list with `draw_indexed`.
 The cube demo (below) builds an indexed cube — 8 shared corners, not 36 vertices.
+(`set_meshes` was retired in Slice 8; `Mesh` and the indexed draw survive it
+unchanged.)
 
 ### Slice 2 — Depth buffer + culling ✅ done
 
@@ -380,12 +382,12 @@ behalf: each item was kept only because `scene.rs` independently hits the same
 wall, and the rest was discarded (see *What stays in the consumer* below). If
 `scene.rs` doesn't hit a wall, it isn't in this list.
 
-### Slice 8 — Per-object transforms + an instance draw-list
+### Slice 8 — Per-object transforms + an instance draw-list ✅ done
 
 *Roadblock:* the demo wants twenty objects, several of which are the *same* mesh
-in different places. Today `set_meshes` takes geometry already baked into world
-space, so "move something" means rebuilding its vertices and re-uploading — per
-object, per frame — and the same box uploaded ten times is ten vertex buffers.
+in different places. `set_meshes` took geometry already baked into world space, so
+"move something" meant rebuilding its vertices and re-uploading — per object, per
+frame — and the same box uploaded ten times was ten vertex buffers.
 
 - Uploading a mesh returns a **handle**; the draw-list becomes a list of
   *instances* (`handle` + transform), so one mesh can be drawn many times.
@@ -400,8 +402,58 @@ data must ride either an instance-step vertex buffer or a uniform with dynamic
 offsets, not the storage-buffer approach most tutorials reach for. Decide it in
 this slice, while the surface is small.
 
-*Proof:* `scene.rs` places and moves many objects, reusing meshes, with **zero**
-per-frame vertex re-upload; `cube.rs` loses its CPU corner-rotation.
+*Proof:* `cargo run --example scene` shows 25 boxes turning and bobbing
+independently over a ground plane, from **one** uploaded box mesh, in **two** draw
+calls, with **zero** per-frame vertex uploads — the HUD reports all four numbers
+and they are real. `cube.rs` lost its `rotate()` and its per-frame re-upload;
+`gallery.rs` stopped rebuilding its spinning scene and now uploads all four scenes
+once, so switching names a different handle. Verified on native and on wasm.
+
+**What shipped, and what it cost:**
+
+- **Three types and three methods.** `MeshHandle` / `Transform` / `Instance` in
+  `src/renderer/instance.rs`; `upload_mesh` → handle, `update_mesh(handle, &Mesh)`,
+  `set_instances(&[Instance])`. `set_meshes` is **gone** rather than kept as a
+  convenience — the same one-surface trade UI Slices 3 and 4 made for the slider
+  and button builders, and it cost five call sites.
+- **Handles are append-only, and that is the whole lifecycle.** Nothing is ever
+  freed, so a handle cannot dangle and no generational slot map is needed. A
+  removal API waits for a demo that actually spawns and destroys objects; none
+  does, and inventing one now would be the speculative build principle 2 forbids.
+- **`update_mesh` is the terrain demo's half of this slice, and it is the more
+  interesting half.** Erosion changes a landscape's *shape*, which no transform can
+  express, so terrain keeps two stable handles and refills them. That split —
+  "moves" versus "changes shape" — is the real boundary the API draws, and it is
+  clearer than the one the slice set out to draw.
+- **Transforms are plain arrays, and rotation is Euler.** `position` /
+  `rotation` (radians, applied Y→X→Z) / `scale`, following the rule
+  `Camera::look_from_to` and `Vertex` already set: a demo places twenty objects
+  without depending on `glam`. Gimbal lock is the accepted cost, recorded on the
+  type; a quaternion is the correct fix and an unpleasant thing to author by hand,
+  which is exactly what this API exists to avoid.
+- **No hierarchy.** The engine takes world transforms; composing a parent into a
+  child is arithmetic, and arithmetic is the demo's (principle 3 — the same ruling
+  that keeps the erosion solver out of the engine). `Transform::matrix()` is public
+  so a consumer can read what it built; nothing yet needs to *hand back* a composed
+  matrix, and the articulated figures of Slice 11 are what will decide whether
+  `Instance` should accept one.
+
+*The parity risk was real, and it was not the one flagged.* The slice predicted
+storage buffers as the trap, and they were — `downlevel_webgl2_defaults` has none,
+so per-instance data rides an instance-step vertex buffer (the model matrix as four
+`vec4` columns, locations 2–5). But the sharper edge was **`first_instance`**:
+WebGL2 has no non-zero variant, so the obvious way to draw the second mesh's run —
+`draw_indexed(.., first..last)` — compiles, runs perfectly on native, and fails only
+in the browser fallback. Each run is selected by offsetting the *buffer binding*
+instead, always drawing from instance zero. Recorded in `ARCHITECTURE.md`, because
+a bug that only appears on one target is the kind that file exists for.
+
+*What it exposed.* Every box in `scene.rs` is the same color, and there is no way
+to change that: color lives in the shared vertex buffer every instance reads.
+That is **Slice 10 arriving with evidence attached**, exactly as predicted. So is
+Slice 9 — the boxes' shading is baked into their corners, so it turns with them,
+which is visible the moment one rotates. Both were written down before this slice;
+both are now things you can see rather than things the roadmap claims.
 
 ### Slice 9 — Vertex normals + a lighting model in the pipeline
 
