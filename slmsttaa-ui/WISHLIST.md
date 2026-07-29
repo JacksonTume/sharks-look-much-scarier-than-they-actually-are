@@ -164,7 +164,7 @@ unscheduled.
 
 Since this file was written, the same consumer has asked the engine for a
 **renderer** for its simulation, which produced [engine Slices
-7–11](../ROADMAP.md#the-second-vertical--a-scene-demo-slices-711). Two knock-on
+8–12](../ROADMAP.md#the-second-vertical--a-scene-demo-slices-812). Two knock-on
 notes for this crate, neither of them scheduled work:
 
 - **Transport controls** for the engine's new fixed-step clock (play / pause /

@@ -102,7 +102,7 @@ A slice is not finished until:
 The driving vertical is the **terrain + erosion demo**. Each slice is pulled into
 existence by the next thing that demo cannot do.
 
-### Slice 0 — Invert control (bootstrapping)
+### Slice 0 — Invert control (bootstrapping) ✅ done
 
 *Roadblock:* you cannot run **any** consumer at all today — `run()` *is* the demo
 and the triangle is baked into `renderer/mod.rs`.
@@ -455,7 +455,19 @@ Slice 9 — the boxes' shading is baked into their corners, so it turns with the
 which is visible the moment one rotates. Both were written down before this slice;
 both are now things you can see rather than things the roadmap claims.
 
-### Slice 9 — Vertex normals + a lighting model in the pipeline
+### Slices 9 & 10 — Lighting and material (taken together)
+
+**These were written as two slices and are being built as one.** Both reopen the
+same two structures — `Vertex` and the per-instance buffer — and Slice 10's own
+text already said so ("the two changes should be made together rather than
+churning the format twice"). Splitting them would mean migrating six demos'
+vertex arrays twice, in consecutive slices, to reach a state neither half is
+useful without: normals with no material means `scene.rs` is lit but still
+monochrome, and material with no normals means colored boxes that still carry
+their highlight around with them. The two roadblocks below are kept separate
+because they *are* separate, and each is independently what pulled its half in.
+
+#### The lighting half
 
 *Roadblock:* Slice 8 breaks the trick terrain relies on. The terrain demo bakes
 diffuse shading into vertex color CPU-side, which is correct only because that
@@ -472,10 +484,18 @@ justify pushing normals into the pipeline." `scene.rs` is that demo.
 - Terrain's CPU-baked shading is retired in favor of real normals, which also
   makes its wireframe/solid toggle honest.
 
-*Proof:* a rotating object in `scene.rs` is lit consistently from a fixed world
-direction, and terrain looks the same or better with the CPU bake deleted.
+*The normal matrix is not the model matrix, and `scene.rs` is why.* Every box on
+that stage is scaled non-uniformly (`[0.6, height, 0.6]` — the height is what
+makes the objects tell apart), and a non-uniform scale skews normals: the upper
+3×3 of the model matrix stretches them along with the geometry, so a squashed box
+shades as though its faces were tilted. The fix is the 3×3 **inverse-transpose**,
+computed CPU-side per instance and shipped as three more instance-step
+attributes. That is the correct-under-any-transform answer rather than the
+cheap-and-usually-fine one, taken deliberately because the demo already breaks
+the cheap one on day one — this is not a defect discovered later, it is visible
+in the first frame.
 
-### Slice 10 — Per-instance material
+#### The material half
 
 *Roadblock:* two instances of the *same* mesh must be visually distinguishable,
 and after Slice 8 they cannot be — color lives in the shared vertex buffer, so
@@ -496,19 +516,47 @@ patch. What water needs beyond a color tint is small and worth naming now, since
 it is the part `scene.rs` alone would not have demanded:
 
 - **An alpha channel at all.** `Vertex` is position + RGB (`renderer/vertex.rs`)
-  and the scene pipeline is `BlendState::REPLACE` (`renderer/mod.rs`). Whether
-  alpha rides the material or widens `Vertex` is this slice's call — note that
-  Slice 9 already reopens `Vertex` to add a normal, so the two changes should be
-  made together rather than churning the format twice.
+  and the scene pipeline is `BlendState::REPLACE` (`renderer/mod.rs`). **Alpha
+  rides the material, not `Vertex`** — a `[f32; 4]` tint per instance. That is
+  the decision the fused slice lets us make once: transparency is a property of
+  *this placement of a mesh*, not of the mesh's corners, which is exactly the
+  split Slice 8 drew. Water is one uploaded surface that wants to be see-through;
+  nothing wants per-corner opacity, and adding a fourth float to every vertex of
+  a 128² terrain to express a whole-object property would be the wrong end.
 - **A transparent draw rule:** blended meshes drawn after opaque ones with
   depth-write off. The existing `line_pipeline` is the precedent for a pipeline
   variant selected per draw, so this is a known shape, not new ground. Sorting is
   not needed for water specifically — one non-overlapping surface — and a general
   sort should wait for a demo that actually needs one.
 
-*Proof:* one uploaded mesh, drawn many times, each instance a different color —
-and terrain's rivers and lakes go translucent, with the riverbed visible through
-them, by setting a material rather than by any water-specific engine code.
+#### What lands, concretely
+
+- `Vertex` becomes position + **normal** + color (attributes 0–2). Every demo
+  that builds a mesh supplies normals; terrain's come from the heightmap gradient
+  it already computes for the CPU bake it's deleting.
+- `Instance` grows a `Material` — an RGBA `tint` multiplied into vertex color,
+  plus the one scalar the lighting model needs. Not a material *system*: no
+  shader graph, no pipeline permutations, no textures (see *Beyond*).
+- The instance-step buffer carries the model matrix (locations 2–5, from Slice
+  8), the normal matrix (6–8), and the material (9–10). **Ten instance
+  attributes plus three vertex attributes is thirteen**, against the sixteen
+  WebGL2 guarantees — room, but no longer generous, and worth knowing before
+  Slice 11 wants to add anything.
+- A blended pipeline variant, selected per draw-list run, drawn after the opaque
+  runs with depth-write off.
+
+*Parity note, learned the hard way in Slice 8:* the browser fallback is where
+instance-buffer work breaks, and `--target wasm32-unknown-unknown --lib` will not
+catch it — `first_instance` compiled and ran perfectly on native. This slice gets
+looked at in an actual browser, not just type-checked.
+
+*Proof:* `scene.rs` shows one uploaded box drawn many times, each instance a
+different color, every one lit consistently from a fixed world direction as it
+turns and whatever its scale — and terrain's rivers and lakes go translucent with
+the riverbed visible through them, by setting a material rather than by any
+water-specific engine code. The honest test is terrain: its CPU shading bake is
+**deleted**, and if the landscape looks the same or better without it, lighting
+genuinely moved into the pipeline.
 
 ### Slice 11 — Primitive mesh builders
 

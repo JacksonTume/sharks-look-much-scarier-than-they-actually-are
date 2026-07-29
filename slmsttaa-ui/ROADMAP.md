@@ -630,7 +630,7 @@ do all of it, and the list below is what a *future* consumer would have to ask f
 first.
 
 The next UI work should therefore arrive from a demo, not from this file. The
-likeliest source is engine [Slice 11](../ROADMAP.md#slice-11--fixed-timestep-clock--time-control),
+likeliest source is engine [Slice 12](../ROADMAP.md#slice-12--fixed-timestep-clock--time-control),
 whose transport controls `scene.rs` will have to drive from somewhere — and even
 that composes from today's `button` and `slider` until it demonstrably can't.
 
@@ -677,7 +677,7 @@ finally demands one, not as a to-build list:
   "no" below until something wants it.
 - **A transport / timeline scrubber** — play, pause, single-step, and seek along a
   time axis, with tick marks or event markers. The driver is real and close: the
-  engine's [Slice 11](../ROADMAP.md#slice-11--fixed-timestep-clock--time-control)
+  engine's [Slice 12](../ROADMAP.md#slice-12--fixed-timestep-clock--time-control)
   gives `scene.rs` a fixed-step clock the demo has to *drive from somewhere*. Not
   scheduled anyway, because the crude version composes from today's `button` +
   `slider` — which is the correct first move. A dedicated widget waits until that
@@ -697,7 +697,7 @@ names the roadblock.
 
 That consumer has since asked for a **renderer** as well as a UI, and the engine
 half of the answer is now sequenced: [engine Slices
-7–11](../ROADMAP.md#the-second-vertical--a-scene-demo-slices-711) (per-object
+8–12](../ROADMAP.md#the-second-vertical--a-scene-demo-slices-812) (per-object
 transforms, lighting, per-instance material, primitives, a fixed-step clock),
 driven by an engine demo of our own rather than by the request list. **It changes
 nothing here.** No slice below moves, and nothing graduates out of
