@@ -59,7 +59,7 @@ it's going and why.
 | `src/app.rs`             | winit `ApplicationHandler`: window + event loop.         |
 | `src/renderer/mod.rs`    | wgpu device/surface/pipeline; per-frame render.          |
 | `src/renderer/mesh.rs`   | `Mesh` (vertices + indices) the consumer hands over.     |
-| `src/renderer/vertex.rs` | Vertex format + buffer layout.                           |
+| `src/renderer/vertex.rs` | Vertex format (position + normal + color) + buffer layout. |
 | `src/renderer/shader.wgsl` | WGSL vertex/fragment shaders.                          |
 | `src/camera.rs`          | Perspective camera + GPU uniform.                        |
 | `src/renderer/overlay.rs` | Screen-space 2D pass + glyph atlas (`Painter` impl).   |
@@ -122,7 +122,7 @@ across examples), and hosts `web/` from a tiny built-in static server. See
 Implement `Application` and hand it to `run`:
 
 ```rust
-use slmsttaa::{run, Application, Instance, Mesh, Renderer, Transform, Vertex};
+use slmsttaa::{run, Application, Instance, Material, Mesh, Renderer, Transform, Vertex};
 
 #[derive(Default)]
 struct MyApp {
@@ -147,7 +147,9 @@ impl Application for MyApp {
                 thing,
                 Transform::from_position([2.0, 0.0, 0.0])
                     .with_rotation([0.0, self.angle, 0.0]),
-            ),
+            )
+            // Same mesh, different color. Alpha below 1.0 makes it see-through.
+            .with_material(Material::rgb(0.9, 0.4, 0.3)),
         ]);
     }
 }
@@ -157,8 +159,10 @@ fn main() {
 }
 ```
 
-One uploaded mesh, drawn twice, one of them turning — and the engine batches both
-into a single instanced draw call.
+One uploaded mesh, drawn twice — one turning, one a different color — and the
+engine batches both into a single instanced draw call. Your vertices carry a
+normal alongside position and color; the engine lights them in world space, so
+shading stays put when an object moves.
 
 ## Performance notes
 

@@ -48,7 +48,8 @@
 
 use slmsttaa::ui::{font, Anchor, Rect, Response, Size, Theme, Ui, Variant};
 use slmsttaa::{
-    run, Application, Instance, Key, Mesh, MeshHandle, MouseButton, RenderMode, Renderer, Vertex,
+    run, Application, Instance, Key, Material, Mesh, MeshHandle, MouseButton, RenderMode, Renderer,
+    Vertex,
 };
 
 #[path = "terrain/erosion.rs"]
@@ -190,6 +191,9 @@ const WATER_LIFT: f32 = 0.0025;
 const PASSES_MAX: f32 = 150.0;
 /// Default drainage area (in cells) at which a channel is drawn as a river.
 const RIVER_AREA_DEFAULT: f32 = 60.0;
+/// Default water opacity. Low enough that the riverbed reads through a channel,
+/// high enough that a deep lake still looks like water rather than a stain.
+const WATER_ALPHA_DEFAULT: f32 = 0.62;
 /// How tall the panel's scrolling body is allowed to get, in UI points.
 ///
 /// A constant rather than "whatever fits the window": a panel is anchored to a
@@ -253,6 +257,10 @@ struct TerrainDemo {
     /// purely *visual* water knob: it changes what counts as a river, never what
     /// the erosion does.
     river_area: f32,
+    /// How opaque the water surface is. `1.0` is the solid blue this demo shipped
+    /// with; anything less is the engine's blended pass, and the riverbed shows
+    /// through. Purely visual, like `river_area`.
+    water_alpha: f32,
 
     /// Draw the terrain as a wireframe instead of shaded triangles.
     wireframe: bool,
@@ -299,6 +307,7 @@ impl TerrainDemo {
             res: n as f32,
             show_water: true,
             river_area: RIVER_AREA_DEFAULT,
+            water_alpha: WATER_ALPHA_DEFAULT,
             wireframe: false,
             theme: Theme::dark(),
             pending_base: false,
@@ -366,15 +375,27 @@ impl TerrainDemo {
 
         let mut instances = vec![Instance::at(terrain_handle)];
         if water.is_some() {
-            instances.push(Instance::at(water_handle));
+            // The one line that makes the rivers see-through. No water-specific
+            // engine code exists: it is the same `Material` any instance can set,
+            // and the engine sorts the blended run after the opaque terrain and
+            // draws it without writing depth.
+            instances.push(
+                Instance::at(water_handle)
+                    .with_material(Material::OPAQUE.with_alpha(self.water_alpha)),
+            );
         }
         renderer.set_instances(&instances);
     }
 
     /// Build the renderable mesh from the current heights: an `n × n` grid with a
-    /// height/slope color palette and CPU-baked diffuse shading folded into the
-    /// vertex color (the engine's pipeline is position+color only — lighting stays
-    /// in the demo, KISS).
+    /// height/slope color palette, and a real surface normal per vertex.
+    ///
+    /// This used to fold diffuse shading into the vertex color, because the
+    /// engine's pipeline was position+color only. That bake is **gone**: the
+    /// normal goes to the engine instead, which lights it in world space. The
+    /// arithmetic didn't move so much as get deleted — the normal was already
+    /// computed here to drive the slope term of the palette, so handing it over
+    /// costs nothing and the shading is now correct for geometry that moves.
     fn build_mesh(&self) -> Mesh {
         let n = self.n;
         // Displayed height per cell, in world units, on the fixed scale — see
@@ -386,7 +407,6 @@ impl TerrainDemo {
         let cell_world = step; // horizontal spacing for slope/normal estimates
 
         let mut vertices = Vec::with_capacity(n * n);
-        let light = normalize3([0.45, 0.85, 0.35]);
         for y in 0..n {
             for x in 0..n {
                 let i = y * n + x;
@@ -407,16 +427,11 @@ impl TerrainDemo {
                 let slope = 1.0 - normal[1].clamp(0.0, 1.0); // 0 flat → 1 vertical
 
                 let t = (wy / VHEIGHT).clamp(0.0, 1.0);
-                let base = palette(t, slope);
-
-                // Simple diffuse + ambient, baked into the color.
-                let diffuse = dot3(normal, light).clamp(0.0, 1.0);
-                let shade = 0.35 + 0.65 * diffuse;
-                let color = [base[0] * shade, base[1] * shade, base[2] * shade];
 
                 vertices.push(Vertex {
                     position: [wx, wy, wz],
-                    color,
+                    normal,
+                    color: palette(t, slope),
                 });
             }
         }
@@ -465,9 +480,6 @@ impl TerrainDemo {
         };
 
         let step = (2.0 * HALF) / (n as f32 - 1.0);
-        // A flat surface with an up normal, lit by the same light as the terrain,
-        // so water and land agree about where the sun is.
-        let shade = 0.35 + 0.65 * dot3([0.0, 1.0, 0.0], normalize3([0.45, 0.85, 0.35]));
 
         let mut vertices: Vec<Vertex> = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
@@ -493,14 +505,17 @@ impl TerrainDemo {
                         None => (disp(self.heights[i]), false),
                         Some(state) => state,
                     };
-                    let color = water_color(if lake { self.water.depth[i] } else { 0.0 }, shade);
                     vertices.push(Vertex {
                         position: [
                             -HALF + *cx as f32 * step,
                             h + WATER_LIFT,
                             -HALF + *cy as f32 * step,
                         ],
-                        color,
+                        // A still surface is flat, so it faces straight up. The
+                        // engine lights it from the same direction as the land,
+                        // which is what the hand-computed `shade` used to buy.
+                        normal: Vertex::UP,
+                        color: water_color(if lake { self.water.depth[i] } else { 0.0 }),
                     });
                 }
                 // Same counter-clockwise-from-above winding as the terrain.
@@ -659,8 +674,22 @@ impl TerrainDemo {
                         rebuild |= ui.checkbox("show water", &mut self.show_water).changed;
                         if self.show_water {
                             rebuild |= ui.indent(|ui| {
-                                log_slider(ui, "river threshold", &mut self.river_area, 4.0, 4000.0)
-                                    .changed
+                                let mut changed = log_slider(
+                                    ui,
+                                    "river threshold",
+                                    &mut self.river_area,
+                                    4.0,
+                                    4000.0,
+                                )
+                                .changed;
+                                // Opacity is the one water knob that needs no
+                                // rebuild — it rides the instance's material, so
+                                // the mesh it tints is untouched.
+                                changed |= ui
+                                    .slider("opacity", &mut self.water_alpha, 0.15, 1.0)
+                                    .show()
+                                    .changed;
+                                changed
                             });
                         }
                     });
@@ -719,6 +748,7 @@ impl TerrainDemo {
             self.res = RES_DEFAULT as f32;
             self.show_water = true;
             self.river_area = RIVER_AREA_DEFAULT;
+            self.water_alpha = WATER_ALPHA_DEFAULT;
             base = true;
         }
         if let Some(i) = preset {
@@ -904,28 +934,23 @@ fn palette(t: f32, slope: f32) -> [f32; 3] {
 
 /// Water color: a river shallow and bright, a lake darkening with its own depth.
 ///
-/// Opaque, which is the ceiling on this slice — the engine's `Vertex` is
-/// position + RGB and the scene pipeline is `BlendState::REPLACE`, so there is
-/// nowhere to put an alpha even if we wanted one. Depth-darkening is the honest
-/// substitute available today: it reads as *water*, and it makes a deep lake look
-/// deep, without anything see-through. Translucency arrives with Slice 10's
-/// per-instance material, and this is the function that will lose most of its job
-/// when it does.
-fn water_color(depth: f32, shade: f32) -> [f32; 3] {
+/// It **kept** its job when translucency arrived, which was not the expectation.
+/// The prediction was that depth-darkening was a substitute for see-through water
+/// and would mostly go away; in practice the two do different things. Alpha shows
+/// you the riverbed, and depth-darkening is what still distinguishes a deep lake
+/// from a shallow one once you can see through both. What did go is the `shade`
+/// argument — the engine lights this surface now.
+fn water_color(depth: f32) -> [f32; 3] {
     const SHALLOW: [f32; 3] = [0.29, 0.55, 0.72];
     const DEEP: [f32; 3] = [0.06, 0.17, 0.36];
     // Saturates around a tenth of the terrain's full relief — past that a lake is
     // simply "deep" and gets no darker.
     let t = (depth / 0.1).clamp(0.0, 1.0);
     [
-        (SHALLOW[0] + (DEEP[0] - SHALLOW[0]) * t) * shade,
-        (SHALLOW[1] + (DEEP[1] - SHALLOW[1]) * t) * shade,
-        (SHALLOW[2] + (DEEP[2] - SHALLOW[2]) * t) * shade,
+        SHALLOW[0] + (DEEP[0] - SHALLOW[0]) * t,
+        SHALLOW[1] + (DEEP[1] - SHALLOW[1]) * t,
+        SHALLOW[2] + (DEEP[2] - SHALLOW[2]) * t,
     ]
-}
-
-fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
 fn normalize3(v: [f32; 3]) -> [f32; 3] {

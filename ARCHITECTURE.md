@@ -38,7 +38,8 @@ src/
 │                     Surfaced as Renderer::dt().
 └── renderer/
     ├── mod.rs        Renderer: wgpu instance/adapter/device/queue/surface, the
-    │                 solid + wireframe render pipelines (RenderMode), the depth
+    │                 solid + blended + wireframe render pipelines (RenderMode
+    │                 and per-instance alpha select between them), the depth
     │                 buffer, the mesh registry + instance draw-list, the overlay,
     │                 the UI state + clock, and per-frame
     │                 begin_frame()/update()/render().
@@ -47,10 +48,12 @@ src/
     │                 dependency on the engine.
     ├── mesh.rs       Mesh (vertices + indices): the CPU-side geometry a consumer
     │                 builds and hands over via Renderer::upload_mesh.
-    ├── instance.rs   Transform (position/euler rotation/scale), MeshHandle, and
-    │                 Instance: where an uploaded mesh is drawn. Plus the private
-    │                 InstanceRaw + its instance-step buffer layout.
-    ├── vertex.rs     Vertex (position + color) and its buffer layout.
+    ├── instance.rs   Transform (position/euler rotation/scale), MeshHandle,
+    │                 Material (RGBA tint), and Instance: where an uploaded mesh
+    │                 is drawn and how it looks. Plus the private InstanceRaw +
+    │                 its instance-step buffer layout, including the 3x3
+    │                 inverse-transpose normal matrix.
+    ├── vertex.rs     Vertex (position + normal + color) and its buffer layout.
     ├── shader.wgsl   3D vertex/fragment shaders (WGSL).
     ├── overlay.rs    Overlay: the screen-space 2D pass (UI/HUD). Owns its own
     │                 pipeline and dynamic 2D buffers, and uploads the *toolkit's*
@@ -141,7 +144,8 @@ xtask/                Dev tooling (a separate workspace member, no deps). `cargo
    `Renderer::ui()`). Then `Renderer::update()` re-uploads the camera uniform, and
    `Renderer::render()` records **two** passes into one command encoder: the 3D
    pass (clear color + depth → one instanced `draw_indexed` per mesh in the
-   draw-list, using the solid or wireframe pipeline per the current `RenderMode`)
+   draw-list, opaque runs first and blended runs after, using the solid, blended,
+   or wireframe pipeline per the current `RenderMode` and the run's alpha)
    and then the
    **overlay pass** (load, not clear → draw the accumulated 2D UI), and
    presents. Finally `Input::end_frame` clears the per-frame deltas/press-edges.
@@ -321,14 +325,37 @@ These are subtle and easy to reintroduce, so they're documented here:
 - **WebGL2 has no non-zero `first_instance`, and no storage buffers.** Both
   constrain how per-object data reaches the shader, and both bite in the same
   place. Per-instance data rides an **instance-step vertex buffer**
-  (`VertexStepMode::Instance`, the model matrix as four `vec4` columns at
-  locations 2–5) rather than the storage buffer most tutorials reach for —
-  `downlevel_webgl2_defaults` does not have those at all. And when several meshes
+  (`VertexStepMode::Instance`: the model matrix as four `vec4` columns at
+  locations 3–6, the normal matrix as three `vec3` columns at 7–9, and the
+  material tint at 10) rather than the storage buffer most tutorials reach for —
+  `downlevel_webgl2_defaults` does not have those at all. With `Vertex` taking
+  0–2, that is **eleven of the sixteen vertex attributes WebGL2 guarantees**; the
+  budget is no longer generous, and anything else wanting to ride this buffer
+  should count first. And when several meshes
   share one instance buffer, each mesh's run is selected by **offsetting the
   buffer binding** (`set_vertex_buffer(1, buf.slice(byte_offset..))`, then always
   drawing `0..count`), *not* by passing a non-zero start to `draw_indexed`'s
   instance range. The obvious version works on native and fails in the browser
   fallback, which is the worst kind of bug this file exists to prevent.
+
+- **A normal is not transformed by the model matrix.** Using the model matrix's
+  upper 3×3 is the tempting shortcut and is wrong under non-uniform scale: it
+  stretches normals along with the geometry, so a squashed box's flat top shades
+  as though tilted. `InstanceRaw::normal_matrix` ships the 3×3 **inverse-transpose**
+  instead. `examples/scene.rs` scales its boxes non-uniformly (that is how the
+  objects differ), so the shortcut is visibly wrong in the very first frame — this
+  is not a subtlety that hides until later. A degenerate transform (a zero scale
+  component) has no invertible block and falls back to the plain matrix, so the
+  buffer never fills with `NaN`.
+
+- **Transparency is ordering, not just blending.** A material with alpha below
+  `1.0` moves its instance into a blended pipeline with **depth writes off**, and
+  `set_instances` sorts every opaque run ahead of every transparent one. Both
+  halves are required: blending composites correctly only over a finished target,
+  and a see-through surface that wrote depth would hide what is behind it — the
+  one thing it must not do. Transparent instances are *not* depth-sorted against
+  each other; terrain's water is a single non-overlapping surface, and a general
+  back-to-front sort waits for a demo that needs one.
 
 - **Match the WebGPU spec; keep wgpu current.** Browsers track the live WebGPU
   spec and reject limits/fields they no longer recognize (e.g. a stale
@@ -359,16 +386,12 @@ These are subtle and easy to reintroduce, so they're documented here:
 The scaffold leaves obvious seams:
 
 - **MSAA** (`multisample` is currently the 1-sample default).
-- **Vertex normals + a lighting model.** Now the sharper of the two, because
-  per-object transforms broke the trick the terrain demo relies on: it bakes
-  diffuse shading into vertex color CPU-side, which is only correct while a mesh
-  never moves. Rotate an object whose lighting is painted into its vertices and
-  the highlight turns with it, which `examples/scene.rs` shows. Lighting has to be
-  evaluated after the model transform, i.e. in the shader.
-- A **material** abstraction beyond the single shared pipeline. Color lives in the
-  shared vertex buffer, so every instance of a mesh is identical by construction —
-  `scene.rs`'s boxes cannot be told apart, and duplicating the mesh per color would
-  undo the point of instancing.
+- **Primitive mesh builders.** The sharpest one now, and lighting is what
+  sharpened it: a lit box cannot share its eight corners, because a corner touches
+  three faces pointing three ways and a vertex holds one normal. Every box in the
+  tree is therefore written out as 24 vertices by hand, in three separate demos.
+  A `Mesh::box` / `sphere` / `capsule` that emits correct normals is the fix
+  (`ROADMAP.md` Slice 11); it is content-free geometry, so it belongs here.
 - A small **render-graph**: there are now two passes (3D + overlay) wired by hand
   in `render()`. A second consumer wanting its own pass is the roadblock that turns
   this into a real graph.

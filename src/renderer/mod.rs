@@ -10,7 +10,7 @@ mod mesh;
 mod overlay;
 mod vertex;
 
-pub use instance::{Instance, MeshHandle, Transform};
+pub use instance::{Instance, Material, MeshHandle, Transform};
 pub use mesh::Mesh;
 pub use vertex::Vertex;
 
@@ -139,6 +139,9 @@ struct InstanceDraw {
     byte_offset: wgpu::BufferAddress,
     /// How many instances are in the run.
     count: u32,
+    /// Whether this run needs the blended, depth-write-off pipeline. Runs are
+    /// ordered so every opaque one precedes every transparent one.
+    transparent: bool,
 }
 
 /// Instances the instance buffer is sized for on creation; it grows on demand.
@@ -203,10 +206,16 @@ fn create_depth_view(
 
 /// Create a scene render pipeline for the given primitive `topology`.
 ///
-/// The solid and wireframe pipelines are identical except for topology and
-/// culling: triangles cull their back faces, lines never cull. Both share the
-/// camera-transform shader, the color target, and depth testing, so wireframe
-/// edges occlude correctly against solid geometry.
+/// The three variants are identical except for topology, culling, and blending:
+/// solid triangles cull their back faces and overwrite; lines never cull; the
+/// transparent variant blends over what is already there and does not write
+/// depth. All share the camera-transform shader, the color target, and depth
+/// *testing*, so wireframe edges and translucent surfaces both occlude correctly
+/// against solid geometry.
+///
+/// `transparent` turning off depth writes is the load-bearing half: a blended
+/// surface that wrote depth would hide the geometry behind it, which is the one
+/// thing a see-through surface must not do.
 fn create_scene_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
@@ -214,6 +223,7 @@ fn create_scene_pipeline(
     format: wgpu::TextureFormat,
     topology: wgpu::PrimitiveTopology,
     cull_mode: Option<wgpu::Face>,
+    transparent: bool,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("slmsttaa scene pipeline"),
@@ -231,7 +241,11 @@ fn create_scene_pipeline(
             entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
-                blend: Some(wgpu::BlendState::REPLACE),
+                blend: Some(if transparent {
+                    wgpu::BlendState::ALPHA_BLENDING
+                } else {
+                    wgpu::BlendState::REPLACE
+                }),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             compilation_options: Default::default(),
@@ -253,7 +267,7 @@ fn create_scene_pipeline(
         // into wgpu's [0, 1] range, so `Less` is the right test.
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
-            depth_write_enabled: Some(true),
+            depth_write_enabled: Some(!transparent),
             depth_compare: Some(wgpu::CompareFunction::Less),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
@@ -273,6 +287,9 @@ pub struct Renderer {
     size: winit::dpi::PhysicalSize<u32>,
 
     pipeline: wgpu::RenderPipeline,
+    /// Alpha-blended variant of [`Renderer::pipeline`], with depth writes off.
+    /// Selected for draw-list runs whose material alpha is below `1.0`.
+    blend_pipeline: wgpu::RenderPipeline,
     /// Wireframe variant of [`Renderer::pipeline`] (line topology, no culling),
     /// selected when the render mode is [`RenderMode::Wireframe`].
     line_pipeline: wgpu::RenderPipeline,
@@ -448,8 +465,10 @@ impl Renderer {
             immediate_size: 0,
         });
 
-        // Two pipelines sharing one shader/layout: solid (culled triangles) and
-        // wireframe (lines, no culling). Render mode just selects between them.
+        // Three pipelines sharing one shader/layout: solid (culled triangles),
+        // blended (the same, over what's behind it, without writing depth), and
+        // wireframe (lines, no culling). Render mode picks the wireframe one; the
+        // material's alpha picks between the other two, per draw-list run.
         let pipeline = create_scene_pipeline(
             &device,
             &pipeline_layout,
@@ -457,6 +476,16 @@ impl Renderer {
             config.format,
             wgpu::PrimitiveTopology::TriangleList,
             Some(wgpu::Face::Back),
+            false,
+        );
+        let blend_pipeline = create_scene_pipeline(
+            &device,
+            &pipeline_layout,
+            &shader,
+            config.format,
+            wgpu::PrimitiveTopology::TriangleList,
+            Some(wgpu::Face::Back),
+            true,
         );
         let line_pipeline = create_scene_pipeline(
             &device,
@@ -465,6 +494,7 @@ impl Renderer {
             config.format,
             wgpu::PrimitiveTopology::LineList,
             None,
+            false,
         );
 
         let depth_view = create_depth_view(&device, &config);
@@ -480,6 +510,7 @@ impl Renderer {
             config,
             size,
             pipeline,
+            blend_pipeline,
             line_pipeline,
             render_mode: RenderMode::default(),
             // No geometry yet — the consumer supplies it in `Application::init`.
@@ -586,12 +617,16 @@ impl Renderer {
             return;
         }
 
-        // Group by mesh so each mesh becomes one instanced draw. Sorting by
-        // handle (stably, so a consumer's own ordering survives within a mesh) is
-        // enough — instances of a mesh end up contiguous, which is exactly what
-        // one draw call needs.
+        // Group by mesh so each mesh becomes one instanced draw, and put every
+        // opaque instance before every transparent one — blending only composites
+        // correctly over a target that is already finished. Sorting is stable, so
+        // a consumer's own ordering survives within a group.
+        //
+        // Transparent instances are *not* sorted against each other by depth. One
+        // non-overlapping surface (terrain's water) doesn't need it, and a general
+        // back-to-front sort should wait for a demo that actually does.
         let mut sorted: Vec<&Instance> = instances.iter().collect();
-        sorted.sort_by_key(|i| i.mesh.0);
+        sorted.sort_by_key(|i| (i.material.is_transparent(), i.mesh.0));
 
         let mut raw: Vec<InstanceRaw> = Vec::with_capacity(sorted.len());
         for instance in &sorted {
@@ -600,14 +635,20 @@ impl Renderer {
                 "instance names mesh handle {:?}, which is not from this renderer",
                 instance.mesh,
             );
-            // Extend the run in progress, or start a new one.
+            let transparent = instance.material.is_transparent();
+            // Extend the run in progress, or start a new one. A run needs one
+            // mesh *and* one pipeline, so either changing breaks it — the same
+            // mesh may legitimately appear in both an opaque and a blended run.
             match self.draws.last_mut() {
-                Some(draw) if draw.mesh == instance.mesh.0 => draw.count += 1,
+                Some(draw) if draw.mesh == instance.mesh.0 && draw.transparent == transparent => {
+                    draw.count += 1
+                }
                 _ => self.draws.push(InstanceDraw {
                     mesh: instance.mesh.0,
                     byte_offset: (raw.len() * std::mem::size_of::<InstanceRaw>())
                         as wgpu::BufferAddress,
                     count: 1,
+                    transparent,
                 }),
             }
             raw.push(InstanceRaw::from_instance(instance));
@@ -798,12 +839,10 @@ impl Renderer {
             // if it's empty the pass above still clears the screen.
             if !self.draws.is_empty() {
                 let wireframe = self.render_mode == RenderMode::Wireframe;
-                pass.set_pipeline(if wireframe {
-                    &self.line_pipeline
-                } else {
-                    &self.pipeline
-                });
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                // Which pipeline was bound last, so a run only rebinds when it
+                // has to. `None` until the first run binds one.
+                let mut bound: Option<bool> = None;
                 for draw in &self.draws {
                     let mesh = &self.meshes[draw.mesh];
                     let (buffer, count) = if wireframe {
@@ -815,6 +854,18 @@ impl Renderer {
                     // has nothing to draw.
                     if count == 0 {
                         continue;
+                    }
+                    // Wireframe draws every run as opaque lines: an edge list has
+                    // no interior to see through, so blending it would only make
+                    // the inspection view harder to read.
+                    let blended = draw.transparent && !wireframe;
+                    if bound != Some(blended) {
+                        pass.set_pipeline(match (wireframe, blended) {
+                            (true, _) => &self.line_pipeline,
+                            (false, true) => &self.blend_pipeline,
+                            (false, false) => &self.pipeline,
+                        });
+                        bound = Some(blended);
                     }
                     pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                     // The run's offset rides on the *buffer binding*, and the draw

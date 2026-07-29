@@ -32,7 +32,7 @@
 
 use slmsttaa::ui::{Anchor, Theme};
 use slmsttaa::{
-    run, Application, Instance, Key, Mesh, MeshHandle, MouseButton, RenderMode, Renderer,
+    run, Application, Instance, Key, Material, Mesh, MeshHandle, MouseButton, RenderMode, Renderer,
     Transform, Vertex,
 };
 
@@ -71,33 +71,40 @@ fn box_mesh() -> Mesh {
         [-0.5, 0.5, 0.5],
     ];
 
-    let vertices = corners
-        .iter()
-        .map(|&position| {
+    // Six faces, each four corners wound counter-clockwise seen from outside, and
+    // the direction it points. The eight corners above cannot be *shared* by a lit
+    // mesh — a corner touches three faces pointing three ways, and a vertex holds
+    // one normal — so each face takes its own copy and the box is 24 vertices.
+    #[rustfmt::skip]
+    let faces: [([usize; 4], [f32; 3]); 6] = [
+        ([4, 5, 6, 7], [ 0.0,  0.0,  1.0]), // front  (+z)
+        ([0, 3, 2, 1], [ 0.0,  0.0, -1.0]), // back   (-z)
+        ([1, 2, 6, 5], [ 1.0,  0.0,  0.0]), // right  (+x)
+        ([0, 4, 7, 3], [-1.0,  0.0,  0.0]), // left   (-x)
+        ([3, 7, 6, 2], [ 0.0,  1.0,  0.0]), // top    (+y)
+        ([0, 1, 5, 4], [ 0.0, -1.0,  0.0]), // bottom (-y)
+    ];
+
+    let mut vertices = Vec::with_capacity(24);
+    let mut indices = Vec::with_capacity(36);
+    for (quad, normal) in faces {
+        let base = vertices.len() as u32;
+        for corner in quad {
+            let position = corners[corner];
             // 0 at the base, 1 at the top.
             let t = position[1] + 0.5;
-            Vertex {
+            vertices.push(Vertex {
                 position,
+                normal,
                 color: [
                     LOW[0] + (HIGH[0] - LOW[0]) * t,
                     LOW[1] + (HIGH[1] - LOW[1]) * t,
                     LOW[2] + (HIGH[2] - LOW[2]) * t,
                 ],
-            }
-        })
-        .collect();
-
-    // 12 triangles, each wound counter-clockwise seen from outside, so back-face
-    // culling keeps the exterior.
-    #[rustfmt::skip]
-    let indices = vec![
-        4, 5, 6,  4, 6, 7, // front  (+z)
-        0, 2, 1,  0, 3, 2, // back   (-z)
-        1, 2, 6,  1, 6, 5, // right  (+x)
-        0, 4, 7,  0, 7, 3, // left   (-x)
-        3, 7, 6,  3, 6, 2, // top    (+y)
-        0, 1, 5,  0, 5, 4, // bottom (-y)
-    ];
+            });
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
 
     Mesh::new(vertices, indices)
 }
@@ -118,10 +125,40 @@ fn ground_mesh() -> Mesh {
     .iter()
     .map(|&position| Vertex {
         position,
+        // A ground plane is flat, so every corner faces straight up.
+        normal: Vertex::UP,
         color: SHADE,
     })
     .collect();
     Mesh::new(vertices, vec![0, 1, 2, 0, 2, 3])
+}
+
+/// A per-object color, spread around the hue circle so neighbours contrast.
+///
+/// Deliberately *not* a random color: stepping by a large coprime fraction of a
+/// turn means consecutive objects land far apart on the wheel, which is what
+/// makes a grid of them legible rather than a muddle of similar pastels.
+fn tint_for(index: u32) -> Material {
+    // The golden-ratio conjugate — the classic low-discrepancy hue step.
+    let hue = (index as f32 * 0.618_034).fract();
+    let [r, g, b] = hue_rgb(hue);
+    // Toward white a little, so the box's own gradient still shows through.
+    Material::rgb(0.45 + r * 0.55, 0.45 + g * 0.55, 0.45 + b * 0.55)
+}
+
+/// A fully saturated RGB for a hue in `[0, 1)` — the six-sector HSV ramp with
+/// saturation and value pinned at 1.
+fn hue_rgb(hue: f32) -> [f32; 3] {
+    let sector = hue * 6.0;
+    let ramp = sector.fract();
+    match sector as u32 % 6 {
+        0 => [1.0, ramp, 0.0],
+        1 => [1.0 - ramp, 1.0, 0.0],
+        2 => [0.0, 1.0, ramp],
+        3 => [0.0, 1.0 - ramp, 1.0],
+        4 => [ramp, 0.0, 1.0],
+        _ => [1.0, 0.0, 1.0 - ramp],
+    }
 }
 
 /// A deterministic pseudo-random number in `[0, 1)` from an integer seed (a PCG
@@ -235,18 +272,25 @@ impl SceneDemo {
                 // Bob about the resting height, never sinking through the ground.
                 let lift = height * 0.5 + self.bob * (1.0 + (self.time * rate + phase).sin());
 
-                self.instances.push(Instance::new(
-                    boxes,
-                    Transform {
-                        position: [
-                            origin + col as f32 * SPACING,
-                            lift,
-                            origin + row as f32 * SPACING,
-                        ],
-                        rotation: [0.0, self.time * self.spin * rate + phase, 0.0],
-                        scale: [0.6, height, 0.6],
-                    },
-                ));
+                self.instances.push(
+                    Instance::new(
+                        boxes,
+                        Transform {
+                            position: [
+                                origin + col as f32 * SPACING,
+                                lift,
+                                origin + row as f32 * SPACING,
+                            ],
+                            rotation: [0.0, self.time * self.spin * rate + phase, 0.0],
+                            scale: [0.6, height, 0.6],
+                        },
+                    )
+                    // The thing this demo could not do before: one uploaded mesh,
+                    // and every placement of it a different color. The tint
+                    // multiplies the box's baked gradient, so the faces still read
+                    // as separate surfaces underneath it.
+                    .with_material(tint_for(i)),
+                );
             }
         }
     }

@@ -17,18 +17,24 @@ struct TriangleDemo;
 impl Application for TriangleDemo {
     fn init(&mut self, renderer: &mut Renderer) {
         // Counter-clockwise winding (so back-face culling keeps it), vertex-colored.
+        // A flat triangle in the XY plane faces straight down +Z, so every corner
+        // shares that one normal — the engine lights it from there.
+        const FACING: [f32; 3] = [0.0, 0.0, 1.0];
         let mesh = Mesh::new(
             vec![
                 Vertex {
                     position: [0.0, 0.5, 0.0],
+                    normal: FACING,
                     color: [1.0, 0.2, 0.3],
                 },
                 Vertex {
                     position: [-0.5, -0.5, 0.0],
+                    normal: FACING,
                     color: [0.2, 1.0, 0.4],
                 },
                 Vertex {
                     position: [0.5, -0.5, 0.0],
+                    normal: FACING,
                     color: [0.3, 0.4, 1.0],
                 },
             ],

@@ -48,6 +48,17 @@ fn lerp_color(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     ]
 }
 
+/// The surface normal at `(x, z)`, by central difference over one cell.
+///
+/// A heightfield's normal falls out of its slopes: step one cell each way, and
+/// the cross product of the two tangents is `(-dy/dx, 1, -dy/dz)` normalized.
+fn surface_normal(x: f32, z: f32, step: f32) -> [f32; 3] {
+    let dx = (height(x + step, z) - height(x - step, z)) / (2.0 * step);
+    let dz = (height(x, z + step) - height(x, z - step)) / (2.0 * step);
+    let len = (dx * dx + 1.0 + dz * dz).sqrt();
+    [-dx / len, 1.0 / len, -dz / len]
+}
+
 /// Build the static grid mesh: an `N x N` lattice on the XZ plane, displaced by
 /// [`height`] and colored low→high (green valley to pale peak).
 fn grid_mesh() -> Mesh {
@@ -64,6 +75,7 @@ fn grid_mesh() -> Mesh {
             let color = lerp_color([0.16, 0.42, 0.18], [0.92, 0.93, 0.88], t);
             vertices.push(Vertex {
                 position: [x, y, z],
+                normal: surface_normal(x, z, step),
                 color,
             });
         }

@@ -32,7 +32,7 @@ UI-shaped — and see the placement rule under *Conventions*.
 ```sh
 # Native
 cargo run --example terrain            # the capstone: layered Perlin + stream-power erosion
-cargo run --example scene              # one mesh, many moving objects (instancing)
+cargo run --example scene              # one mesh, many moving objects (instancing + material)
 cargo run --example triangle           # the smallest consumer (Esc / close to quit)
 cargo build                            # debug build
 cargo build --release                  # optimized

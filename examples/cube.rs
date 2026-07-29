@@ -35,26 +35,43 @@ const CUBE_CORNERS: [([f32; 3], [f32; 3]); 8] = [
     ([-0.5, 0.5, 0.5], [0.0, 1.0, 1.0]),   // 7
 ];
 
-/// 12 triangles (two per face), each wound counter-clockwise when viewed from
-/// outside the cube so back-face culling keeps the exterior and drops the inside.
+/// The six faces: four corner indices wound counter-clockwise seen from outside,
+/// and the direction that face points.
+///
+/// **A lit cube cannot share its eight corners.** A corner belongs to three faces
+/// pointing three different ways, and a vertex carries exactly one normal, so the
+/// eight tidy corners above become 24 vertices — each face gets its own copy,
+/// with the face's normal. That is the cost of real lighting, and writing it out
+/// by hand for a fifth shape is the wall `ROADMAP.md` Slice 11 exists to remove.
 #[rustfmt::skip]
-const CUBE_INDICES: [u32; 36] = [
-    4, 5, 6,  4, 6, 7, // front  (+z)
-    0, 2, 1,  0, 3, 2, // back   (-z)
-    1, 2, 6,  1, 6, 5, // right  (+x)
-    0, 4, 7,  0, 7, 3, // left   (-x)
-    3, 7, 6,  3, 6, 2, // top    (+y)
-    0, 1, 5,  0, 5, 4, // bottom (-y)
+const CUBE_FACES: [([usize; 4], [f32; 3]); 6] = [
+    ([4, 5, 6, 7], [ 0.0,  0.0,  1.0]), // front  (+z)
+    ([0, 3, 2, 1], [ 0.0,  0.0, -1.0]), // back   (-z)
+    ([1, 2, 6, 5], [ 1.0,  0.0,  0.0]), // right  (+x)
+    ([0, 4, 7, 3], [-1.0,  0.0,  0.0]), // left   (-x)
+    ([3, 7, 6, 2], [ 0.0,  1.0,  0.0]), // top    (+y)
+    ([0, 1, 5, 4], [ 0.0, -1.0,  0.0]), // bottom (-y)
 ];
 
 /// Build the cube mesh in **object space** — centered on the origin, unrotated.
 /// Where it ends up in the world is the transform's business, not the mesh's.
 fn cube_mesh() -> Mesh {
-    let vertices = CUBE_CORNERS
-        .iter()
-        .map(|&(position, color)| Vertex { position, color })
-        .collect();
-    Mesh::new(vertices, CUBE_INDICES.to_vec())
+    let mut vertices = Vec::with_capacity(24);
+    let mut indices = Vec::with_capacity(36);
+    for (corners, normal) in CUBE_FACES {
+        let base = vertices.len() as u32;
+        for corner in corners {
+            let (position, color) = CUBE_CORNERS[corner];
+            vertices.push(Vertex {
+                position,
+                normal,
+                color,
+            });
+        }
+        // Two triangles over the quad's four fresh vertices.
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    Mesh::new(vertices, indices)
 }
 
 /// A consumer that tumbles a cube by moving it, not by rebuilding it.

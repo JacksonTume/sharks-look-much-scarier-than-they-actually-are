@@ -352,11 +352,12 @@ the terrain as a second element of a call that has existed since Slice 1.
   believe the result is worth watching, and that is a question about how the water
   and terrain *look* in motion, not about the stepping.
 
-- **Translucent water** waits for Slice 10 (per-instance material). It needs
-  alpha, which the engine has nowhere to put — `Vertex` is position + RGB and the
-  scene pipeline is `BlendState::REPLACE`. A water-only alpha path would jump the
-  queue for one demo; Slice 10 is where that capability is designed properly, and
-  water picks it up there.
+- **Translucent water** waited for Slice 10 (per-instance material) and **landed
+  there**. It needed alpha, which the engine had nowhere to put — `Vertex` was
+  position + RGB and the scene pipeline was `BlendState::REPLACE`. A water-only
+  alpha path would have jumped the queue for one demo; holding it until a second
+  consumer wanted the same capability is what made it a design instead of a patch,
+  and water picked it up for the cost of one `with_material` call.
 - **Waves, refraction, and reflections** are further out still — see *Beyond*.
 
 ## The second vertical — a `scene` demo (Slices 8–12)
@@ -455,7 +456,7 @@ Slice 9 — the boxes' shading is baked into their corners, so it turns with the
 which is visible the moment one rotates. Both were written down before this slice;
 both are now things you can see rather than things the roadmap claims.
 
-### Slices 9 & 10 — Lighting and material (taken together)
+### Slices 9 & 10 — Lighting and material (taken together) ✅ done
 
 **These were written as two slices and are being built as one.** Both reopen the
 same two structures — `Vertex` and the per-instance buffer — and Slice 10's own
@@ -534,14 +535,15 @@ it is the part `scene.rs` alone would not have demanded:
 - `Vertex` becomes position + **normal** + color (attributes 0–2). Every demo
   that builds a mesh supplies normals; terrain's come from the heightmap gradient
   it already computes for the CPU bake it's deleting.
-- `Instance` grows a `Material` — an RGBA `tint` multiplied into vertex color,
-  plus the one scalar the lighting model needs. Not a material *system*: no
-  shader graph, no pipeline permutations, no textures (see *Beyond*).
-- The instance-step buffer carries the model matrix (locations 2–5, from Slice
-  8), the normal matrix (6–8), and the material (9–10). **Ten instance
-  attributes plus three vertex attributes is thirteen**, against the sixteen
-  WebGL2 guarantees — room, but no longer generous, and worth knowing before
-  Slice 11 wants to add anything.
+- `Instance` grows a `Material` — an RGBA `tint` multiplied into vertex color.
+  Not a material *system*: no shader graph, no pipeline permutations, no textures
+  (see *Beyond*). **No shininess scalar either**, which the slice as drafted
+  expected to need: the lighting model is Lambert, Lambert has no specular term,
+  and a field nothing reads is storage for a promise.
+- The instance-step buffer carries the model matrix (locations 3–6), the normal
+  matrix (7–9), and the tint (10). **Eight instance attributes plus three vertex
+  attributes is eleven**, against the sixteen WebGL2 guarantees — room, but no
+  longer generous, and worth knowing before Slice 11 wants to add anything.
 - A blended pipeline variant, selected per draw-list run, drawn after the opaque
   runs with depth-write off.
 
@@ -550,13 +552,48 @@ instance-buffer work breaks, and `--target wasm32-unknown-unknown --lib` will no
 catch it — `first_instance` compiled and ran perfectly on native. This slice gets
 looked at in an actual browser, not just type-checked.
 
-*Proof:* `scene.rs` shows one uploaded box drawn many times, each instance a
+*Proof:* `scene.rs` shows one uploaded box drawn 25 times, each instance a
 different color, every one lit consistently from a fixed world direction as it
-turns and whatever its scale — and terrain's rivers and lakes go translucent with
-the riverbed visible through them, by setting a material rather than by any
-water-specific engine code. The honest test is terrain: its CPU shading bake is
-**deleted**, and if the landscape looks the same or better without it, lighting
-genuinely moved into the pipeline.
+turns and whatever its scale — still two draw calls and zero vertex uploads per
+frame. Terrain's rivers and lakes are translucent with the drowned ground visible
+through them, set by a `Material` rather than by any water-specific engine code.
+The honest test was terrain's CPU shading bake being **deleted**: a before/after
+capture shows the landscape unchanged, which is the result that says lighting
+genuinely moved into the pipeline rather than being re-tuned to look similar.
+
+**What shipped, and what it cost:**
+
+- **One type and one field.** `Material { tint: [f32; 4] }` and
+  `Instance::material`. Alpha rides the material rather than widening `Vertex` to
+  RGBA, because see-through is a property of a *placement*, not of a mesh's
+  corners — and nothing wants per-corner opacity.
+- **The drafted shininess scalar was never built.** Lambert has no specular term,
+  so the field would have been storage for a number no shader reads. Worth
+  recording as the slice's one deliberate subtraction: it was in the plan, and the
+  plan was wrong in a small way that only writing the shader revealed.
+- **The light is a shader constant, not an API.** No demo asked to move the sun,
+  and a setter with no caller is the speculative build principle 2 forbids. The
+  constants are exactly the ones terrain used to bake by hand, which is what makes
+  the before/after comparison meaningful.
+- **The fused slice paid off twice, not once.** The predicted win was migrating
+  six demos' vertex arrays one time instead of two. The unpredicted one is that
+  fusing is what let alpha be designed *against* the normal work — with both open
+  at once it was obvious that one belonged on the instance and the other on the
+  vertex, where either slice alone would have put both in the same place.
+
+*What it exposed, and it is Slice 11 with evidence attached.* A lit box cannot
+share its eight corners: a corner touches three faces pointing three ways, and a
+vertex carries one normal. Every box in the tree is now written out as 24
+vertices **by hand, in three separate demos** (`cube.rs`, `gallery.rs`,
+`scene.rs`) — the exact duplication Slice 11 predicted would become the wall, now
+sitting in the codebase rather than in this document.
+
+*On the parity risk.* `scene.rs` was checked in a browser and renders correctly —
+but Chrome served it the **WebGPU** backend, so the WebGL2 fallback that Slice 8's
+`first_instance` bug lived in was *not* exercised. The instance buffer now uses 11
+of the 16 attributes WebGL2 guarantees, which is within limits by inspection, and
+the buffer-offset draw is unchanged from Slice 8. That is reasoning, not a test,
+and it is the one claim in this slice that is weaker than the others.
 
 ### Slice 11 — Primitive mesh builders
 
@@ -686,10 +723,11 @@ for a consumer to ask:
   consumer poses itself each frame; that is animation *by the consumer*, and it is
   as far as we go until a demo proves it insufficient.
 - **Water that looks wet** — animated wave normals, refraction, a Fresnel edge,
-  reflections. Named here so the ceiling on Slice 7 is explicit: that slice ships
-  a *flat blue surface*, Slice 10 makes it see-through, and everything past that
-  needs shading the engine does not do. Waves and Fresnel want per-pixel lighting
-  (which Slice 9 starts) plus a time uniform; a reflection wants to render the
+  reflections. Named here so the ceiling is explicit: Slice 7 shipped a *flat blue
+  surface*, Slice 10 made it see-through, and everything past that needs shading
+  the engine does not do. Waves and Fresnel want a normal that varies over time —
+  Slice 9 put per-fragment lighting in the shader, so what is still missing is a
+  time uniform and somewhere to perturb the normal; a reflection wants to render the
   scene twice into an offscreen target, which is the next entry. CPU-animating the
   water mesh is possible from the demo today with zero engine help — worth knowing
   as an escape hatch, but it pays a full mesh upload per frame to fake what a

@@ -86,14 +86,17 @@ impl Scene {
                 vec![
                     Vertex {
                         position: [0.0, 0.5, 0.0],
+                        normal: FACING,
                         color: [1.0, 0.2, 0.3],
                     },
                     Vertex {
                         position: [-0.5, -0.5, 0.0],
+                        normal: FACING,
                         color: [0.2, 1.0, 0.4],
                     },
                     Vertex {
                         position: [0.5, -0.5, 0.0],
+                        normal: FACING,
                         color: [0.3, 0.4, 1.0],
                     },
                 ],
@@ -103,18 +106,22 @@ impl Scene {
                 vec![
                     Vertex {
                         position: [-0.5, -0.5, 0.0],
+                        normal: FACING,
                         color: [1.0, 0.2, 0.3],
                     },
                     Vertex {
                         position: [0.5, -0.5, 0.0],
+                        normal: FACING,
                         color: [0.2, 1.0, 0.4],
                     },
                     Vertex {
                         position: [0.5, 0.5, 0.0],
+                        normal: FACING,
                         color: [0.3, 0.4, 1.0],
                     },
                     Vertex {
                         position: [-0.5, 0.5, 0.0],
+                        normal: FACING,
                         color: [1.0, 1.0, 0.3],
                     },
                 ],
@@ -126,6 +133,10 @@ impl Scene {
         }
     }
 }
+
+/// Which way the flat scenes face: a triangle or quad in the XY plane points
+/// straight down +Z, so every one of its corners shares this normal.
+const FACING: [f32; 3] = [0.0, 0.0, 1.0];
 
 /// The 8 corners of a unit cube, colored by position (matches `examples/cube.rs`).
 const CUBE_CORNERS: [([f32; 3], [f32; 3]); 8] = [
@@ -139,24 +150,36 @@ const CUBE_CORNERS: [([f32; 3], [f32; 3]); 8] = [
     ([-0.5, 0.5, 0.5], [0.0, 1.0, 1.0]),
 ];
 
-/// 12 triangles, each wound CCW from outside so back-face culling keeps the solid.
+/// The six faces as CCW-from-outside quads, each with the way it points. A lit
+/// cube can't share corners — see `examples/cube.rs` for why — so this expands to
+/// 24 vertices.
 #[rustfmt::skip]
-const CUBE_INDICES: [u32; 36] = [
-    4, 5, 6,  4, 6, 7, // front  (+z)
-    0, 2, 1,  0, 3, 2, // back   (-z)
-    1, 2, 6,  1, 6, 5, // right  (+x)
-    0, 4, 7,  0, 7, 3, // left   (-x)
-    3, 7, 6,  3, 6, 2, // top    (+y)
-    0, 1, 5,  0, 5, 4, // bottom (-y)
+const CUBE_FACES: [([usize; 4], [f32; 3]); 6] = [
+    ([4, 5, 6, 7], [ 0.0,  0.0,  1.0]), // front  (+z)
+    ([0, 3, 2, 1], [ 0.0,  0.0, -1.0]), // back   (-z)
+    ([1, 2, 6, 5], [ 1.0,  0.0,  0.0]), // right  (+x)
+    ([0, 4, 7, 3], [-1.0,  0.0,  0.0]), // left   (-x)
+    ([3, 7, 6, 2], [ 0.0,  1.0,  0.0]), // top    (+y)
+    ([0, 1, 5, 4], [ 0.0, -1.0,  0.0]), // bottom (-y)
 ];
 
 /// Build the cube in object space. The spin is a transform (see `Scene::spins`).
 fn cube_mesh() -> Mesh {
-    let vertices = CUBE_CORNERS
-        .iter()
-        .map(|&(position, color)| Vertex { position, color })
-        .collect();
-    Mesh::new(vertices, CUBE_INDICES.to_vec())
+    let mut vertices = Vec::with_capacity(24);
+    let mut indices = Vec::with_capacity(36);
+    for (quad, normal) in CUBE_FACES {
+        let base = vertices.len() as u32;
+        for corner in quad {
+            let (position, color) = CUBE_CORNERS[corner];
+            vertices.push(Vertex {
+                position,
+                normal,
+                color,
+            });
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    Mesh::new(vertices, indices)
 }
 
 // --- Grid (mirrors `examples/grid.rs`; the orbit scene) ----------------------
@@ -190,8 +213,14 @@ fn grid_mesh() -> Mesh {
                 0.42 + (0.93 - 0.42) * t,
                 0.18 + (0.88 - 0.18) * t,
             ];
+            // Central-difference normal, the same derivation `examples/grid.rs`
+            // uses: a heightfield's normal falls out of its two slopes.
+            let dx = (grid_height(x + step, z) - grid_height(x - step, z)) / (2.0 * step);
+            let dz = (grid_height(x, z + step) - grid_height(x, z - step)) / (2.0 * step);
+            let len = (dx * dx + 1.0 + dz * dz).sqrt();
             vertices.push(Vertex {
                 position: [x, y, z],
+                normal: [-dx / len, 1.0 / len, -dz / len],
                 color,
             });
         }
