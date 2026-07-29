@@ -35,7 +35,29 @@
 //! 4. **Thermal relaxation** — shed any slope above the talus angle to its lower
 //!    neighbors (Musgrave 1989), rounding the spiky divides into natural ridges.
 //!
-//! Iterate. More iterations = a more deeply incised, mature landscape.
+//! Iterate. More passes = a more deeply incised, mature landscape.
+//!
+//! ## The water (Slice 7)
+//!
+//! Steps 1 and 2 compute, every single pass, exactly the two fields you need to
+//! *draw* water — and this module used to throw both away when the pass ended:
+//!
+//! - **Lakes** are the Priority-Flood's own fill. `filled - z` is how far the
+//!   flood had to raise a cell to make it drain, which is zero wherever the
+//!   terrain already drains and positive inside every depression. That is a lake,
+//!   and its depth, for free.
+//! - **Rivers** are drainage area. `area` is the number of cells draining through
+//!   this one, so thresholding it *is* the river network — the same quantity the
+//!   incision is proportional to, which is why the rivers you see are exactly the
+//!   ones doing the carving.
+//!
+//! Both now come back out of [`step`] as a [`Water`], and [`survey`] computes them
+//! without eroding anything (for the first frame, before any pass has run).
+//!
+//! Note this is the flow model **animated**, not a droplet particle system — see
+//! the section above for why droplets were tried and abandoned. Nothing about that
+//! ruling changed; the network was always there, once per pass, and the animation
+//! simply shows it deepening rather than discarding every frame but the last.
 //!
 //! Like the rest of the demo this lives **entirely in the consumer** (roadmap
 //! principle 3): the engine never sees a heightmap, only the mesh built from one.
@@ -44,17 +66,37 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 /// Tunable erosion parameters — the knobs the UI exposes.
+///
+/// *How many* passes to run is deliberately **not** in here any more. It used to
+/// be (`iterations`), back when erosion was a batch you asked for all at once;
+/// now that the demo advances one pass per frame, the pass count is a property of
+/// the *animation* rather than of the model, and the demo owns it.
 #[derive(Debug, Clone, Copy)]
 pub struct ErosionParams {
-    /// Number of erosion timesteps. The headline "how eroded" control: more
-    /// iterations cut deeper, more mature valley networks.
-    pub iterations: u32,
     /// Fluvial erodibility `K` (folds in the timestep): how strongly rivers pull
     /// the terrain down toward their outlet each step.
     pub erodibility: f32,
     /// Drainage-area exponent `m` in the stream power `K·Aᵐ` (geomorphology uses
     /// ~0.4–0.6). Higher values concentrate erosion into the big rivers.
     pub m: f32,
+
+    /// Fraction of a lake's depth filled with sediment each pass — **siltation**.
+    ///
+    /// This is the term that makes the water animate rather than sit there, and it
+    /// was added because leaving it out was visibly wrong. Without deposition every
+    /// depression in the noise survives forever, the map stays carved into dozens
+    /// of closed basins, and no basin ever grows a long enough river to incise
+    /// quickly: the landscape barely moved over sixty passes and the terrain looked
+    /// flooded rather than eroded.
+    ///
+    /// Rivers carry sediment and drop it where they slow down, which is exactly
+    /// where they meet standing water. So lakes silt up, spill over, and their
+    /// basins join the network — *drainage integration*, the mechanism Cordonnier
+    /// et al. build their whole model around, and the reason a mature landscape has
+    /// long dendritic trunks rather than a thousand ponds. Turning this up buries
+    /// the lakes fast; turning it to zero freezes them and stalls the erosion,
+    /// which is worth doing once just to see the difference.
+    pub deposition: f32,
 
     /// Whether the thermal (talus relaxation) pass runs each timestep.
     pub thermal: bool,
@@ -68,9 +110,9 @@ pub struct ErosionParams {
 impl Default for ErosionParams {
     fn default() -> Self {
         Self {
-            iterations: 60,
             erodibility: 0.004,
             m: 0.5,
+            deposition: 0.05,
             // Off by default: a strong thermal pass rounds the dendritic detail
             // back into blobs. It's available as a finishing touch.
             thermal: false,
@@ -80,48 +122,145 @@ impl Default for ErosionParams {
     }
 }
 
-/// Erode `heights` (an `n × n` grid, modified in place) under `params`: a small
-/// landscape-evolution loop of flow-routed stream-power incision plus thermal
-/// relaxation. See the module docs for the model.
-pub fn erode(heights: &mut [f32], n: usize, params: &ErosionParams) {
-    if n < 3 {
-        return;
-    }
-    let count = n * n;
-    let mut area = vec![0.0f32; count];
+/// The standing water and river network riding on the terrain — the byproduct of
+/// flow routing that the model has always computed and that Slice 7 finally draws.
+///
+/// Both fields are `n × n`, row-major, indexed exactly like the heightmap.
+#[derive(Debug, Clone, Default)]
+pub struct Water {
+    /// Standing-water depth per cell: `filled - z`, how far the Priority-Flood had
+    /// to raise this cell to give it somewhere to drain. Zero wherever the terrain
+    /// drains freely; positive inside every depression, where it *is* the lake.
+    pub depth: Vec<f32>,
+    /// Drainage area per cell: how many cells' water passes through this one,
+    /// itself included. `1.0` on a ridge top, thousands in a trunk river — so a
+    /// threshold on this is the river network.
+    pub area: Vec<f32>,
+}
 
-    for _ in 0..params.iterations {
-        let flow = flow_route(heights, n);
-
-        // Drainage area: every cell contributes one unit of area to itself, then
-        // pushes its total down to its receiver (reverse topological order).
-        area.iter_mut().for_each(|a| *a = 1.0);
-        for &c in flow.order.iter().rev() {
-            let r = flow.receiver[c];
-            if r != c {
-                area[r] += area[c];
-            }
-        }
-
-        // Implicit stream-power incision, downstream-first so each receiver is
-        // already at its new height when we solve the cell above it:
-        //   z'[c] = (z[c] + f·z'[r]) / (1 + f),   f = K·Aᵐ / L.
-        for &c in &flow.order {
-            let r = flow.receiver[c];
-            if r == c {
-                continue; // outlet / fixed base level
-            }
-            let f = params.erodibility * area[c].powf(params.m) / flow.dist[c];
-            let z = (heights[c] + f * heights[r]) / (1.0 + f);
-            // Never incise below the receiver (keeps slopes downhill).
-            heights[c] = z.max(heights[r]);
-        }
-
-        if params.thermal {
-            thermal_sweep(heights, n, params);
+impl Water {
+    /// A dry `count`-cell grid — what a degenerate (`n < 3`) grid reports.
+    fn empty(count: usize) -> Self {
+        Self {
+            depth: vec![0.0; count],
+            area: vec![1.0; count],
         }
     }
 }
+
+/// Advance `heights` (an `n × n` grid, modified in place) by **one** timestep of
+/// flow-routed stream-power incision plus optional thermal relaxation, and hand
+/// back the [`Water`] that drove it. See the module docs for the model.
+///
+/// One pass rather than a batch loop is the whole of this function's Slice 7
+/// change: the caller advances a pass per frame, so the landscape carves itself
+/// on screen instead of teleporting from noise to finished in a single hitch.
+pub fn step(heights: &mut [f32], n: usize, params: &ErosionParams) -> Water {
+    if n < 3 {
+        return Water::empty(heights.len());
+    }
+    let (flow, water) = analyze(heights, n);
+
+    // Implicit stream-power incision, downstream-first so each receiver is
+    // already at its new height when we solve the cell above it:
+    //   z'[c] = (z[c] + f·z'[r]) / (1 + f),   f = K·Aᵐ / L.
+    for &c in &flow.order {
+        let r = flow.receiver[c];
+        if r == c {
+            continue; // outlet / fixed base level
+        }
+        // Two cells are left alone, and the reason is the same for both: they are
+        // under water, or they are being asked to flow *uphill* through a breach.
+        //
+        // `receiver` is downhill on the **filled** surface, which inside a basin
+        // means uphill in the real terrain — the flood reaches a pit from the rim
+        // above it. Applying the implicit update there does not incise the pit, it
+        // *raises* it toward the rim: one pass and every depression on the map has
+        // been packed with rock and can never hold water again. That is why this
+        // demo had no lakes to draw. Skipping those cells keeps depressions, and
+        // "no fluvial incision under standing water" is the honest reading anyway
+        // — a lake bed has no stream running over it to cut with.
+        //
+        // What still erodes is the lake's *outlet*, which is dry and drains
+        // downhill like anything else. So spillways cut down over time and lakes
+        // slowly drain themselves, which is the nicest thing in the animation and
+        // came out of the model rather than being put in by hand.
+        if water.depth[c] > MIN_POND || heights[r] >= heights[c] {
+            continue;
+        }
+        let f = params.erodibility * water.area[c].powf(params.m) / flow.dist[c];
+        let z = (heights[c] + f * heights[r]) / (1.0 + f);
+        // Never incise below the receiver (keeps slopes downhill).
+        heights[c] = z.max(heights[r]);
+    }
+
+    // Siltation: rivers drop their load where they meet standing water, so every
+    // lake loses a fraction of its depth to sediment each pass. Lakes shrink from
+    // the shallows inward, spill, and hand their basin to the drainage network.
+    // See [`ErosionParams::deposition`] for why this term is load-bearing.
+    let fill = params.deposition.clamp(0.0, 1.0);
+    if fill > 0.0 {
+        for (h, &d) in heights.iter_mut().zip(&water.depth) {
+            if d > MIN_POND {
+                *h += fill * d;
+            }
+        }
+    }
+
+    if params.thermal {
+        thermal_sweep(heights, n, params);
+    }
+
+    water
+}
+
+/// Compute the [`Water`] on `heights` **without eroding anything**.
+///
+/// This is what the first frame draws: at pass zero the terrain is raw noise that
+/// has never been routed, and it still has lakes and rivers on it — you should be
+/// able to see them before pressing play.
+pub fn survey(heights: &[f32], n: usize) -> Water {
+    if n < 3 {
+        return Water::empty(heights.len());
+    }
+    analyze(heights, n).1
+}
+
+/// The shared first half of a pass: route the flow, accumulate drainage area, and
+/// read the standing water off the filled surface.
+fn analyze(z: &[f32], n: usize) -> (Flow, Water) {
+    let flow = flow_route(z, n);
+
+    // Drainage area: every cell contributes one unit of area to itself, then
+    // pushes its total down to its receiver (reverse topological order).
+    let mut area = vec![1.0f32; z.len()];
+    for &c in flow.order.iter().rev() {
+        let r = flow.receiver[c];
+        if r != c {
+            area[r] += area[c];
+        }
+    }
+
+    // How far the flood had to lift each cell to drain it — zero almost
+    // everywhere, and a lake wherever it isn't.
+    let depth = flow
+        .filled
+        .iter()
+        .zip(z)
+        .map(|(f, h)| (f - h).max(0.0))
+        .collect();
+
+    (flow, Water { depth, area })
+}
+
+/// Depth below which "standing water" is really just accumulated flood ε.
+///
+/// The Priority-Flood raises each cell a hair above the one it was reached from,
+/// so a long dead-flat run picks up a nonzero depth that is an artifact of the
+/// algorithm and not a pond. Heights are normalized to `[0, 1]`, so this is a
+/// thousandth of the terrain's full relief — far below anything visible, and a
+/// thousand cells of ε before a false positive.
+pub const MIN_POND: f32 = 1.0e-3;
 
 // --- Thermal erosion -------------------------------------------------------
 
@@ -174,6 +313,10 @@ struct Flow {
     order: Vec<usize>,
     /// Distance from each cell to its receiver (1 orthogonal, √2 diagonal).
     dist: Vec<f32>,
+    /// The **filled** surface: the terrain with every depression flooded to its
+    /// spill point. This used to be a local the flood dropped on the way out; it
+    /// is kept now because `filled - z` is the standing water (see [`Water`]).
+    filled: Vec<f32>,
 }
 
 /// A min-heap node ordered by (filled) elevation, with a deterministic index
@@ -275,5 +418,6 @@ fn flow_route(z: &[f32], n: usize) -> Flow {
         receiver,
         order,
         dist,
+        filled,
     }
 }

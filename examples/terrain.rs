@@ -6,6 +6,16 @@
 //! 1. **Base shape** — a fractal Perlin-noise heightmap ([`heightmap`]).
 //! 2. **Erosion** — iterative hydro-thermal erosion carved on top
 //!    ([`erosion`]), the layer that turns noise into something terrain-like.
+//! 3. **Water** — the lakes and rivers that erosion produces, drawn as a second
+//!    mesh beside the terrain.
+//!
+//! **It runs while you watch.** Erosion used to be a batch: sixty passes fired in
+//! one ~100ms hitch when you let go of a slider, so the terrain jumped from noise
+//! to finished with nothing in between. Now a pass is spent off a clock and the
+//! mesh is rebuilt every frame, so the landscape carves itself on screen — and
+//! since the water riding on it is redrawn with it, you can watch rain collect
+//! into lakes, silt them up, spill them over, and leave a river network behind.
+//! That whole arc is a byproduct of the model; see [`erosion::Water`].
 //!
 //! This is the payoff demo for the project's thesis: *a developer writes their
 //! algorithm and a few engine calls, and never touches `wgpu`/`winit`.*
@@ -19,8 +29,11 @@
 //! - hands us a frame delta ([`Renderer::dt`]) for the FPS readout.
 //!
 //! Controls: **drag the left mouse button** over the 3D view to orbit, **scroll**
-//! to zoom, arrow keys also orbit. The panel on the left edits every parameter
-//! live; moving a slider regenerates the terrain. Toggle **wireframe** to inspect
+//! to zoom, arrow keys also orbit. **pause** and **replay** run the simulation,
+//! *passes* is how far it runs (drag it back to rewind), and *speed* is how fast
+//! you watch. The erosion knobs take effect **live** — turn up *erodibility*
+//! mid-run and the carving responds under your hand — while base-shape and grid
+//! changes replay from new noise once you let go. Toggle **wireframe** to inspect
 //! the underlying grid, **click a section heading** to collapse it, and **reset
 //! all** at the bottom of the panel throws every parameter back to its default.
 //!
@@ -151,6 +164,45 @@ fn log_slider(ui: &mut Ui, label: &str, value: &mut f32, min: f32, max: f32) -> 
 const HALF: f32 = 2.5;
 /// Vertical scale: normalized `[0, 1]` heights map into `[0, VHEIGHT]` world units.
 const VHEIGHT: f32 = 1.3;
+
+/// Map a normalized height to world units.
+///
+/// **Fixed**, not fitted to the current min/max — which is a Slice 7 change and a
+/// load-bearing one. Renormalizing per rebuild was invisible when rebuilds were
+/// rare, but now that the terrain is rebuilt every frame it would rescale every
+/// frame, and the whole landscape would breathe in and out while you watched it.
+/// Worse, it would hide the thing you are trying to see: erosion *lowers* terrain,
+/// and a range that keeps rescaling to fit turns "the mountains are wearing down"
+/// into "nothing is happening." The base heightmap already arrives normalized to
+/// `[0, 1]`, so a fixed scale is also simply the honest one.
+fn disp(h: f32) -> f32 {
+    h.clamp(0.0, 1.0) * VHEIGHT
+}
+
+/// How far the water surface floats above the terrain it covers, in world units.
+/// Enough to beat depth-buffer precision, far below the ~0.04 grid spacing.
+const WATER_LIFT: f32 = 0.0025;
+/// Where the pass-count slider tops out, and where it starts.
+///
+/// The default is long enough to see the whole arc rather than a slice of it:
+/// lakes appear in the raw noise, silt up, spill, and are gone by roughly pass
+/// 120, and stopping at the old 60 cut that story off halfway.
+const PASSES_MAX: f32 = 400.0;
+const PASSES_DEFAULT: u32 = 150;
+/// Default drainage area (in cells) at which a channel is drawn as a river.
+const RIVER_AREA_DEFAULT: f32 = 60.0;
+/// Animation pace, in erosion passes per second, and its slider bounds. Twelve a
+/// second runs the default sixty in five seconds — long enough to watch a valley
+/// open, short enough that you don't wait for it.
+const SPEED_DEFAULT: f32 = 20.0;
+const SPEED_MIN: f32 = 1.0;
+const SPEED_MAX: f32 = 60.0;
+/// Most passes allowed in a single frame, however far behind the clock we are.
+///
+/// Without this, a frame that takes longer than a pass asks for more passes next
+/// frame, which takes longer still — the classic accumulator spiral. Falling
+/// behind should make the animation run slow, never make it stop responding.
+const MAX_PASSES_PER_FRAME: u32 = 4;
 /// How tall the panel's scrolling body is allowed to get, in UI points.
 ///
 /// A constant rather than "whatever fits the window": a panel is anchored to a
@@ -196,15 +248,42 @@ struct TerrainDemo {
     params: NoiseParams,
     /// Layer 2 (erosion) parameters.
     erosion: ErosionParams,
-    /// The Perlin base heightmap, before erosion. Kept so the erosion sliders can
-    /// re-erode without re-running the (separate) noise generation.
+    /// The Perlin base heightmap, before erosion. Kept so a restart can replay the
+    /// animation from raw noise without re-running the (separate) noise generation.
     base: Vec<f32>,
-    /// The eroded heights actually rendered (`n * n`).
+    /// The eroded heights actually rendered (`n * n`), mutated one pass at a time.
     heights: Vec<f32>,
+    /// The water from the most recent pass — lakes and rivers, ready to draw.
+    water: erosion::Water,
     /// Grid side length.
     n: usize,
     /// Resolution slider value, snapped to a multiple of 8.
     res: f32,
+
+    /// How many erosion passes have actually been applied to `heights`.
+    passes_done: u32,
+    /// How many the animation is working toward. Dragging this forward lets the
+    /// simulation run on; dragging it back rewinds by replaying from the noise.
+    passes_target: u32,
+    /// Whether the animation is advancing. Pausing leaves the landscape mid-carve.
+    playing: bool,
+    /// Erosion passes per **second** — the pace of the animation, not of the model.
+    ///
+    /// The first build of this slice advanced one pass per frame, which sounded
+    /// right and was useless: 60 passes at 75fps is over in eight hundred
+    /// milliseconds, so the landscape still teleported, just via a blur. A pass is
+    /// a unit of geology, not a unit of refresh rate, and how fast you want to
+    /// watch it is a separate question from how fast the machine can draw.
+    speed: f32,
+    /// Leftover seconds not yet spent on a pass, carried to the next frame.
+    accumulator: f32,
+
+    /// Draw the water surface at all.
+    show_water: bool,
+    /// Drainage area (in cells) above which a channel is drawn as a river. The one
+    /// purely *visual* water knob: it changes what counts as a river, never what
+    /// the erosion does.
+    river_area: f32,
 
     /// Draw the terrain as a wireframe instead of shaded triangles.
     wireframe: bool,
@@ -215,12 +294,15 @@ struct TerrainDemo {
     /// panels, `log_slider` included.
     theme: Theme,
 
-    /// Deferred-rebuild flags. Erosion costs ~100ms, so rather than recompute on
-    /// every slider tick we mark what changed and apply it once the drag ends (the
-    /// mouse button is released). `base` implies a full noise regen + re-erode;
-    /// `erode` re-runs only the erosion layer on the cached base.
+    /// Deferred-rebuild flags, applied once the drag ends (the mouse button comes
+    /// up) so a slider being dragged doesn't throw the run away on every frame of
+    /// it. `base` regenerates the noise; `restart` replays from the cached base.
+    ///
+    /// Erosion parameters need *neither*: they only affect passes not yet run, so
+    /// they take effect live — turn up erodibility mid-run and watch it bite
+    /// harder. Rewinding the pass count is the one thing that still has to replay.
     pending_base: bool,
-    pending_erode: bool,
+    pending_restart: bool,
 
     /// Orbit camera state (azimuth, elevation, range).
     yaw: f32,
@@ -242,35 +324,68 @@ impl TerrainDemo {
             erosion,
             base: hm.heights,
             heights: Vec::new(),
+            water: erosion::Water::default(),
             n: hm.n,
             res: n as f32,
+            passes_done: 0,
+            passes_target: PASSES_DEFAULT,
+            // Running from the first frame: the demo opens on raw noise and starts
+            // carving immediately, because that is the thing it is here to show.
+            playing: true,
+            speed: SPEED_DEFAULT,
+            accumulator: 0.0,
+            show_water: true,
+            river_area: RIVER_AREA_DEFAULT,
             wireframe: false,
             theme: Theme::dark(),
             pending_base: false,
-            pending_erode: false,
+            pending_restart: false,
             yaw: 0.7,
             pitch: 0.62,
             distance: 6.5,
             fps: 60.0,
         };
-        demo.apply_erosion();
+        demo.restart();
         demo
     }
 
     /// Regenerate the Perlin base heightmap (layer 1) at the current parameters
-    /// and resolution, then re-erode it. Called when a noise/grid control changes.
+    /// and resolution, then rewind the animation to pass zero.
     fn regenerate_base(&mut self) {
         let hm = Heightmap::generate(self.n, &self.params);
         self.n = hm.n;
         self.base = hm.heights;
-        self.apply_erosion();
+        self.restart();
     }
 
-    /// Re-run the erosion layer (layer 2) on the cached base heightmap. Called when
-    /// an erosion control changes — no need to regenerate the noise.
-    fn apply_erosion(&mut self) {
+    /// Rewind to the uneroded base heightmap and replay from pass zero.
+    ///
+    /// The water is surveyed rather than left empty: raw Perlin noise is full of
+    /// depressions, so there are lakes to see *before* the first pass runs.
+    fn restart(&mut self) {
         self.heights = self.base.clone();
-        erosion::erode(&mut self.heights, self.n, &self.erosion);
+        self.passes_done = 0;
+        self.water = erosion::survey(&self.heights, self.n);
+    }
+
+    /// Advance the simulation one pass, keeping the water it produced. This is the
+    /// animation: called once per frame while playing, until the target is reached.
+    fn advance(&mut self) {
+        self.water = erosion::step(&mut self.heights, self.n, &self.erosion);
+        self.passes_done += 1;
+    }
+
+    /// Upload the current terrain, and the water on it, as the engine's draw-list.
+    ///
+    /// Two meshes rather than one, which the engine has supported since Slice 1 and
+    /// nothing had needed until now — `set_meshes` takes a slice, and this is the
+    /// first consumer to hand it more than a single element.
+    fn upload(&self, renderer: &mut Renderer) {
+        let mut meshes = vec![self.build_mesh()];
+        if let Some(water) = self.build_water_mesh() {
+            meshes.push(water);
+        }
+        renderer.set_meshes(&meshes);
     }
 
     /// Build the renderable mesh from the current heights: an `n × n` grid with a
@@ -279,16 +394,10 @@ impl TerrainDemo {
     /// in the demo, KISS).
     fn build_mesh(&self) -> Mesh {
         let n = self.n;
-        // Renormalize to [0, 1] before display: erosion shifts the overall range,
-        // and this keeps the terrain framed and the palette stops meaningful.
-        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
-        for &h in &self.heights {
-            lo = lo.min(h);
-            hi = hi.max(h);
-        }
-        let inv_range = 1.0 / (hi - lo).max(1e-6);
-        // Displayed height per cell, in world units.
-        let disp = |i: usize| (self.heights[i] - lo) * inv_range * VHEIGHT;
+        // Displayed height per cell, in world units, on the fixed scale — see
+        // `disp`. Erosion lowering the terrain is now something you can *see*
+        // rather than something a refitted range quietly cancels out.
+        let disp = |i: usize| disp(self.heights[i]);
 
         let step = (2.0 * HALF) / (n as f32 - 1.0);
         let cell_world = step; // horizontal spacing for slope/normal estimates
@@ -344,17 +453,96 @@ impl TerrainDemo {
         Mesh::new(vertices, indices)
     }
 
-    /// Lay out the parameter panel and HUD. Returns `(regen_base, reerode,
-    /// wants_pointer)`: whether a base-shape/grid control changed (so we
-    /// regenerate the noise *and* re-erode), whether only an erosion control
-    /// changed (so we just re-erode the cached base), and whether the pointer is
-    /// over the panel (so the camera ignores the drag).
-    fn build_ui(&mut self, renderer: &mut Renderer) -> (bool, bool, bool) {
+    /// Build the water surface: lakes where the flood is standing, rivers where
+    /// enough drainage area has collected. `None` when there is nothing wet to
+    /// draw (or the toggle is off), so the draw-list just holds the terrain.
+    ///
+    /// Both fields come straight out of the erosion pass — see [`erosion::Water`].
+    /// Nothing here simulates anything; this function only decides what the model
+    /// already computed should *look* like.
+    fn build_water_mesh(&self) -> Option<Mesh> {
+        let n = self.n;
+        if !self.show_water || self.water.depth.len() != n * n {
+            return None;
+        }
+
+        // Classify every grid point once: dry, river, or lake (and how deep).
+        let wet = |i: usize| -> Option<(f32, bool)> {
+            let depth = self.water.depth[i];
+            if depth > erosion::MIN_POND {
+                // A lake sits at the flooded surface: terrain plus its own depth.
+                Some((disp(self.heights[i] + depth), true))
+            } else if self.water.area[i] >= self.river_area {
+                // A river is a skin on the terrain — it has no depth in this model,
+                // it is just where the water is.
+                Some((disp(self.heights[i]), false))
+            } else {
+                None
+            }
+        };
+
+        let step = (2.0 * HALF) / (n as f32 - 1.0);
+        // A flat surface with an up normal, lit by the same light as the terrain,
+        // so water and land agree about where the sun is.
+        let shade = 0.35 + 0.65 * dot3([0.0, 1.0, 0.0], normalize3([0.45, 0.85, 0.35]));
+
+        let mut vertices: Vec<Vertex> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+
+        for y in 0..n - 1 {
+            for x in 0..n - 1 {
+                let corners = [(x, y), (x, y + 1), (x + 1, y + 1), (x + 1, y)];
+                let states = corners.map(|(cx, cy)| wet(cy * n + cx));
+                // Draw a cell if *any* corner is wet, not all four. A river is one
+                // cell wide, so an all-wet test would find no complete quad along
+                // it and render nothing at all — the whole network would vanish and
+                // only lakes would show. Spilling onto the dry corners costs half a
+                // cell of width and tucks the bank into the ground.
+                if states.iter().all(Option::is_none) {
+                    continue;
+                }
+
+                let base = vertices.len() as u32;
+                for (k, (cx, cy)) in corners.iter().enumerate() {
+                    let i = cy * n + cx;
+                    let (h, lake) = match states[k] {
+                        // Dry corner: sit on the terrain so the edge meets the bank.
+                        None => (disp(self.heights[i]), false),
+                        Some(state) => state,
+                    };
+                    let color = water_color(if lake { self.water.depth[i] } else { 0.0 }, shade);
+                    vertices.push(Vertex {
+                        position: [
+                            -HALF + *cx as f32 * step,
+                            h + WATER_LIFT,
+                            -HALF + *cy as f32 * step,
+                        ],
+                        color,
+                    });
+                }
+                // Same counter-clockwise-from-above winding as the terrain.
+                indices.extend_from_slice(&[
+                    base,
+                    base + 1,
+                    base + 3,
+                    base + 3,
+                    base + 1,
+                    base + 2,
+                ]);
+            }
+        }
+
+        (!indices.is_empty()).then(|| Mesh::new(vertices, indices))
+    }
+
+    /// Lay out the parameter panel and HUD, returning what it asked for.
+    fn build_ui(&mut self, renderer: &mut Renderer) -> UiOutcome {
         let fps = self.fps;
         let n = self.n;
         let theme = self.theme;
+        let done = self.passes_done;
 
-        let pending = self.pending_base || self.pending_erode;
+        let pending = self.pending_base || self.pending_restart;
 
         let mut ui = renderer.ui();
         // One line, at the top of the frame, and the whole UI is styled. Nothing
@@ -362,7 +550,7 @@ impl TerrainDemo {
         ui.set_theme(theme);
 
         // The parameter panel, top-left.
-        let (mut base, erode, new_seed, preset, reset) =
+        let (mut base, restart, rebuild, new_seed, preset, reset) =
             ui.panel(Anchor::TopLeft, theme.panel_w, |ui| {
                 ui.title("Terrain");
                 if pending {
@@ -422,53 +610,93 @@ impl TerrainDemo {
                     });
                     ui.separator();
 
-                    // --- Layer 2: erosion ---
-                    let mut erode = false;
+                    // --- Layer 2: erosion, now a running simulation ---
+                    //
+                    // None of these knobs sets a flag any more. A pass that has
+                    // not been run yet cannot care that erodibility just changed,
+                    // so erosion parameters simply take effect from the next one
+                    // — drag `erodibility` while it runs and the carving responds
+                    // under your hand. Only *rewinding* has to replay.
+                    let mut restart = false;
                     ui.section("Fluvial erosion", |ui| {
-                        let mut iters = self.erosion.iterations as f32;
+                        ui.columns(2, |ui, i| {
+                            if i == 0 {
+                                let label = if self.playing { "pause" } else { "play" };
+                                if ui.button(label).size(Size::Sm).show().clicked {
+                                    self.playing = !self.playing;
+                                }
+                            } else if ui
+                                .button("replay")
+                                .variant(Variant::Secondary)
+                                .size(Size::Sm)
+                                .show()
+                                .clicked
+                            {
+                                restart = true;
+                            }
+                        });
+                        // No longer a batch size: this is how far the animation
+                        // is allowed to run. Drag it forward and the simulation
+                        // carries on from where it is; drag it back and it
+                        // replays, so the slider scrubs a timeline.
+                        let mut target = self.passes_target as f32;
                         if ui
-                            .slider("passes", &mut iters, 0.0, 120.0)
+                            .slider("passes", &mut target, 0.0, PASSES_MAX)
                             .decimals(0)
                             .show()
                             .changed
                         {
-                            self.erosion.iterations = iters.round() as u32;
-                            erode = true;
+                            self.passes_target = target.round() as u32;
                         }
+                        ui.slider("speed (passes/s)", &mut self.speed, SPEED_MIN, SPEED_MAX)
+                            .decimals(0)
+                            .show();
+                        ui.label_value("elapsed", &format!("{done} / {}", self.passes_target));
                         // The demo's own widget: erodibility is only tunable on
                         // a log track.
-                        erode |= log_slider(
+                        log_slider(
                             ui,
                             "erodibility",
                             &mut self.erosion.erodibility,
                             1.0e-5,
                             6.0e-3,
-                        )
-                        .changed;
-                        erode |= ui
-                            .slider("area exponent m", &mut self.erosion.m, 0.2, 1.0)
-                            .show()
-                            .changed;
+                        );
+                        ui.slider("area exponent m", &mut self.erosion.m, 0.2, 1.0)
+                            .show();
+                        // Zero this and watch the landscape stall — see
+                        // `ErosionParams::deposition`.
+                        ui.slider("lake siltation", &mut self.erosion.deposition, 0.0, 0.3)
+                            .show();
                     });
 
                     ui.section("Thermal erosion", |ui| {
-                        erode |= ui
-                            .checkbox("enable talus", &mut self.erosion.thermal)
-                            .changed;
+                        ui.checkbox("enable talus", &mut self.erosion.thermal);
                         if self.erosion.thermal {
                             // Indented because these belong to the toggle above
                             // them — which used to be faked with two leading
                             // spaces inside the label string.
-                            erode |= ui.indent(|ui| {
-                                let talus = ui
-                                    .slider("talus (slope)", &mut self.erosion.talus, 0.3, 4.0)
-                                    .show()
-                                    .changed;
-                                let rate = ui
-                                    .slider("rate", &mut self.erosion.thermal_rate, 0.0, 0.5)
-                                    .show()
-                                    .changed;
-                                talus || rate
+                            ui.indent(|ui| {
+                                ui.slider("talus (slope)", &mut self.erosion.talus, 0.3, 4.0)
+                                    .show();
+                                ui.slider("rate", &mut self.erosion.thermal_rate, 0.0, 0.5)
+                                    .show();
+                            });
+                        }
+                    });
+                    ui.separator();
+
+                    // --- The water riding on it ---
+                    //
+                    // Display only. Both controls change what is drawn, never what
+                    // is simulated — the lakes and rivers exist in the model
+                    // whether or not this section is showing them.
+                    let mut rebuild = false;
+                    ui.section("Water", |ui| {
+                        rebuild |= ui.checkbox("show water", &mut self.show_water).changed;
+                        if self.show_water {
+                            rebuild |= ui.indent(|ui| {
+                                log_slider(ui, "river threshold", &mut self.river_area, 4.0, 4000.0)
+                                    .changed
                             });
                         }
                     });
@@ -496,7 +724,7 @@ impl TerrainDemo {
                         .show()
                         .clicked;
 
-                    (base, erode, new_seed, preset, reset)
+                    (base, restart, rebuild, new_seed, preset, reset)
                 })
             });
 
@@ -512,6 +740,10 @@ impl TerrainDemo {
         ui.panel(Anchor::TopRight, HUD_W, |ui| {
             ui.label_value("fps", &format!("{fps:.0}"));
             ui.label_value("grid", &format!("{n}x{n}"));
+            // The pass count belongs up here beside the frame rate now that it
+            // ticks: the two together are how you tell "the simulation is slow"
+            // apart from "the simulation has finished."
+            ui.label_value("pass", &format!("{done}"));
             ui.checkbox("wireframe", &mut self.wireframe);
             ui.checkbox("light", &mut light);
         });
@@ -525,6 +757,10 @@ impl TerrainDemo {
             self.params = NoiseParams::default();
             self.erosion = ErosionParams::default();
             self.res = RES_DEFAULT as f32;
+            self.passes_target = PASSES_DEFAULT;
+            self.show_water = true;
+            self.river_area = RIVER_AREA_DEFAULT;
+            self.playing = true;
             base = true;
         }
         if let Some(i) = preset {
@@ -538,7 +774,12 @@ impl TerrainDemo {
             self.params.seed = self.params.seed.wrapping_add(1);
             base = true;
         }
-        (base, erode, wants_pointer)
+        UiOutcome {
+            regen_base: base,
+            restart,
+            rebuild,
+            wants_pointer,
+        }
     }
 
     /// Orbit the camera from input (unless the pointer is over the UI panel).
@@ -595,8 +836,7 @@ impl TerrainDemo {
 
 impl Application for TerrainDemo {
     fn init(&mut self, renderer: &mut Renderer) {
-        let mesh = self.build_mesh();
-        renderer.set_meshes(&[mesh]);
+        self.upload(renderer);
     }
 
     fn update(&mut self, renderer: &mut Renderer) {
@@ -606,9 +846,9 @@ impl Application for TerrainDemo {
             self.fps = self.fps * 0.9 + (1.0 / dt) * 0.1;
         }
 
-        let (regen_base, reerode, wants_pointer) = self.build_ui(renderer);
-        self.pending_base |= regen_base;
-        self.pending_erode |= reerode;
+        let outcome = self.build_ui(renderer);
+        self.pending_base |= outcome.regen_base;
+        self.pending_restart |= outcome.restart;
 
         // Snap the resolution slider; a resolution change needs a full rebuild.
         let target_n = ((self.res / 8.0).round() as usize * 8).clamp(32, 256);
@@ -617,21 +857,59 @@ impl Application for TerrainDemo {
             self.pending_base = true;
         }
 
-        // Debounce: erosion costs ~100ms, so apply a pending rebuild only once the
-        // user finishes dragging (left button up). A base/grid change regenerates
-        // the noise and re-erodes; an erosion-only change re-runs just the erosion
-        // layer on the cached base.
+        // Rewinding past what has already been applied is the one thing that can't
+        // be done incrementally — passes only move forward — so it replays from the
+        // noise. Debounced with everything else so dragging the slider left doesn't
+        // restart on every frame of the drag and leave you stuck at pass zero.
         let dragging = renderer.input().is_mouse_held(MouseButton::Left);
-        if !dragging && (self.pending_base || self.pending_erode) {
+        if self.passes_target < self.passes_done {
+            self.pending_restart = true;
+        }
+
+        let mut dirty = outcome.rebuild;
+        if !dragging && (self.pending_base || self.pending_restart) {
             if self.pending_base {
                 self.n = target_n;
                 self.regenerate_base();
             } else {
-                self.apply_erosion();
+                self.restart();
             }
-            renderer.set_meshes(&[self.build_mesh()]);
             self.pending_base = false;
-            self.pending_erode = false;
+            self.pending_restart = false;
+            dirty = true;
+        }
+
+        // **The animation.** Passes are spent off a clock, not off the frame rate,
+        // and whatever the terrain looks like afterwards is uploaded as it is — no
+        // batching, no debounce, nothing waiting for the mouse. This is the
+        // difference between watching a landscape carve itself and being handed the
+        // finished article.
+        //
+        // Re-uploading a whole mesh every frame is exactly what `cube.rs` has done
+        // since Slice 1, so the engine needs nothing new for it.
+        if self.playing && self.passes_done < self.passes_target {
+            let seconds_per_pass = 1.0 / self.speed.max(SPEED_MIN);
+            self.accumulator += dt.min(0.25); // ignore a hitch or a dragged window
+            let mut spent = 0;
+            while self.accumulator >= seconds_per_pass
+                && spent < MAX_PASSES_PER_FRAME
+                && self.passes_done < self.passes_target
+            {
+                self.advance();
+                self.accumulator -= seconds_per_pass;
+                spent += 1;
+                dirty = true;
+            }
+            if spent == MAX_PASSES_PER_FRAME {
+                // Behind the clock and capped: drop the debt rather than chase it.
+                self.accumulator = 0.0;
+            }
+        } else {
+            self.accumulator = 0.0;
+        }
+
+        if dirty {
+            self.upload(renderer);
         }
 
         renderer.set_render_mode(if self.wireframe {
@@ -640,8 +918,25 @@ impl Application for TerrainDemo {
             RenderMode::Solid
         });
 
-        self.drive_camera(renderer, wants_pointer);
+        self.drive_camera(renderer, outcome.wants_pointer);
     }
+}
+
+/// What one frame of UI asked the demo to do.
+///
+/// A struct rather than the tuple this used to be: at three booleans it was
+/// already hard to read at the call site, and the fourth would have made it a
+/// puzzle.
+struct UiOutcome {
+    /// A base-shape or grid control changed — regenerate the noise (and replay).
+    regen_base: bool,
+    /// Replay the animation from pass zero on the existing base heightmap.
+    restart: bool,
+    /// A display-only control changed, so the meshes need rebuilding even though
+    /// the simulation itself hasn't moved.
+    rebuild: bool,
+    /// The pointer is over a panel, so the camera should ignore this drag.
+    wants_pointer: bool,
 }
 
 /// Height/slope color palette: green lowlands → tan slopes → gray rock → snow,
@@ -676,6 +971,28 @@ fn palette(t: f32, slope: f32) -> [f32; 3] {
         color[0] + (rock[0] - color[0]) * s,
         color[1] + (rock[1] - color[1]) * s,
         color[2] + (rock[2] - color[2]) * s,
+    ]
+}
+
+/// Water color: a river shallow and bright, a lake darkening with its own depth.
+///
+/// Opaque, which is the ceiling on this slice — the engine's `Vertex` is
+/// position + RGB and the scene pipeline is `BlendState::REPLACE`, so there is
+/// nowhere to put an alpha even if we wanted one. Depth-darkening is the honest
+/// substitute available today: it reads as *water*, and it makes a deep lake look
+/// deep, without anything see-through. Translucency arrives with Slice 10's
+/// per-instance material, and this is the function that will lose most of its job
+/// when it does.
+fn water_color(depth: f32, shade: f32) -> [f32; 3] {
+    const SHALLOW: [f32; 3] = [0.29, 0.55, 0.72];
+    const DEEP: [f32; 3] = [0.06, 0.17, 0.36];
+    // Saturates around a tenth of the terrain's full relief — past that a lake is
+    // simply "deep" and gets no darker.
+    let t = (depth / 0.1).clamp(0.0, 1.0);
+    [
+        (SHALLOW[0] + (DEEP[0] - SHALLOW[0]) * t) * shade,
+        (SHALLOW[1] + (DEEP[1] - SHALLOW[1]) * t) * shade,
+        (SHALLOW[2] + (DEEP[2] - SHALLOW[2]) * t) * shade,
     ]
 }
 
