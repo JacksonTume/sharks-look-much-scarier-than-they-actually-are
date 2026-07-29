@@ -80,6 +80,23 @@ impl Rect {
     pub fn translate(&self, dx: f32, dy: f32) -> Rect {
         Rect::new(self.x + dx, self.y + dy, self.w, self.h)
     }
+
+    /// The same rectangle scaled by `factor` **about its centre**, so it grows
+    /// and shrinks in place rather than from its top-left corner.
+    ///
+    /// Which is the only sensible way to animate something appearing inside a
+    /// well: scaled from the corner, a checkbox tick would slide diagonally into
+    /// position instead of blooming where it belongs.
+    pub fn scale(&self, factor: f32) -> Rect {
+        let factor = factor.max(0.0);
+        let (w, h) = (self.w * factor, self.h * factor);
+        Rect::new(
+            self.x + (self.w - w) * 0.5,
+            self.y + (self.h - h) * 0.5,
+            w,
+            h,
+        )
+    }
 }
 
 /// Which way a region hands out space.

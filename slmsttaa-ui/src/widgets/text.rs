@@ -5,9 +5,9 @@
 //! are exactly what a consumer needs to hang a tooltip on one later.
 
 use crate::theme::TypeStep;
-use crate::{font, Color, Rect, Response, Ui};
+use crate::{anim, font, Color, Rect, Response, Ui};
 
-impl Ui<'_> {
+impl<'a> Ui<'a> {
     /// A heading row in the title step — larger and heavier than body text —
     /// underlined with a short accent bar.
     pub fn title(&mut self, text: &str) -> Response {
@@ -36,8 +36,7 @@ impl Ui<'_> {
         response
     }
 
-    /// A collapsible section heading. Returns a [`Response`] whose `open` field
-    /// says whether the section's contents should be declared:
+    /// A collapsible section: a heading that toggles, and the contents it hides.
     ///
     /// ```
     /// # use slmsttaa_ui::{Anchor, RecordingPainter, Theme, Ui, UiInput, UiState};
@@ -45,20 +44,38 @@ impl Ui<'_> {
     /// # let mut ui = Ui::new(&mut p, UiInput::default(), &mut s);
     /// # let mut frequency = 1.0_f32;
     /// # ui.panel(Anchor::TopLeft, Theme::default().panel_w, |ui| {
-    /// if ui.section("Base shape").open {
+    /// ui.section("Base shape", |ui| {
     ///     ui.slider("frequency", &mut frequency, 0.5, 8.0).show();
-    /// }
+    /// });
     /// # });
     /// ```
     ///
     /// Sections start expanded, and clicking the heading toggles it. The state
     /// is keyed by the heading's id and lives in [`UiState`](crate::UiState), so
-    /// it survives the frame.
+    /// it survives the frame. Because ids are keyed by label rather than by
+    /// declaration order, a section keeps its collapsed state when rows appear
+    /// above it.
     ///
-    /// Because ids are keyed by label rather than by declaration order, a
-    /// section keeps its collapsed state when rows appear above it. Two sections
-    /// sharing a label in one scope are separated with [`Ui::push_id`].
-    pub fn section(&mut self, text: &str) -> Response {
+    /// **The contents are a closure, and that is what buys the animation.** Every
+    /// other widget here could be written `if ui.section("x").open { … }`, and
+    /// this one was until UI Slice 6 — but under that shape the toolkit sees a
+    /// heading and then, some rows later, unrelated widgets. It never learns
+    /// where the section *ends*, so it cannot clip a collapse to a partial
+    /// height, and the rows below could only snap. Handing over the contents is
+    /// what makes the height something the toolkit can own and ease. The returned
+    /// [`Response`] still reports `open`, now purely as information.
+    ///
+    /// Contents are scoped under the section's id, so two sections may each hold
+    /// a `"strength"` slider without the two sharing a drag. That is
+    /// position-independent — the scope comes from the heading's *label* — so it
+    /// is not the order-keyed id bug in a hat.
+    ///
+    /// While a section is mid-collapse its rows are clipped but still live: a
+    /// click landing on a half-hidden button still registers, for the ~250 ms the
+    /// transition lasts. The same is true of a row scrolled out of a
+    /// [`scroll_area`](Ui::scroll_area), and for the same reason — clipping is
+    /// something the painter does, not something hit-testing knows about.
+    pub fn section(&mut self, text: &str, add_contents: impl FnOnce(&mut Ui<'a>)) -> Response {
         let theme = self.theme;
         let (px, weight) = theme.text.section.parts();
 
@@ -73,18 +90,24 @@ impl Ui<'_> {
         response.open = open;
 
         // A caret rather than a label change: the heading text stays where the
-        // eye expects it, and the marker reads at a glance.
-        let caret = if open { "-" } else { "+" };
-        let color = if response.hovered {
-            theme.color.accent_hover
-        } else {
-            theme.color.heading
-        };
+        // eye expects it, and the marker reads at a glance. It flips at the
+        // halfway point of the reveal rather than the instant of the click, so
+        // caret and contents agree about which way things are going.
+        let reveal = self.animate_with(
+            id,
+            "open",
+            if open { 1.0 } else { 0.0 },
+            theme.motion.expand,
+        );
+        let hover = self.animate(id, "hover", if response.hovered { 1.0 } else { 0.0 });
+        let color = anim::lerp(theme.color.heading, theme.color.accent_hover, hover);
+        let caret = if reveal > 0.5 { "-" } else { "+" };
         let y = font::centered_top(row.y, row.h, px);
         self.painter.text(row.x, y, caret, px, weight, color);
         self.painter
             .text(row.x + theme.space.indent, y, text, px, weight, color);
 
+        self.collapsing_body(id, reveal, add_contents);
         response
     }
 

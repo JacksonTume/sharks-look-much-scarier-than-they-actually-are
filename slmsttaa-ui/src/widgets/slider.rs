@@ -12,7 +12,7 @@
 //! closure, it got [`Slider`] in Slice 3 — a rehearsal for the
 //! [`Button`](crate::Button) builder Slice 4 generalized it into.
 
-use crate::{font, Rect, Response, Ui};
+use crate::{anim, font, Rect, Response, Ui};
 
 /// How a [`Slider`] arranges its label, value, and track.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -206,6 +206,15 @@ impl<'u, 'a, 'v> Slider<'u, 'a, 'v> {
     }
 }
 
+/// How much wider and taller the knob grows, in points, when it is grabbable or
+/// grabbed.
+///
+/// A local number rather than a theme token, on the same footing as the `-4.0`
+/// and `+8.0` that shape the knob in the first place: `theme` owns the metrics
+/// every widget has to agree on, and *where this slider puts its knob* has never
+/// been one of them.
+const KNOB_GROW: f32 = 2.0;
+
 /// Track, filled portion, and knob — all capsules (a radius at half the shorter
 /// side rounds the ends off completely).
 ///
@@ -215,16 +224,21 @@ impl<'u, 'a, 'v> Slider<'u, 'a, 'v> {
 fn draw_track(ui: &mut Ui, track: Rect, t: f32, response: &Response) {
     let theme = *ui.theme();
     let (track_h, knob_w) = (theme.control.track_h, theme.control.knob_w);
+    let id = response.id;
+
+    // The knob is the one thing here that animates its *size*. A colour change
+    // alone reads as decoration; a knob that swells under the pointer reads as
+    // the control saying it can be grabbed.
+    let grabbable = response.held || response.hovered;
+    let emphasis = ui.animate(id, "knob", if grabbable { 1.0 } else { 0.0 });
+    let ring = ui.animate(id, "ring", if response.focused { 1.0 } else { 0.0 });
 
     let cap = track_h * 0.5;
     let knob_x = (track.x + track.w * t - knob_w * 0.5)
         .clamp(track.x, (track.max_x() - knob_w).max(track.x));
-    let knob = Rect::new(knob_x, track.y - 4.0, knob_w, track_h + 8.0);
-    let knob_col = if response.held || response.hovered {
-        theme.color.accent_hover
-    } else {
-        theme.color.foreground
-    };
+    let knob =
+        Rect::new(knob_x, track.y - 4.0, knob_w, track_h + 8.0).shrink(-KNOB_GROW * emphasis);
+    let knob_col = anim::lerp(theme.color.foreground, theme.color.accent_hover, emphasis);
 
     let painter = ui.painter();
     painter.fill_rect(track, cap, theme.color.surface);
@@ -233,8 +247,13 @@ fn draw_track(ui: &mut Ui, track: Rect, t: f32, response: &Response) {
         cap,
         theme.color.accent,
     );
-    painter.fill_rect(knob, knob_w * 0.5, knob_col);
-    if response.focused {
-        painter.stroke_rect(knob, knob_w * 0.5, theme.control.border, theme.color.ring);
+    painter.fill_rect(knob, knob.w * 0.5, knob_col);
+    if ring > 0.0 {
+        painter.stroke_rect(
+            knob,
+            knob.w * 0.5,
+            theme.control.border,
+            anim::fade(theme.color.ring, ring),
+        );
     }
 }

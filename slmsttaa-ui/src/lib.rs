@@ -77,9 +77,9 @@
 //! ui.panel(Anchor::TopLeft, theme.panel_w, |ui| {
 //!     ui.title("Erosion");
 //!     ui.label_value("fps", "60");
-//!     if ui.section("Fluvial").open {
+//!     ui.section("Fluvial", |ui| {
 //!         ui.slider("erodibility", &mut erodibility, 0.0, 0.006).decimals(4).show();
-//!     }
+//!     });
 //!     if ui.button("new seed").show().clicked { /* reseed */ }
 //! });
 //! let recompute = ui.changed();
@@ -88,6 +88,7 @@
 
 #![deny(missing_docs)]
 
+pub mod anim;
 pub mod font;
 mod interact;
 mod layout;
@@ -99,7 +100,7 @@ pub use font::Weight;
 pub use interact::{Response, UiInput, UiState};
 pub use layout::Rect;
 pub use painter::{Color, DrawCmd, Layer, Painter, RecordingPainter};
-pub use theme::{Size, Theme, TypeStep, Variant};
+pub use theme::{Motion, Size, Theme, TypeStep, Variant};
 pub use widgets::{Button, Slider, SliderLayout};
 
 use layout::{Dir, Region};
@@ -210,6 +211,9 @@ impl<'a> Ui<'a> {
         // `hot` is recomputed from scratch every frame; `active` and `focused`
         // deliberately persist.
         state.hot = None;
+        // Retire animated values belonging to widgets that are no longer
+        // declared, so the slot list is bounded by what is on screen.
+        state.begin_frame();
         painter.set_layer(Layer::Panel);
 
         let (vw, vh) = input.viewport;
@@ -367,6 +371,53 @@ impl<'a> Ui<'a> {
         self.painter
     }
 
+    /// Ease one of `id`'s properties toward `target` and return where it is now,
+    /// at the theme's [`Motion::fade`](theme::Motion::fade) rate.
+    ///
+    /// `property` names *which* of the widget's animated values this is — a
+    /// widget usually has several (`"hover"`, `"press"`, `"ring"`) and they move
+    /// independently. It is hashed with the id, so it costs a few bytes of
+    /// arithmetic and no allocation; use a fixed string, not a formatted one.
+    ///
+    /// A property's first sight of a target *is* its value, so a widget appears
+    /// settled rather than fading in from nothing. After that it converges in
+    /// wall-clock time rather than in frames — see [`anim`] for why that
+    /// distinction is the whole reason this takes a `dt` from the host.
+    ///
+    /// This is part of the unprivileged seam: the built-in widgets have no way of
+    /// animating that a consumer's widget doesn't.
+    ///
+    /// ```
+    /// # use slmsttaa_ui::{anim, Rect, Response, Ui};
+    /// /// A bar whose fill warms up under the pointer instead of snapping.
+    /// fn meter(ui: &mut Ui, label: &str, t: f32) -> Response {
+    ///     let theme = *ui.theme();
+    ///     let id = ui.next_id(label);
+    ///     let row = ui.allocate([0.0, theme.control.row_h]);
+    ///     let response = ui.interact(row, id);
+    ///
+    ///     let hot = ui.animate(id, "hover", if response.hovered { 1.0 } else { 0.0 });
+    ///     let fill = anim::lerp(theme.color.accent, theme.color.accent_hover, hot);
+    ///     let filled = Rect::new(row.x, row.y, row.w * t.clamp(0.0, 1.0), row.h);
+    ///     ui.painter().fill_rect(filled, theme.radius.md, fill);
+    ///     response
+    /// }
+    /// ```
+    pub fn animate(&mut self, id: u64, property: &str, target: f32) -> f32 {
+        let rate = self.theme.motion.fade;
+        self.animate_with(id, property, target, rate)
+    }
+
+    /// [`Ui::animate`], at a rate of your choosing rather than the theme's fade —
+    /// for a value that is a size or a distance rather than an emphasis.
+    ///
+    /// Prefer passing a token ([`Motion::expand`](theme::Motion::expand)) over a
+    /// number, so that a consumer retuning the theme's feel retunes this too.
+    pub fn animate_with(&mut self, id: u64, property: &str, target: f32, rate: f32) -> f32 {
+        let key = interact::hash_id(id, property);
+        self.state.animate(key, target, rate, self.input.dt)
+    }
+
     /// The id for `label` in the enclosing scope.
     ///
     /// The id depends on the label and the scope, **not** on where the widget
@@ -401,6 +452,16 @@ impl<'a> Ui<'a> {
     /// one iteration's widgets from the next's.
     pub fn push_id(&mut self, label: &str) {
         let id = self.next_id(label);
+        self.push_scope(id);
+    }
+
+    /// Open a nested scope under an id that has *already* been handed out.
+    ///
+    /// [`Ui::push_id`] can't do this: it calls [`Ui::next_id`], which would see
+    /// the label a second time and re-hash it as a duplicate. A container that
+    /// wants to scope its contents under its own id — which is what
+    /// [`Ui::section`] does — needs the id itself.
+    pub(crate) fn push_scope(&mut self, id: u64) {
         self.scopes.push(Scope {
             id,
             used: Vec::new(),
@@ -626,6 +687,63 @@ impl<'a> Ui<'a> {
         self.region_mut().advance_block(tallest);
     }
 
+    /// Declare `id`'s contents showing only the top `t` of their height, for
+    /// `t` in `[0, 1]`. The body of [`Ui::section`].
+    ///
+    /// The contents are laid out at **full size** and clipped; nothing is scaled,
+    /// because scaling text is not something the painter can do and a panel whose
+    /// rows shrank as it collapsed would look like a mistake rather than a
+    /// transition. What moves is how much of them is revealed, and how far the
+    /// rows below are pushed down.
+    ///
+    /// The clip has to be sized before the contents are laid out, so — like a
+    /// scroll area, and for exactly the same reason — it uses *last* frame's
+    /// measurement. Two consequences worth stating:
+    ///
+    /// - At `t == 1.0` there is **no clip at all**, which is both the fast path
+    ///   and the common case. That is why [`anim::approach`] snaps: a value that
+    ///   only ever approached `1.0` would leave a fully-open section clipping
+    ///   forever.
+    /// - A section that has never been open has nothing to measure, so its first
+    ///   expansion is unclipped and lands in one frame. Sections default to open,
+    ///   so this is reachable only by collapsing one before it is ever drawn.
+    ///
+    /// Contents are scoped under `id`, so two sections may hold identically
+    /// labeled widgets without their state colliding. That does not reintroduce
+    /// the position-keyed id bug `interact::hash_id` exists to prevent — a
+    /// section's id comes from its *label*, not from where it sits.
+    fn collapsing_body(&mut self, id: u64, t: f32, add_contents: impl FnOnce(&mut Ui<'a>)) {
+        if t <= 0.0 {
+            return;
+        }
+        let line = self.region().next_line();
+        let previous = self.state.measured(id);
+        // Clip only while genuinely mid-transition and there is a measurement to
+        // clip against.
+        let clip_h = (t < 1.0 && previous > 0.0).then(|| previous * t);
+
+        if let Some(h) = clip_h {
+            self.painter.push_clip(Rect::new(line.x, line.y, line.w, h));
+        }
+        self.push_scope(id);
+        self.regions.push(Region::vertical(line));
+        add_contents(self);
+        let content_h = self
+            .regions
+            .pop()
+            .expect("collapsing body pushed a region")
+            .consumed_height();
+        self.pop_id();
+        if clip_h.is_some() {
+            self.painter.pop_clip();
+        }
+
+        self.state.set_measured(id, content_h);
+        // Push the rows below down by exactly what is visible, so the panel
+        // shrinks in step with the reveal instead of snapping at either end.
+        self.region_mut().advance_block(clip_h.unwrap_or(content_h));
+    }
+
     /// Declare widgets stepped in from the left by [`Space::indent`], for rows
     /// that belong to the toggle above them.
     ///
@@ -681,7 +799,7 @@ impl<'a> Ui<'a> {
         // a scrollbar is needed. A scroll area that has never been laid out
         // simply takes its full height on the first frame and settles on the
         // second — invisible in practice, because nothing has scrolled yet.
-        let previous_content = self.state.scroll_offset(content_key(id)).max(0.0);
+        let previous_content = self.state.measured(id).max(0.0);
         let viewport_h = if previous_content > 0.0 {
             previous_content.min(max_height)
         } else {
@@ -692,12 +810,20 @@ impl<'a> Ui<'a> {
         // Wheel input, applied before laying out so the contents land in their
         // scrolled position this frame rather than next.
         let max_offset = (previous_content - max_height).max(0.0);
-        let mut offset = self.state.scroll_offset(id).clamp(0.0, max_offset);
+        let mut target = self.state.scroll_offset(id).clamp(0.0, max_offset);
         if max_offset > 0.0 && self.input.hits(viewport) {
             let speed = self.theme.control.scroll_speed;
-            offset = (offset - self.input.scroll_delta * speed).clamp(0.0, max_offset);
+            target = (target - self.input.scroll_delta * speed).clamp(0.0, max_offset);
         }
-        self.state.set_scroll_offset(id, offset);
+        self.state.set_scroll_offset(id, target);
+
+        // What is *drawn* eases toward that target, so a wheel notch glides its
+        // 28 points instead of teleporting them and leaving the reader to find
+        // their place again. The stored offset stays the exact, unsmoothed
+        // target: easing the thing the wheel accumulates into would let rounding
+        // eat a fast scroll.
+        let rate = self.theme.motion.expand;
+        let offset = self.animate_with(id, "scroll", target, rate);
 
         // Lay the contents out in their own region, shifted up by the offset and
         // clipped to the viewport. Because it is a child region, the enclosing
@@ -735,7 +861,7 @@ impl<'a> Ui<'a> {
 
         // Remember what the contents measured, and leave the cursor just below
         // the viewport so whatever follows isn't overlapped.
-        self.state.set_scroll_offset(content_key(id), content_h);
+        self.state.set_measured(id, content_h);
         self.region_mut().advance_block(viewport_h.min(content_h));
 
         if content_h > max_height {
@@ -767,12 +893,4 @@ impl<'a> Ui<'a> {
             theme.color.muted,
         );
     }
-}
-
-/// The key a scroll area's *content height* is remembered under.
-///
-/// It shares the scroll map with the offset rather than adding a second one; the
-/// offset by itself is meaningless without knowing how far there is to scroll.
-fn content_key(id: u64) -> u64 {
-    id ^ 0x9E37_79B9_7F4A_7C15
 }

@@ -519,7 +519,7 @@ that a proportional font removes slack that a monospace grid silently donates.
 Changing the font was, accidentally, a fuzz test for every layout assumption in
 the crate.
 
-## Slice 6 — Animation *(polish, labeled)*
+## Slice 6 — Animation *(polish, labeled)* ✅ done
 
 *Roadblock:* also none. Cheap, though — roughly forty lines once Slice 1's ids
 exist and given `Renderer::dt`, which the engine already provides.
@@ -528,7 +528,111 @@ Per-id animated floats easing toward a target: hover fades, accordion
 expand/collapse, knob springs. Disproportionate perceived-quality return, which
 is exactly why it needs the polish label to stay honest.
 
+*Proof:* the terrain panel's headings warm under the pointer, its buttons and
+checkbox ticks fade rather than snap, its slider knobs swell when grabbable, a
+wheel notch glides its 28 points instead of teleporting them, and a section
+**collapses and expands over ~250 ms** — its rows clipped to a shrinking height
+while everything below slides up to meet them. Verified on native and on web
+under `BrowserWebGpu`, where a screenshot taken one frame after the click catches
+a slider with its track cut halfway through.
+
+**What shipped, and what it cost:**
+
+- **The core is one function and one map.** [`anim::approach`](src/anim.rs)
+  integrates exponential decay over the *real* elapsed time — `1 - e^(-rate·dt)`
+  — and `UiState` keeps a float per `(widget id, property name)`. Everything else
+  in this slice is a call to `ui.animate(id, "hover", target)`.
+- **The forty-line estimate was right about the core and wrong about the slice.**
+  Easing a number is trivial. What it cost was the section's API (below), a sweep,
+  a snap rule, and a decision about what `dt = 0` means — none of which is
+  arithmetic.
+- **Frame-rate independence is the whole point, and it is the part that would
+  have been got wrong.** The tempting `value += (target - value) * 0.2` converges
+  in a fixed number of *frames*: the same fade takes 130 ms at 144 Hz and 330 ms
+  at 60 Hz, and a stuttering machine changes its character. That failure is
+  invisible on the machine it was written on, which is why `tests/animation.rs`
+  asserts one 100 ms step and ten 10 ms steps land in the same place.
+- **`dt = 0` snaps rather than freezes, and that is deliberate.** "No time has
+  passed" argues for freezing, and freezing would be a trap: a host that never
+  fills the new field would get a UI whose sections can never finish collapsing.
+  Snapping instead makes `dt` genuinely *optional* at the seam — every widget
+  behaves exactly as it did through Slice 5 — which is why the other seven test
+  files never had to learn that animation exists.
+- **Values snap onto their target once they are close enough.** Exponential decay
+  never arrives, and "never arrives" is load-bearing here: a fully open section
+  takes a fast path that skips clipping entirely, and at `t == 0.99999` it would
+  clip forever. `anim::SNAP` ends the animation for real.
+- **The slot map is swept every frame**, unlike the four maps already in
+  `UiState`. Those are keyed by containers, of which a panel has a handful; this
+  one gets an entry per animated property of every widget declared, so a consumer
+  generating rows from changing labels would grow it without bound. The sweep also
+  buys the right *behavior*: a row that leaves the screen comes back settled
+  rather than resuming a fade from a hover the user has long since forgotten.
+- **Motion is a theme token, and turning it off is a value rather than a flag.**
+  `Motion { fade, expand }` sits beside the radius and spacing scales, because
+  "how long does a hover take" is a property of the look. `Motion::none()` is an
+  *infinite rate*, so a reduced-motion preference is one assignment and there is
+  no `if animating` for a widget to forget.
+
+**The section had to change shape, and it is the interesting part of this slice.**
+
+`if ui.section("x").open { … }` cannot be animated. The toolkit sees a heading and
+then, some rows later, unrelated widgets — it never learns where the section
+*ends*, so it cannot clip a collapse to a partial height. The height was not a
+number it owned. So `section` takes its contents as a closure, joining
+`panel` / `horizontal` / `columns` / `indent` / `scroll_area`, all of which took
+closures already and for a related reason.
+
+That is a breaking change to every call site, which is the same trade the slider
+builder made in Slice 3 and the button builder in Slice 4. Four call sites in
+`examples/terrain.rs`, five in the tests.
+
+Three things fell out of it that were not the point:
+
+- **Contents are now scoped under the section's id**, so two sections may each
+  hold a `"strength"` slider without sharing a drag. `Ui::push_id`'s docs had
+  claimed section did this since Slice 1; it never had. The claim is now true
+  rather than corrected.
+- **`Response::open` became informational.** Nothing has to branch on it, because
+  the section decides for itself what to show. It stays because a consumer may
+  want to mirror the state elsewhere.
+- **The scroll area's content-height hack retired.** It stored its measurement in
+  the scroll-offset map under an XOR'd key, because there was one map and it
+  needed two things from it. The section needs the identical "how tall were the
+  contents last frame" value, and two callers is what justified `UiState.measured`
+  existing properly.
+
+**A live edge, recorded rather than fixed.** While a section is mid-collapse its
+rows are clipped but still hit-testable, so a click landing on a half-hidden
+button registers for those ~250 ms. This is not new — a row scrolled out of a
+`scroll_area` has always behaved this way, because clipping is something the
+*painter* does and hit-testing knows nothing about it. It is worth fixing when
+something can actually be clicked by accident; a section the user is watching
+collapse is not that.
+
+**What it did not expose, for once.** Slices 1, 3 and 5 each shipped with a bug
+that every test passed and running the demo found. This one didn't — the first
+run of the demo showed the collapse working. The honest reading is not that the
+process improved: it is that this slice added a *new* capability on top of the
+layout rather than changing an assumption underneath it, and the three earlier
+bugs were all assumptions (ids are ordered, labels fit, a glyph cell is its cap
+height). Adding is safer than re-deriving, and that says nothing about the next
+slice that re-derives something.
+
 ---
+
+## Nothing is scheduled
+
+Slice 6 was the last one written down, and it was labeled polish. **That is the
+correct state for this crate to be in**, not a gap to fill: every slice above was
+pulled into existence by something the terrain demo couldn't do, the demo can now
+do all of it, and the list below is what a *future* consumer would have to ask for
+first.
+
+The next UI work should therefore arrive from a demo, not from this file. The
+likeliest source is engine [Slice 11](../ROADMAP.md#slice-11--fixed-timestep-clock--time-control),
+whose transport controls `scene.rs` will have to drive from somewhere — and even
+that composes from today's `button` and `slider` until it demonstrably can't.
 
 ## Waiting on a roadblock
 

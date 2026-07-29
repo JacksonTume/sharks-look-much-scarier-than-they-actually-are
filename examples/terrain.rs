@@ -377,7 +377,7 @@ impl TerrainDemo {
                     // --- Layer 1: the Perlin base shape ---
                     let mut base = false;
                     let mut preset = None;
-                    if ui.section("Base shape").open {
+                    ui.section("Base shape", |ui| {
                         // The button row. Each cell is its own column, so the
                         // three hit-test to their own thirds of the width.
                         // Secondary and small: three equivalent choices, none of
@@ -419,12 +419,12 @@ impl TerrainDemo {
                             .slider("ridge (peaks)", &mut self.params.ridge, 0.5, 3.0)
                             .show()
                             .changed;
-                    }
+                    });
                     ui.separator();
 
                     // --- Layer 2: erosion ---
                     let mut erode = false;
-                    if ui.section("Fluvial erosion").open {
+                    ui.section("Fluvial erosion", |ui| {
                         let mut iters = self.erosion.iterations as f32;
                         if ui
                             .slider("passes", &mut iters, 0.0, 120.0)
@@ -449,9 +449,9 @@ impl TerrainDemo {
                             .slider("area exponent m", &mut self.erosion.m, 0.2, 1.0)
                             .show()
                             .changed;
-                    }
+                    });
 
-                    if ui.section("Thermal erosion").open {
+                    ui.section("Thermal erosion", |ui| {
                         erode |= ui
                             .checkbox("enable talus", &mut self.erosion.thermal)
                             .changed;
@@ -471,17 +471,17 @@ impl TerrainDemo {
                                 talus || rate
                             });
                         }
-                    }
+                    });
                     ui.separator();
 
                     // --- Grid ---
                     let mut new_seed = false;
-                    if ui.section("Grid").open {
+                    ui.section("Grid", |ui| {
                         ui.slider("resolution", &mut self.res, RES_MIN, RES_MAX)
                             .decimals(0)
                             .show();
                         new_seed = ui.button("new seed").show().clicked;
-                    }
+                    });
                     ui.separator();
 
                     // The one control that throws work away. Before variants this

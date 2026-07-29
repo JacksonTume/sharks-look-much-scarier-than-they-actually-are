@@ -182,7 +182,7 @@ fn a_section_stays_collapsed_when_a_row_is_added_above_it() {
             if extra_row {
                 ui.label("a row added later");
             }
-            ui.section("Grid").open
+            ui.section("Grid", |_| {}).open
         })
     };
     let click_heading = |p: &mut RecordingPainter, s: &mut UiState| {
@@ -200,7 +200,7 @@ fn a_section_stays_collapsed_when_a_row_is_added_above_it() {
         );
         ui.panel(Anchor::TopLeft, PANEL_W, |ui| {
             ui.label("fps");
-            ui.section("Grid").open
+            ui.section("Grid", |_| {}).open
         })
     };
 
@@ -226,10 +226,10 @@ fn two_sections_with_the_same_label_collapse_independently() {
         let mut ui = Ui::new(p, input, s);
         ui.panel(Anchor::TopLeft, PANEL_W, |ui| {
             ui.push_id("fluvial");
-            let a = ui.section("Detail").open;
+            let a = ui.section("Detail", |_| {}).open;
             ui.pop_id();
             ui.push_id("thermal");
-            let b = ui.section("Detail").open;
+            let b = ui.section("Detail", |_| {}).open;
             ui.pop_id();
             (a, b)
         })

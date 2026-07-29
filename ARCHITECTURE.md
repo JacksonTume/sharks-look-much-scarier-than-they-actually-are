@@ -90,9 +90,10 @@ slmsttaa-ui/          The UI toolkit, as its own zero-dependency workspace membe
 │   ├── painter.rs    Painter (the drawing seam), Layer (the four ordered draw
 │   │                 buckets), + RecordingPainter, the headless test double that
 │   │                 makes layout assertable without a GPU.
-│   ├── interact.rs   UiInput (this frame's pointer + viewport size, filled in by
-│   │                 the host), UiState (hot/active/focused, collapsed sections,
-│   │                 scroll offsets, panel rects), and the Response every widget
+│   ├── interact.rs   UiInput (this frame's pointer, viewport size, and dt,
+│   │                 filled in by the host), UiState (hot/active/focused,
+│   │                 collapsed sections, scroll offsets, panel rects, and the
+│   │                 eased per-widget floats), and the Response every widget
 │   │                 returns.
 │   ├── layout.rs     Rect + the stack of layout regions widgets are placed in.
 │   ├── theme.rs      Theme: semantic color tokens plus the radius/spacing/type/
@@ -214,10 +215,11 @@ render graph will eventually grow. The design holds two boundaries at once:
   Input crosses the same boundary, in the opposite direction and by copy. The
   toolkit cannot `use crate::input::Input` — it doesn't depend on the engine, and
   reaching back would be a dependency cycle — so it declares its own `UiInput`
-  snapshot and `Renderer::ui()` fills one in each frame from this frame's `Input`
-  and the surface size (the latter so a panel can anchor to a window edge without
-  the toolkit ever learning what a window is). Four field assignments buys a UI
-  crate with no dependencies at all.
+  snapshot and `Renderer::ui()` fills one in each frame from this frame's `Input`,
+  the surface size (so a panel can anchor to a window edge without the toolkit
+  ever learning what a window is), and `Renderer::dt` (so its hover fades and
+  collapse transitions run on our clock without it owning one). Five field
+  assignments buys a UI crate with no dependencies at all.
 
   What lives on *this* side of the seam is the part that touches the GPU: the
   overlay pipeline, the glyph atlas, the 2D vertex format, and draw ordering. So
@@ -233,7 +235,9 @@ render graph will eventually grow. The design holds two boundaries at once:
   already there, text measurement included. The only engine-side change was one
   more field copied into `UiInput` (the viewport, for anchoring). A seam that
   absorbs a change that size without moving is a seam in roughly the right
-  place.
+  place. UI Slice 6 (animation) then cost one more field on the same terms —
+  `dt` — and again nothing on the `Painter` trait: a fading color is still a
+  color, and a collapsing section is still a clip rect.
 
 - **Rounded corners and clipping are per-vertex parameters, not extra passes.**
   `Vertex2D` carries the rect it belongs to (center + half-size), a corner

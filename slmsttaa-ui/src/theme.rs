@@ -201,7 +201,7 @@ impl TypeStep {
 
     /// The line-box top that optically centres this step in a box `h` tall
     /// starting at `y` — see
-    /// [`font::centered_top`](crate::font::centered_top).
+    /// [`font::centered_top`].
     pub fn centered_top(self, y: f32, h: f32) -> f32 {
         font::centered_top(y, h, self.px)
     }
@@ -255,6 +255,42 @@ pub struct Control {
     pub ring: f32,
 }
 
+/// How quickly the toolkit's eased values converge, in **e-folds per second**.
+///
+/// Motion is a design token for the same reason a color is: "how long does a
+/// hover take" is a property of the look, not of the button, and a widget that
+/// picked its own duration would be the timing equivalent of one that named its
+/// own blue. See [`anim`](crate::anim) for what a rate means.
+///
+/// Two, not one — a color change and a size change want different speeds, and
+/// nothing has yet wanted a third.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Motion {
+    /// Emphasis changes: hover and press fills, focus rings, a heading warming
+    /// under the pointer. Fast enough to feel like a response rather than an
+    /// animation.
+    pub fade: f32,
+    /// Size and position changes: a section collapsing, a scroll area catching up
+    /// with the wheel. Slower, because the eye is following an edge rather than
+    /// noticing a color.
+    pub expand: f32,
+}
+
+impl Motion {
+    /// No motion at all: every value snaps to its target the frame it changes.
+    ///
+    /// This is how animation is turned *off* — an infinite rate rather than a
+    /// flag, so there is no branch for a widget to forget. Hand it to
+    /// [`Ui::set_theme`](crate::Ui::set_theme) when the platform reports a
+    /// reduced-motion preference.
+    pub fn none() -> Self {
+        Self {
+            fade: f32::INFINITY,
+            expand: f32::INFINITY,
+        }
+    }
+}
+
 /// Everything the toolkit needs to know about how it should look.
 ///
 /// One [`Ui`](crate::Ui) frame holds one of these. It is [`Copy`] and about 300
@@ -278,6 +314,8 @@ pub struct Theme {
     pub text: TypeScale,
     /// Metrics shared by controls.
     pub control: Control,
+    /// How fast things ease.
+    pub motion: Motion,
     /// The panel width a caller with no opinion gets.
     ///
     /// Only a default: [`Ui::panel`](crate::Ui::panel) takes the width it should
@@ -406,6 +444,13 @@ impl Theme {
                 scroll_speed: 28.0,
                 border: 1.0,
                 ring: 2.0,
+            },
+            // ~95% of the way there in 150 ms and 250 ms respectively. Both are
+            // under the threshold where a transition stops reading as the
+            // control responding and starts reading as the control being slow.
+            motion: Motion {
+                fade: 20.0,
+                expand: 12.0,
             },
             panel_w: 340.0,
         }

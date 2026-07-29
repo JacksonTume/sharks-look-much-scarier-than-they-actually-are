@@ -88,9 +88,9 @@ fn every_widget(ui: &mut Ui) {
     ui.label_muted("hint");
     ui.label_value("fps", "60");
     ui.separator();
-    if ui.section("Base shape").open {
+    ui.section("Base shape", |ui| {
         ui.slider("frequency", &mut value, 0.0, 1.0).show();
-    }
+    });
     ui.checkbox("wireframe", &mut flag);
     ui.button("new seed").show();
     ui.button("alps").variant(Variant::Secondary).show();

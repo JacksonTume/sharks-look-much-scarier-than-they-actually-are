@@ -500,6 +500,14 @@ a seam that speaks in colors and rectangles and does not care where a color came
 from, which is the clearest evidence yet that the seam is drawn in the right
 place.
 
+UI Slice 6 (animation) cost one field on the same terms: `UiInput` gained `dt`,
+filled from `Renderer::dt`. Nothing else — a fading color is still a color and a
+collapsing section is still a clip rect, so hover fades, a growing slider knob,
+smooth scrolling and animated accordions all landed without the overlay learning
+that anything moves. It is worth noting what the engine did *not* have to
+provide: no animation system, no easing curves, no timeline. It handed over a
+number of seconds.
+
 UI Slice 5 (typography) is the exception, and interesting for being one: it is the
 only slice so far to make the seam **narrower**. `text_size` left the `Painter`
 trait entirely and `src/renderer/font.rs` was deleted, because two independent

@@ -13,7 +13,7 @@
 //! the trade the slider's builder already refused.
 
 use crate::theme::{Size, Variant};
-use crate::{font, Rect, Response, Ui};
+use crate::{anim, font, Rect, Response, Ui};
 
 /// A clickable button, configured then shown.
 ///
@@ -90,17 +90,35 @@ impl<'u, 'a> Button<'u, 'a> {
         let face = Rect::new(row.x, row.y, row.w, face_h);
         let response = ui.interact(face, id);
 
-        let fill = theme.fill(variant, response.hovered);
+        // Three properties easing independently, which is why they are separate
+        // slots: a button can be releasing its press while still hovered, and
+        // hold its focus ring after the pointer has left entirely.
+        let hover = ui.animate(id, "hover", if response.hovered { 1.0 } else { 0.0 });
+        let press = ui.animate(id, "press", if response.held { 1.0 } else { 0.0 });
+        let ring = ui.animate(id, "ring", if response.focused { 1.0 } else { 0.0 });
+
+        let fill = anim::lerp(theme.fill(variant, false), theme.fill(variant, true), hover);
         let painter = ui.painter();
         painter.fill_rect(face, theme.radius.md, fill);
         // Pressed is a scrim rather than a fourth color per variant: `surface` is
         // a light wash on a dark theme and a dark one on a light theme, so one
-        // token darkens or brightens whichever way the theme runs.
-        if response.held {
-            painter.fill_rect(face, theme.radius.md, theme.color.surface);
+        // token darkens or brightens whichever way the theme runs. Fading it is
+        // fading its alpha, and a scrim at zero alpha is not drawn at all —
+        // cheaper, and it keeps the frame free of invisible primitives.
+        if press > 0.0 {
+            painter.fill_rect(
+                face,
+                theme.radius.md,
+                anim::fade(theme.color.surface, press),
+            );
         }
-        if response.focused {
-            painter.stroke_rect(face, theme.radius.md, theme.control.ring, theme.color.ring);
+        if ring > 0.0 {
+            painter.stroke_rect(
+                face,
+                theme.radius.md,
+                theme.control.ring,
+                anim::fade(theme.color.ring, ring),
+            );
         }
 
         // Center the label within the button. Vertically that means centring the
@@ -145,23 +163,27 @@ impl Ui<'_> {
             self.changed = true;
         }
 
+        let hover = self.animate(id, "hover", if response.hovered { 1.0 } else { 0.0 });
+        let on = self.animate(id, "on", if *value { 1.0 } else { 0.0 });
+        let ring = self.animate(id, "ring", if response.focused { 1.0 } else { 0.0 });
+
         self.painter
             .fill_rect(well, theme.radius.md, theme.color.surface);
-        if *value {
-            let tick = if response.hovered {
-                theme.color.accent_hover
-            } else {
-                theme.color.accent
-            };
+        if on > 0.0 {
+            // The tick grows out of the middle of its well rather than fading in
+            // flat — a 10-point square appearing at full size is a pop, and this
+            // is the one place the toolkit animates geometry small enough that
+            // the difference is all in the first 100 ms.
+            let tick = anim::lerp(theme.color.accent, theme.color.accent_hover, hover);
             self.painter
-                .fill_rect(well.shrink(3.0), theme.radius.sm, tick);
+                .fill_rect(well.shrink(3.0).scale(on), theme.radius.sm, tick);
         }
-        if response.focused {
+        if ring > 0.0 {
             self.painter.stroke_rect(
                 well,
                 theme.radius.md,
                 theme.control.border,
-                theme.color.ring,
+                anim::fade(theme.color.ring, ring),
             );
         }
         self.painter.text(

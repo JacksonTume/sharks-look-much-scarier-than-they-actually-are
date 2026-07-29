@@ -175,10 +175,10 @@ fn collapsing_a_section_shrinks_the_panel_to_its_heading() {
         painter.clear();
         let mut ui = Ui::new(painter, input, state);
         ui.panel(Anchor::TopLeft, PANEL_W, |ui| {
-            if ui.section("Shape").open {
+            ui.section("Shape", |ui| {
                 ui.slider("frequency", &mut value, 0.0, 1.0).show();
                 ui.slider("octaves", &mut value, 0.0, 1.0).show();
-            }
+            });
         });
     };
 

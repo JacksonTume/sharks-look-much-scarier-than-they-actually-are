@@ -13,8 +13,9 @@ Slices [0](ROADMAP.md#slice-0--extraction-the-move) (extraction),
 [1](ROADMAP.md#slice-1--interaction-core--draw-layers) (interaction core),
 [2](ROADMAP.md#slice-2--painter-capabilities-and-the-scroll-region) (painter
 capabilities), [3](ROADMAP.md#slice-3--layout) (layout),
-[4](ROADMAP.md#slice-4--theme-tokens--variants) (theme tokens) and
-[5](ROADMAP.md#slice-5--typography-polish-labeled) (typography) are done. The
+[4](ROADMAP.md#slice-4--theme-tokens--variants) (theme tokens),
+[5](ROADMAP.md#slice-5--typography-polish-labeled) (typography) and
+[6](ROADMAP.md#slice-6--animation-polish-labeled) (animation) are done. The
 toolkit is a zero-dependency crate the engine re-exports as `slmsttaa::ui`, and it
 now has the machinery that separates a toolkit from a pile of sliders:
 
@@ -37,16 +38,23 @@ now has the machinery that separates a toolkit from a pile of sliders:
   two weights, and tabular figures so a live readout doesn't shuffle sideways as
   its digits change. Metrics live in [`font`](src/font.rs) rather than on the
   painter, which is the whole point — see *The two seams* below.
-- **A public seam** — `allocate` / `interact` / `painter` / `theme`, so a widget
-  written by a consumer is not second-class.
+- **Animation** — one eased float per `(widget, property)`, converging in
+  wall-clock time rather than in frames, so a fade is the same length at 60 and
+  144 Hz. Hover and press fades, focus rings, a growing slider knob, smooth
+  scrolling, and collapsing sections. Turning it off is a theme value
+  (`Motion::none()`), not a flag anything checks.
+- **A public seam** — `allocate` / `interact` / `painter` / `theme` / `animate`,
+  so a widget written by a consumer is not second-class.
 
 Widgets: `title` / `section` (collapsible) / `label` / `label_muted` /
 `label_value` / `separator` / `button` / `checkbox` / `slider` / `scroll_area`.
 
-Next is [Slice 6](ROADMAP.md#slice-6--animation-polish-labeled) — animation, also
-**labeled as polish**: per-id floats easing toward a target, for hover fades and
-accordion transitions. Around forty lines given the ids Slice 1 built and the
-`Renderer::dt` the engine already provides, and no demo is blocked on it.
+**Nothing is scheduled next, and that is the intended state.** Every slice above
+was pulled into existence by something the terrain demo could not do; it can now
+do all of it. The next piece of UI work should arrive from a demo hitting a wall,
+not from the roadmap — see [*Waiting on a
+roadblock*](ROADMAP.md#waiting-on-a-roadblock) for what is recognized but
+deliberately unbuilt.
 
 **New UI code and UI docs belong here, not in the engine.**
 

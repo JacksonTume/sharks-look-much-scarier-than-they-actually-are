@@ -513,7 +513,7 @@ impl Renderer {
     /// This is where the two halves meet. The toolkit lives in its own crate and
     /// cannot see [`Input`] (that would be a dependency cycle — see
     /// `slmsttaa-ui/README.md`), so the engine copies this frame's host state
-    /// into the toolkit's own [`UiInput`] snapshot. Four assignments, in
+    /// into the toolkit's own [`UiInput`] snapshot. Five assignments, in
     /// exchange for a UI crate that has no dependencies at all.
     pub fn ui(&mut self) -> Ui<'_> {
         // The toolkit works in logical points, so the cursor is converted on the
@@ -537,6 +537,10 @@ impl Renderer {
                 self.size.width as f32 / scale,
                 self.size.height as f32 / scale,
             ),
+            // The toolkit owns no clock, so its hover fades and collapse
+            // transitions run on ours. `begin_frame` has already ticked, so this
+            // is the delta the consumer's `update` is seeing.
+            dt: self.clock.dt(),
         };
         self.overlay.set_scale(scale);
         Ui::new(&mut self.overlay, input, &mut self.ui_state)

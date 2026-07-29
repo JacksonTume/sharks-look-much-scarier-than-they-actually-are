@@ -70,7 +70,7 @@ it's going and why.
 | `examples/grid.rs`       | Orbitable terrain grid: the input + camera seam.         |
 | `examples/terrain.rs`    | **Capstone**: Perlin + stream-power erosion, live panel.  |
 | `slmsttaa-ui/src/`       | The UI toolkit crate (zero deps): `Painter`, `Theme`, widgets. |
-| `slmsttaa-ui/tests/`     | Layout + hit-testing + theming tests (headless recording painter). |
+| `slmsttaa-ui/tests/`     | Layout, hit-testing, theming, typography + animation tests (headless recording painter). |
 | `web/index.html`         | Browser harness for the wasm build (loads `pkg/app.js`). |
 | `xtask/`                 | `cargo xtask serve`: build native + web and host it.     |
 
