@@ -8,6 +8,7 @@
 mod instance;
 mod mesh;
 mod overlay;
+mod primitives;
 mod vertex;
 
 pub use instance::{Instance, Material, MeshHandle, Transform};

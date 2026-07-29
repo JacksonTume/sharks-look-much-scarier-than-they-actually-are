@@ -34,7 +34,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use slmsttaa::{
-    run, Application, Instance, Mesh, MeshHandle, MouseButton, Renderer, Transform, Vertex,
+    run, Application, Instance, Material, Mesh, MeshHandle, MouseButton, Renderer, Transform,
+    Vertex,
 };
 
 /// The scenes the gallery can show, in button order.
@@ -76,6 +77,16 @@ impl Scene {
     /// keep a fixed front-on view instead.
     fn orbits(self) -> bool {
         matches!(self, Scene::Grid)
+    }
+
+    /// How the scene is tinted. The cube comes from `Mesh::cuboid`, which emits
+    /// white geometry, so its color is a per-instance material; the hand-written
+    /// scenes carry their own vertex colors and want no tint at all.
+    fn material(self) -> Material {
+        match self {
+            Scene::Cube => Material::rgb(0.55, 0.62, 0.78),
+            _ => Material::OPAQUE,
+        }
     }
 
     /// Build the scene's geometry, in object space. Scenes that turn do so via a
@@ -138,48 +149,11 @@ impl Scene {
 /// straight down +Z, so every one of its corners shares this normal.
 const FACING: [f32; 3] = [0.0, 0.0, 1.0];
 
-/// The 8 corners of a unit cube, colored by position (matches `examples/cube.rs`).
-const CUBE_CORNERS: [([f32; 3], [f32; 3]); 8] = [
-    ([-0.5, -0.5, -0.5], [0.0, 0.0, 0.0]),
-    ([0.5, -0.5, -0.5], [1.0, 0.0, 0.0]),
-    ([0.5, 0.5, -0.5], [1.0, 1.0, 0.0]),
-    ([-0.5, 0.5, -0.5], [0.0, 1.0, 0.0]),
-    ([-0.5, -0.5, 0.5], [0.0, 0.0, 1.0]),
-    ([0.5, -0.5, 0.5], [1.0, 0.0, 1.0]),
-    ([0.5, 0.5, 0.5], [1.0, 1.0, 1.0]),
-    ([-0.5, 0.5, 0.5], [0.0, 1.0, 1.0]),
-];
-
-/// The six faces as CCW-from-outside quads, each with the way it points. A lit
-/// cube can't share corners — see `examples/cube.rs` for why — so this expands to
-/// 24 vertices.
-#[rustfmt::skip]
-const CUBE_FACES: [([usize; 4], [f32; 3]); 6] = [
-    ([4, 5, 6, 7], [ 0.0,  0.0,  1.0]), // front  (+z)
-    ([0, 3, 2, 1], [ 0.0,  0.0, -1.0]), // back   (-z)
-    ([1, 2, 6, 5], [ 1.0,  0.0,  0.0]), // right  (+x)
-    ([0, 4, 7, 3], [-1.0,  0.0,  0.0]), // left   (-x)
-    ([3, 7, 6, 2], [ 0.0,  1.0,  0.0]), // top    (+y)
-    ([0, 1, 5, 4], [ 0.0, -1.0,  0.0]), // bottom (-y)
-];
-
-/// Build the cube in object space. The spin is a transform (see `Scene::spins`).
+/// Build the cube in object space, from the engine's own primitive. The spin is
+/// a transform (see `Scene::spins`) and the color a per-instance material, so
+/// this scene owns no geometry of its own at all.
 fn cube_mesh() -> Mesh {
-    let mut vertices = Vec::with_capacity(24);
-    let mut indices = Vec::with_capacity(36);
-    for (quad, normal) in CUBE_FACES {
-        let base = vertices.len() as u32;
-        for corner in quad {
-            let (position, color) = CUBE_CORNERS[corner];
-            vertices.push(Vertex {
-                position,
-                normal,
-                color,
-            });
-        }
-        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-    }
-    Mesh::new(vertices, indices)
+    Mesh::cuboid([1.0; 3])
 }
 
 // --- Grid (mirrors `examples/grid.rs`; the orbit scene) ----------------------
@@ -333,7 +307,8 @@ impl Application for GalleryDemo {
 
         let sel = self.selected.get();
         self.current = sel;
-        renderer.set_instances(&[Instance::at(self.meshes[sel])]);
+        renderer
+            .set_instances(&[Instance::at(self.meshes[sel]).with_material(SCENES[sel].material())]);
     }
 
     fn update(&mut self, renderer: &mut Renderer) {
@@ -366,7 +341,9 @@ impl Application for GalleryDemo {
         } else {
             Transform::IDENTITY
         };
-        renderer.set_instances(&[Instance::new(self.meshes[self.current], transform)]);
+        renderer.set_instances(&[
+            Instance::new(self.meshes[self.current], transform).with_material(scene.material())
+        ]);
 
         // Aim the camera (orbit the grid; fixed front view otherwise).
         self.drive_camera(renderer);

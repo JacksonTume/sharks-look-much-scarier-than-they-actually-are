@@ -66,7 +66,7 @@ it's going and why.
 | `src/time.rs`            | Cross-platform frame clock (`Renderer::dt`).             |
 | `examples/triangle.rs`   | Reference consumer: draws one triangle (native + web).   |
 | `examples/cube.rs`       | Spinning solid cube: indexed mesh + depth + culling.     |
-| `examples/scene.rs`      | One mesh, dozens of moving objects: per-object transforms. |
+| `examples/scene.rs`      | Articulated figures from engine primitives: transforms, materials, joints. |
 | `examples/gallery.rs`    | Scene switcher: web buttons swap demos; native cycles.   |
 | `examples/grid.rs`       | Orbitable terrain grid: the input + camera seam.         |
 | `examples/terrain.rs`    | **Capstone**: Perlin + stream-power erosion, live panel.  |
@@ -81,7 +81,7 @@ it's going and why.
 cargo run --example terrain             # the capstone: layered Perlin + stream-power erosion
 cargo run --example triangle            # the smallest consumer
 cargo run --example cube                # spinning solid cube (depth + culling)
-cargo run --example scene                # one mesh, many independently moving objects
+cargo run --example scene               # articulated figures from engine primitives
 cargo run --example gallery             # switch between scenes (auto-cycles on native)
 ```
 
@@ -133,7 +133,8 @@ struct MyApp {
 impl Application for MyApp {
     fn init(&mut self, renderer: &mut Renderer) {
         // Upload once, in object space, and keep the handle.
-        let mesh = Mesh::new(vec![/* your vertices */], vec![/* your indices */]);
+        // Or build your own with `Mesh::new(vertices, indices)`.
+        let mesh = Mesh::capsule(0.2, 1.0, 16, 6);
         self.thing = Some(renderer.upload_mesh(&mesh));
     }
 

@@ -595,7 +595,7 @@ of the 16 attributes WebGL2 guarantees, which is within limits by inspection, an
 the buffer-offset draw is unchanged from Slice 8. That is reasoning, not a test,
 and it is the one claim in this slice that is weaker than the others.
 
-### Slice 11 — Primitive mesh builders
+### Slice 11 — Primitive mesh builders ✅ done
 
 *Roadblock:* every figure in `scene.rs` is assembled from boxes, spheres, and
 capsules, and after Slice 9 hand-rolling them is genuinely painful — correct
@@ -603,8 +603,9 @@ per-face normals mean splitting shared vertices, so a box is 24 vertices with
 carefully paired normals rather than 8 tidy corners. Writing that by hand for the
 fifth shape is the wall.
 
-- `Mesh::box`, `Mesh::sphere`, `Mesh::capsule` (or cylinder), `Mesh::plane` —
-  positions, indices, and correct normals, parameterized by size/segments.
+- `Mesh::cuboid`, `Mesh::sphere`, `Mesh::capsule`, `Mesh::plane` — positions,
+  indices, and correct normals, parameterized by size/segments. (`box` is a
+  reserved word, hence `cuboid`.)
 - Zero dependencies, zero file I/O, no runtime asset loading. This is the
   **deliberate alternative to an asset pipeline**: composition of primitives under
   a transform, not glTF.
@@ -614,8 +615,43 @@ lands in the engine anyway — it is entirely **content-free** geometry
 construction. It encodes no consumer semantics (compare: a `Terrain` builder,
 which would). Every consumer needs a box; none of them need *our* box.
 
-*Proof:* `scene.rs` builds all its geometry from engine primitives and contains no
-hand-written vertex arrays.
+*Proof:* `cargo run --example scene` shows nine figures walking on the spot, each
+turning at its own rate, built from **four** meshes in **four** draw calls with
+**zero** vertex uploads per frame — and `scene.rs` contains no vertex array at
+all. `cube.rs` and `gallery.rs` lost their hand-written boxes too, so the 24-vertex
+duplication Slice 9/10 left in three files is gone from all three.
+
+**What shipped, and what it cost:**
+
+- **Four builders and one shared lathe.** `sphere` and `capsule` are the same
+  surface-of-revolution routine with different latitude lists — the capsule just
+  repeats its equator, and the band between the two copies *is* the cylinder wall.
+  Keeping the winding and the pole handling in one place is the difference between
+  one correct implementation and two nearly-correct ones.
+- **Primitives emit white.** Color is a per-instance `Material` now, so baking one
+  into shared geometry would be the exact mistake instancing exists to avoid. A
+  demo wanting per-vertex color (terrain's height palette) is describing something
+  the builders don't, and still writes it by hand through `Mesh::new`.
+- **The hierarchy question got answered.** Slice 8 deferred "should `Instance`
+  accept a composed matrix?" to here, and the figures settled it: **yes**, via
+  `Transform::then` / `then_matrix` plus `Instance::from_matrix`. `then` cannot
+  return a `Transform` — compose a rotation with a non-uniform scale and the result
+  is a shear, which position/rotation/scale cannot represent — so it returns a
+  matrix, and the engine does the multiply so the demo still needs no math
+  dependency. `Instance` now stores the composed matrix internally, which is what
+  lets both entry points coexist without the draw path caring.
+- **The engine grew its first tests, deliberately.** `CLAUDE.md` says the engine
+  half is verified by building and looking at it, because it needs a GPU.
+  Primitives don't: they are pure CPU geometry. The six tests check unit normals
+  and that every triangle of a convex shape winds *outward* — and they immediately
+  earned it, catching an inverted pole-degeneracy guard and a zero-length capsule
+  that emitted a whole band of degenerate triangles. Neither was visible in a
+  still frame.
+
+*What it exposed.* Nothing new, which is itself worth recording — this is the
+first slice since 7 that ends without evidence for the next one. Slice 12
+(fixed-timestep clock) is still argued for by `scene.rs` moving on the wall clock,
+exactly as written down before this slice started.
 
 ### Slice 12 — Fixed-timestep clock + time control
 

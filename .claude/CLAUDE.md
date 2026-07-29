@@ -32,13 +32,14 @@ UI-shaped — and see the placement rule under *Conventions*.
 ```sh
 # Native
 cargo run --example terrain            # the capstone: layered Perlin + stream-power erosion
-cargo run --example scene              # one mesh, many moving objects (instancing + material)
+cargo run --example scene              # articulated figures (instancing, material, primitives)
 cargo run --example triangle           # the smallest consumer (Esc / close to quit)
 cargo build                            # debug build
 cargo build --release                  # optimized
 cargo clippy --all-targets             # lint
 cargo fmt --all                        # format (bare `cargo fmt` trips on examples/terrain/)
-cargo test -p slmsttaa-ui              # the tests (UI layout, hit-testing, typography)
+cargo test --workspace                 # UI layout/hit-testing/typography + primitive geometry
+#                                        (plain `cargo test` runs only the engine crate)
 
 # Web (wasm) — requires `cargo install wasm-bindgen-cli` once, at a version
 # matching the `wasm-bindgen` dependency in Cargo.lock.
@@ -61,18 +62,24 @@ the browser console.
 
 ## Verifying changes
 
-The only tests live in `slmsttaa-ui/tests/` — the zero-dependency toolkit is the
-one part of the repo testable without a GPU, via the `RecordingPainter` double.
-They constrain but do not replace looking at the screen: three separate bugs (UI
+Tests live in the two places that don't need a GPU: `slmsttaa-ui/tests/` (the
+zero-dependency toolkit, via the `RecordingPainter` double) and
+`src/renderer/primitives.rs` (mesh builders are pure CPU geometry). Everything
+else in the engine owns a surface or a device and is verified by building and
+looking at it.
+
+Tests constrain but do not replace looking at the screen: three separate bugs (UI
 Slices 1, 3 and 5) passed the whole suite and were caught by running the demo.
-The engine half is still verified by building and looking at it. To confirm a
-change works:
+The reverse also happens — two primitive bugs (an inverted pole degeneracy, a
+zero-length capsule emitting degenerate triangles) looked *fine* in a still frame
+and were caught by the outward-winding assertion. To confirm a change works:
 
 - **Always** `cargo build` (native) **and** `cargo build --target
   wasm32-unknown-unknown --lib` — the two targets diverge via `#[cfg]`, so one
   can break while the other compiles.
-- `cargo test -p slmsttaa-ui` for anything touching UI layout, hit-testing, or
-  text metrics.
+- `cargo test --workspace` for anything touching UI layout, hit-testing, text
+  metrics, or the primitive mesh builders. **`--workspace` matters**: the engine
+  is the root package, so a bare `cargo test` skips `slmsttaa-ui` entirely.
 - For visual changes, run the native example (`cargo run --example triangle`)
   and/or rebuild the wasm package and hard-refresh the browser. The dev server
   serves `web/` live; no restart needed after a rebuild.

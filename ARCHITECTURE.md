@@ -48,6 +48,10 @@ src/
     │                 dependency on the engine.
     ├── mesh.rs       Mesh (vertices + indices): the CPU-side geometry a consumer
     │                 builds and hands over via Renderer::upload_mesh.
+    ├── primitives.rs Mesh::plane/cuboid/sphere/capsule — content-free geometry
+    │                 with correct normals, the deliberate alternative to an
+    │                 asset pipeline. The engine's only unit tests live here,
+    │                 because this is its only GPU-free code.
     ├── instance.rs   Transform (position/euler rotation/scale), MeshHandle,
     │                 Material (RGBA tint), and Instance: where an uploaded mesh
     │                 is drawn and how it looks. Plus the private InstanceRaw +
@@ -67,13 +71,16 @@ src/
 examples/
 ├── triangle.rs       Reference consumer: implements Application and uploads one
 │                     triangle. Native fn main + a #[wasm_bindgen(start)] hook.
-├── cube.rs           Spinning solid cube: proves indexed meshes, depth testing,
-│                     and back-face culling. Uploaded once; the spin is one
-│                     Transform per frame.
-├── scene.rs          The instancing demo (Slice 8): one box mesh drawn as dozens
-│                     of independently moving objects over a ground plane that is
-│                     a unit quad scaled to fit. Two meshes, two draw calls, zero
-│                     vertex uploads per frame — the HUD reports all three.
+├── cube.rs           Spinning solid cube (Mesh::cuboid): proves indexed meshes,
+│                     depth testing, and back-face culling. Uploaded once; the
+│                     spin is one Transform per frame.
+├── scene.rs          The second vertical (Slices 8-11): articulated figures
+│                     walking on the spot, each a different Material tint, built
+│                     from engine primitives with no vertex array in the file.
+│                     Limbs are composed parent-into-child with Transform::then,
+│                     which is why they stay attached while a figure turns. Four
+│                     meshes, four draw calls, zero vertex uploads per frame —
+│                     the HUD reports all of it.
 ├── gallery.rs        Multi-scene switcher. Uploads every scene up front and
 │                     points the draw-list at one of them; on the web it builds DOM
 │                     buttons (web-sys) that drive the selection, on native it
@@ -342,9 +349,9 @@ These are subtle and easy to reintroduce, so they're documented here:
   upper 3×3 is the tempting shortcut and is wrong under non-uniform scale: it
   stretches normals along with the geometry, so a squashed box's flat top shades
   as though tilted. `InstanceRaw::normal_matrix` ships the 3×3 **inverse-transpose**
-  instead. `examples/scene.rs` scales its boxes non-uniformly (that is how the
-  objects differ), so the shortcut is visibly wrong in the very first frame — this
-  is not a subtlety that hides until later. A degenerate transform (a zero scale
+  instead. `examples/scene.rs` scales one capsule to four different limb lengths,
+  so the shortcut is visibly wrong in the very first frame — this is not a
+  subtlety that hides until later. A degenerate transform (a zero scale
   component) has no invertible block and falls back to the plain matrix, so the
   buffer never fills with `NaN`.
 
@@ -374,8 +381,8 @@ These are subtle and easy to reintroduce, so they're documented here:
   Geometry is uploaded by `upload_mesh` and only ever re-uploaded by
   `update_mesh`, for a consumer whose geometry genuinely changes shape.
 - **One draw call per mesh, not per object.** The draw-list is sorted by handle so
-  every instance of a mesh is contiguous, so `examples/scene.rs` draws 25 objects
-  over a ground plane in two calls.
+  every instance of a mesh is contiguous: `examples/scene.rs` draws nine
+  ten-part figures — ninety placements — in four calls, one per primitive.
 - `PowerPreference::HighPerformance` + `MemoryHints::Performance`.
 - `AutoVsync` by default; flip to `AutoNoVsync` in `renderer/mod.rs` to measure
   uncapped frame rates.
@@ -386,12 +393,9 @@ These are subtle and easy to reintroduce, so they're documented here:
 The scaffold leaves obvious seams:
 
 - **MSAA** (`multisample` is currently the 1-sample default).
-- **Primitive mesh builders.** The sharpest one now, and lighting is what
-  sharpened it: a lit box cannot share its eight corners, because a corner touches
-  three faces pointing three ways and a vertex holds one normal. Every box in the
-  tree is therefore written out as 24 vertices by hand, in three separate demos.
-  A `Mesh::box` / `sphere` / `capsule` that emits correct normals is the fix
-  (`ROADMAP.md` Slice 11); it is content-free geometry, so it belongs here.
+- **A fixed-timestep clock.** `Renderer::dt()` is raw wall-clock, so a consumer
+  advancing state by it is frame-rate coupled and cannot pause, single-step, or
+  reproduce a run (`ROADMAP.md` Slice 12).
 - A small **render-graph**: there are now two passes (3D + overlay) wired by hand
   in `render()`. A second consumer wanting its own pass is the roadblock that turns
   this into a real graph.

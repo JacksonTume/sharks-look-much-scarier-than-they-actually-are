@@ -30,14 +30,10 @@ impl Vertex {
     /// no meaningful facing.
     pub const UP: [f32; 3] = [0.0, 1.0, 0.0];
 
-    /// A vertex at `position` with `color`, facing straight up.
-    pub const fn new(position: [f32; 3], color: [f32; 3]) -> Self {
-        Self {
-            position,
-            normal: Self::UP,
-            color,
-        }
-    }
+    /// The color the engine's [primitive builders](crate::Mesh::cuboid) emit:
+    /// plain white, so a per-instance [`Material`](crate::Material) tint shows
+    /// through unaltered.
+    pub const WHITE: [f32; 3] = [1.0, 1.0, 1.0];
 
     const ATTRS: [wgpu::VertexAttribute; 3] =
         wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3];

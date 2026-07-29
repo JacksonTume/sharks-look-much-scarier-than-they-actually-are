@@ -90,6 +90,41 @@ impl Transform {
         self.mat4().to_cols_array_2d()
     }
 
+    /// This transform applied **inside** `parent`, as a world matrix.
+    ///
+    /// The composition an articulated figure needs: an upper arm is placed
+    /// relative to a torso, and when the torso turns the arm has to go with it.
+    ///
+    /// It returns a matrix rather than another [`Transform`] because it *cannot*
+    /// return one — compose a rotation with a non-uniform scale and the result is
+    /// a shear, which position/rotation/scale has no way to express. Attempting it
+    /// would silently drop the shear and put the limb in the wrong place.
+    ///
+    /// The engine does the multiply so the consumer doesn't need a math library:
+    /// the same rule [`Transform`] itself follows. Hand the result to
+    /// [`Instance::from_matrix`].
+    ///
+    /// ```no_run
+    /// # use slmsttaa::{Instance, MeshHandle, Transform};
+    /// # fn demo(arm_mesh: MeshHandle, torso: Transform, arm: Transform) -> Instance {
+    /// Instance::from_matrix(arm_mesh, arm.then(&torso))
+    /// # }
+    /// ```
+    pub fn then(&self, parent: &Transform) -> [[f32; 4]; 4] {
+        (parent.mat4() * self.mat4()).to_cols_array_2d()
+    }
+
+    /// This transform applied inside an already-composed parent matrix.
+    ///
+    /// What [`Transform::then`] is for two levels, this is for any number: a
+    /// forearm inside an upper arm inside a torso is
+    /// `forearm.then_matrix(upper.then(&torso))`. The chain stays in matrix form
+    /// once it leaves the first join, which is the only representation that
+    /// survives arbitrary nesting.
+    pub fn then_matrix(&self, parent: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+        (Mat4::from_cols_array_2d(&parent) * self.mat4()).to_cols_array_2d()
+    }
+
     /// Scale, then rotate, then translate — the standard order, and the only one
     /// under which `scale` means "make the object bigger" rather than "move it
     /// further away".
@@ -182,27 +217,52 @@ impl Default for Material {
 pub struct Instance {
     /// Which uploaded mesh to draw.
     pub mesh: MeshHandle,
-    /// Where to draw it.
-    pub transform: Transform,
     /// How it looks. Defaults to [`Material::OPAQUE`].
     pub material: Material,
+    /// Where to draw it, already composed to world space.
+    ///
+    /// Private because there are two ways in — a [`Transform`] or a matrix from
+    /// [`Transform::then`] — and storing the composed result is what lets both
+    /// exist without the draw path caring which was used.
+    model: [[f32; 4]; 4],
 }
 
 impl Instance {
     /// Draw `mesh` at `transform`, as authored.
-    pub const fn new(mesh: MeshHandle, transform: Transform) -> Self {
+    pub fn new(mesh: MeshHandle, transform: Transform) -> Self {
         Self {
             mesh,
-            transform,
             material: Material::OPAQUE,
+            model: transform.matrix(),
         }
+    }
+
+    /// Draw `mesh` at an already-composed world matrix.
+    ///
+    /// The escape hatch for hierarchies: a limb's place in the world is its
+    /// parent's transform times its own, and that product is a matrix (see
+    /// [`Transform::then`], which is how you get one). Every other placement
+    /// should use [`Instance::new`] — this is not the general way to position
+    /// something, it is the way to position something *relative to something
+    /// else*.
+    pub fn from_matrix(mesh: MeshHandle, model: [[f32; 4]; 4]) -> Self {
+        Self {
+            mesh,
+            material: Material::OPAQUE,
+            model,
+        }
+    }
+
+    /// The world matrix this instance will be drawn with.
+    pub fn matrix(&self) -> [[f32; 4]; 4] {
+        self.model
     }
 
     /// Draw `mesh` at the origin, unrotated and unscaled.
     ///
     /// The whole of a static demo's draw-list: geometry already authored in world
     /// space needs no placement on top of it.
-    pub const fn at(mesh: MeshHandle) -> Self {
+    pub fn at(mesh: MeshHandle) -> Self {
         Self::new(mesh, Transform::IDENTITY)
     }
 
@@ -231,7 +291,7 @@ pub(crate) struct InstanceRaw {
 impl InstanceRaw {
     /// Bake an instance's transform and material into what the shader reads.
     pub(crate) fn from_instance(instance: &Instance) -> Self {
-        let model = instance.transform.mat4();
+        let model = Mat4::from_cols_array_2d(&instance.model);
         Self {
             model: model.to_cols_array_2d(),
             normal: Self::normal_matrix(model),
