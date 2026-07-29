@@ -278,13 +278,82 @@ proved the vertical worked end-to-end (the thing that mattered then). Slice 6 ke
 that win and trades the algorithm for one that honors the "compose, don't solve"
 and "always something visible" principles.
 
-## The second vertical — a `scene` demo (Slices 7–11)
+### Slice 7 — Erosion you can watch: animated timestepping + a water surface
 
-Terrain proved the thesis, but it is a **single deforming mesh in world space**.
-Every consumer that wants *many distinct objects that move independently* falls
-off a cliff the terrain demo never approached: meshes are uploaded pre-transformed
-and `cube.rs` literally rotates its own corners on the CPU and re-uploads the mesh
-every frame. That works for one cube and for nothing else.
+*Roadblock:* **the most interesting thing this demo does has never been on
+screen.** A landscape carving itself out of noise is the payoff of two slices of
+work, and you cannot see it happen — `terrain.rs` debounces the rebuild until the
+mouse button comes up, then runs all 60 passes in one ~100ms hitch. The terrain
+teleports from *before* to *after*. There is no in-between, and the in-between is
+the whole show.
+
+And the water doing the carving is **computed every pass and thrown away**.
+`flow_route` (`terrain/erosion.rs`) floods every depression to build `filled[]`,
+and the drainage accumulation builds `area[]`. Lake depth is `filled[c] - z[c]`;
+rivers are the cells where `area` is large. Both already exist, once per pass,
+and both are dropped on the floor when the pass ends. The demo has been
+simulating water it never draws.
+
+The goal of this slice is stated as a picture, not a feature: **water visibly
+chipping away at the terrain, cutting rivers down the valleys and pooling into
+lakes**, live, while you watch.
+
+Two changes, both **entirely in the demo**:
+
+- **Step the solver instead of batching it.** `erode` gains a one-pass entry
+  point; `update` advances a pass (or a few) per frame and re-uploads the mesh,
+  which `set_meshes` already supports — it is what `cube.rs` does every frame
+  today. The "passes" slider stops being a batch size and becomes a *target the
+  animation walks toward*, so it scrubs a timeline rather than triggering a
+  hitch. With it: play/pause, and reset-to-noise so you can watch it again.
+- **Draw the water.** A second `Mesh` in `set_meshes(&[terrain, water])`, built
+  from the data above: lake surfaces at `filled` height wherever `filled > z`,
+  river ribbons wherever `area` crosses a threshold, both lifted by an ε to sit
+  off the terrain rather than z-fight with it. Blue vertex color. Opaque.
+
+*On "droplets":* this is the flow-accumulation model **animated**, not a particle
+system. `erosion.rs`'s module docs already record why droplet-hydraulics was
+tried and abandoned — independent droplets never pool into a connected network,
+so they roughen noise instead of carving valleys. Nothing about that ruling
+changes here. What makes water visible is that the river network *already exists
+on every pass*; the animation just shows it deepening.
+
+*What this slice deliberately does not do:* **add anything to the engine.** No new
+public API, no `Painter` method, no shader change. That is unusual enough to
+state outright — every prior slice bought a capability. This one is justified by
+principle 5 (always keep something on screen) and constrained by principle 2:
+water demands no engine work, so water gets none. If it turns out to demand some,
+that discovery is the slice's real output.
+
+*The one thing to watch:* a full mesh re-upload per frame at 256² plus a
+priority-flood per pass is the demo's own performance ceiling, and it may bite.
+If it does, **that** is the honest roadblock for the fixed-timestep clock (Slice
+12) arriving early — erosion stepped per *frame* is frame-rate coupled by
+construction, which is exactly the wall that slice exists to answer.
+
+*Proof:* `cargo run --example terrain` shows the terrain carving itself out of
+Perlin noise in real time — trunk valleys deepening, rivers threading down them,
+lakes filling the depressions — with play/pause and a scrubable pass count, on
+native and web. `wgpu`/`winit` are still nowhere in the demo, and the engine is
+byte-for-byte unchanged.
+
+*Deferred out of this slice, on purpose:*
+
+- **Translucent water** waits for Slice 10 (per-instance material). It needs
+  alpha, which the engine has nowhere to put — `Vertex` is position + RGB and the
+  scene pipeline is `BlendState::REPLACE`. A water-only alpha path would jump the
+  queue for one demo; Slice 10 is where that capability is designed properly, and
+  water picks it up there.
+- **Waves, refraction, and reflections** are further out still — see *Beyond*.
+
+## The second vertical — a `scene` demo (Slices 8–12)
+
+Terrain proved the thesis, but even with water it is **two deforming meshes that
+share one world space** — both rebuilt from scratch, in place, every time they
+change. Every consumer that wants *many distinct objects that move independently*
+falls off a cliff the terrain demo never approached: meshes are uploaded
+pre-transformed and `cube.rs` literally rotates its own corners on the CPU and
+re-uploads the mesh every frame. That works for one cube and for nothing else.
 
 The driving demo is **`examples/scene.rs`** — a small stage holding several
 articulated figures assembled from primitive shapes, moving independently, lit,
@@ -300,7 +369,7 @@ behalf: each item was kept only because `scene.rs` independently hits the same
 wall, and the rest was discarded (see *What stays in the consumer* below). If
 `scene.rs` doesn't hit a wall, it isn't in this list.
 
-### Slice 7 — Per-object transforms + an instance draw-list
+### Slice 8 — Per-object transforms + an instance draw-list
 
 *Roadblock:* the demo wants twenty objects, several of which are the *same* mesh
 in different places. Today `set_meshes` takes geometry already baked into world
@@ -323,9 +392,9 @@ this slice, while the surface is small.
 *Proof:* `scene.rs` places and moves many objects, reusing meshes, with **zero**
 per-frame vertex re-upload; `cube.rs` loses its CPU corner-rotation.
 
-### Slice 8 — Vertex normals + a lighting model in the pipeline
+### Slice 9 — Vertex normals + a lighting model in the pipeline
 
-*Roadblock:* Slice 7 breaks the trick terrain relies on. The terrain demo bakes
+*Roadblock:* Slice 8 breaks the trick terrain relies on. The terrain demo bakes
 diffuse shading into vertex color CPU-side, which is correct only because that
 mesh never moves — rotate an object whose lighting is painted into its vertices
 and the highlight rotates with it. Lighting has to be evaluated *after* the model
@@ -343,12 +412,12 @@ justify pushing normals into the pipeline." `scene.rs` is that demo.
 *Proof:* a rotating object in `scene.rs` is lit consistently from a fixed world
 direction, and terrain looks the same or better with the CPU bake deleted.
 
-### Slice 9 — Per-instance material
+### Slice 10 — Per-instance material
 
 *Roadblock:* two instances of the *same* mesh must be visually distinguishable,
-and after Slice 7 they cannot be — color lives in the shared vertex buffer, so
+and after Slice 8 they cannot be — color lives in the shared vertex buffer, so
 every instance of a mesh is identical by construction. Duplicating the mesh per
-color would undo the entire point of Slice 7.
+color would undo the entire point of Slice 8.
 
 - A small per-instance **material**: base color tint, and whatever minimum the
   lighting model needs (e.g. a specular/shininess scalar). Multiplied into vertex
@@ -356,12 +425,32 @@ color would undo the entire point of Slice 7.
 - Deliberately **not** a material system: no shader graph, no pipeline
   permutations, no texture binding (see *Beyond*). One struct on the instance.
 
-*Proof:* one uploaded mesh, drawn many times, each instance a different color.
+*The second consumer — water, and why it waited.* Terrain's water surface (Slice
+7) ships **opaque**, and translucency is the one thing it obviously wants. It was
+held back to here rather than given a water-shaped alpha path of its own, because
+two demos asking for the same capability is the difference between a design and a
+patch. What water needs beyond a color tint is small and worth naming now, since
+it is the part `scene.rs` alone would not have demanded:
 
-### Slice 10 — Primitive mesh builders
+- **An alpha channel at all.** `Vertex` is position + RGB (`renderer/vertex.rs`)
+  and the scene pipeline is `BlendState::REPLACE` (`renderer/mod.rs`). Whether
+  alpha rides the material or widens `Vertex` is this slice's call — note that
+  Slice 9 already reopens `Vertex` to add a normal, so the two changes should be
+  made together rather than churning the format twice.
+- **A transparent draw rule:** blended meshes drawn after opaque ones with
+  depth-write off. The existing `line_pipeline` is the precedent for a pipeline
+  variant selected per draw, so this is a known shape, not new ground. Sorting is
+  not needed for water specifically — one non-overlapping surface — and a general
+  sort should wait for a demo that actually needs one.
+
+*Proof:* one uploaded mesh, drawn many times, each instance a different color —
+and terrain's rivers and lakes go translucent, with the riverbed visible through
+them, by setting a material rather than by any water-specific engine code.
+
+### Slice 11 — Primitive mesh builders
 
 *Roadblock:* every figure in `scene.rs` is assembled from boxes, spheres, and
-capsules, and after Slice 8 hand-rolling them is genuinely painful — correct
+capsules, and after Slice 9 hand-rolling them is genuinely painful — correct
 per-face normals mean splitting shared vertices, so a box is 24 vertices with
 carefully paired normals rather than 8 tidy corners. Writing that by hand for the
 fifth shape is the wall.
@@ -380,12 +469,18 @@ which would). Every consumer needs a box; none of them need *our* box.
 *Proof:* `scene.rs` builds all its geometry from engine primitives and contains no
 hand-written vertex arrays.
 
-### Slice 11 — Fixed-timestep clock + time control
+### Slice 12 — Fixed-timestep clock + time control
 
 *Roadblock:* `scene.rs`'s motion is frame-rate coupled — it looks different at
 60 Hz and 144 Hz, and replaying it doesn't reproduce. The demo wants to pause,
 single-step, and scrub the scene, and `Renderer::dt()` (raw wall-clock) cannot
 express any of that.
+
+*Terrain gets here first.* Slice 7 advances erosion passes per *frame*, which
+means the same slider position erodes further on a fast machine than a slow one —
+the identical defect, arrived at from the other vertical, and with a landscape's
+worth of state behind it rather than a rotation angle. If that is visibly wrong
+while animating the water, this slice moves up.
 
 - An **accumulator** driving a fixed-step hook at a consumer-chosen rate, plus an
   **interpolation alpha** so rendering between steps is smooth rather than juddery.
@@ -395,7 +490,8 @@ express any of that.
   result regardless of frame rate — the engine stops being the source of
   wall-clock nondeterminism. It does not make the consumer deterministic; that is
   the consumer's job.
-- Terrain benefits too: its erosion iterations are frame-rate coupled today.
+- Terrain benefits too, and after Slice 7 it is no longer a nice-to-have: the
+  erosion animation *is* a simulation advancing on the frame clock.
 
 *Proof:* `scene.rs` runs identically at capped and uncapped frame rates, and its
 transport controls (play/pause/step/scrub) drive the scene from the UI panel.
@@ -458,7 +554,7 @@ only: the overlay pass, the glyph atlas, and the input plumbing beneath the
 Listed only so we recognize them when a future demo demands them — **not** to be
 built ahead of need: MSAA, and a render graph once there's more than one pass.
 (Transforms, a lighting model, and a minimal material moved out of this list and
-into Slices 7–11 above, because `scene.rs` demands them.) Each of the rest waits
+into Slices 8–12 above, because `scene.rs` demands them.) Each of the rest waits
 for a consumer to ask:
 
 - **Consumer-supplied textures.** The overlay already samples a glyph atlas, so
@@ -467,16 +563,25 @@ for a consumer to ask:
   that per-instance color can't express, and the UI crate's request for textured
   quads (icons, portraits) — see [UI `WISHLIST.md`](slmsttaa-ui/WISHLIST.md).
 - **An asset pipeline (glTF/OBJ + runtime file loading).** Explicitly *not* taken:
-  Slice 10 answers "geometry the consumer didn't compute" with primitives plus
+  Slice 11 answers "geometry the consumer didn't compute" with primitives plus
   transforms instead, which costs zero dependencies and no wasm asset-fetching
   story. Revisit only when a demo needs authored art that primitives genuinely
   cannot compose.
 - **Skeletal animation (joints, vertex skinning, clip playback).** Recognized and
   deferred whole. It is the single largest item any renderer consumer will ask
   for, and it is close to pointless without the asset pipeline above — you cannot
-  author a rig with no importer. Slices 7–11 deliberately stop at rigid objects a
+  author a rig with no importer. Slices 8–12 deliberately stop at rigid objects a
   consumer poses itself each frame; that is animation *by the consumer*, and it is
   as far as we go until a demo proves it insufficient.
+- **Water that looks wet** — animated wave normals, refraction, a Fresnel edge,
+  reflections. Named here so the ceiling on Slice 7 is explicit: that slice ships
+  a *flat blue surface*, Slice 10 makes it see-through, and everything past that
+  needs shading the engine does not do. Waves and Fresnel want per-pixel lighting
+  (which Slice 9 starts) plus a time uniform; a reflection wants to render the
+  scene twice into an offscreen target, which is the next entry. CPU-animating the
+  water mesh is possible from the demo today with zero engine help — worth knowing
+  as an escape hatch, but it pays a full mesh upload per frame to fake what a
+  shader would do for free, so it should stay an experiment rather than a slice.
 - **An offscreen render target composited into a UI rect**, so the 3D scene is one
   panel among many rather than a fullscreen background with UI floating on top.
   This is the concrete thing that would turn the two hand-wired passes into a real
