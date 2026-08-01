@@ -13,7 +13,21 @@
 //! depression (so `filled - z` is a lake and its depth) and already accumulates
 //! drainage area (so a threshold on it is the river network). Both used to be
 //! discarded at the end of each pass. Now they come back out of the erosion and
-//! get drawn, opaque, on a second mesh.
+//! get drawn, translucent, on a second mesh.
+//!
+//! ## Erosion is a time axis you can scrub
+//!
+//! The demo does not compute *an* eroded landscape any more — it walks a timeline
+//! and draws where it is standing. One erosion pass is one fixed simulation step
+//! ([`Application::fixed_update`]), so the whole run plays, pauses, single-steps,
+//! and **rewinds**, and what you watch is a flooded landscape draining into a
+//! river network over about fourteen seconds.
+//!
+//! Rewinding is the part that needed a decision. Erosion has no inverse — you
+//! cannot un-cut a valley — so the landscape at every pass is simply *kept*
+//! ([`TerrainDemo::history`]). Recomputing instead was measured and rejected: it
+//! costs 2.7 s in a debug build, which is the build this demo is usually run
+//! under, and every drag of the slider would have been a freeze.
 //!
 //! This is the payoff demo for the project's thesis: *a developer writes their
 //! algorithm and a few engine calls, and never touches `wgpu`/`winit`.*
@@ -23,16 +37,21 @@
 //! - uploads the mesh we build ([`Renderer::upload_mesh`]),
 //! - draws it solid or as a wireframe on demand ([`Renderer::set_render_mode`]),
 //! - lets us drive the orbit camera ([`Renderer::camera_mut`] + [`Renderer::input`]),
-//! - draws our parameter panel and HUD ([`Renderer::ui`]), and
-//! - hands us a frame delta ([`Renderer::dt`]) for the FPS readout.
+//! - draws our parameter panel and HUD ([`Renderer::ui`]),
+//! - hands us a frame delta ([`Renderer::dt`]) for the FPS readout, and
+//! - paces the simulation ([`Renderer::time`]) — a fixed step, a pause, and the
+//!   sub-step fraction the two stored passes are blended by.
 //!
 //! Controls: **drag the left mouse button** over the 3D view to orbit, **scroll**
-//! to zoom, arrow keys also orbit. The panel on the left edits every parameter
-//! live; releasing a slider regenerates the terrain. *passes* doubles as a wetness
-//! control — lakes silt up as the landscape matures, so a low count leaves lakes
-//! and a high one leaves only rivers. Toggle **wireframe** to inspect
-//! the underlying grid, **click a section heading** to collapse it, and **reset
-//! all** at the bottom of the panel throws every parameter back to its default.
+//! to zoom, arrow keys also orbit. The panel's *Time* section plays, pauses,
+//! single-steps and scrubs the erosion; dragging *pass* backwards is a real
+//! rewind. Everything below it edits the process rather than the position, and
+//! changing any of it rebuilds the axis from the base once the drag ends. The
+//! pass number doubles as a wetness reading — lakes silt up as the landscape
+//! matures, so early passes have lakes and late ones only rivers. Toggle
+//! **wireframe** to inspect the underlying grid, **click a section heading** to
+//! collapse it, and **reset all** at the bottom of the panel throws every
+//! parameter back to its default.
 //!
 //! The panel also carries [`log_slider`] — a widget written *here*, in the demo,
 //! from the toolkit's public API alone. That it can be is the point.
@@ -183,12 +202,28 @@ fn disp(h: f32) -> f32 {
 /// How far the water surface floats above the terrain it covers, in world units.
 /// Enough to beat depth-buffer precision, far below the ~0.04 grid spacing.
 const WATER_LIFT: f32 = 0.0025;
-/// Where the pass-count slider tops out.
+/// The last pass on the time axis — where the scrub slider tops out, and where
+/// the simulation stops advancing.
 ///
-/// Worth knowing while dragging it: lakes silt up as the landscape matures, so
-/// this doubles as a wetness control. The default 60 leaves lakes *and* rivers;
-/// past about 100 the lakes are gone and only the network remains.
-const PASSES_MAX: f32 = 150.0;
+/// **Measured, not guessed.** A headless probe over 150 passes at 128² says the
+/// landscape has three acts: per-pass movement decays six-fold over the first
+/// forty passes, lake coverage falls from 22.6% to zero by about pass 110, and
+/// past that the terrain lowers at a flat 0.019% of its relief per pass with no
+/// standing water left to change. So the axis ends a little past the last thing
+/// worth looking at, and the run has a genuine end rather than trailing off.
+const MAX_PASS: usize = 150;
+
+/// How many passes a second the timeline pays out by default.
+///
+/// The whole visible arc is the lakes draining over ~110 passes, so this is
+/// really "how long is the show": eight a second makes it about fourteen seconds,
+/// which is long enough to watch a basin silt up and short enough to sit through
+/// twice. It is a slider because the honest answer depends on the grid size.
+const PASS_HZ_DEFAULT: f32 = 8.0;
+/// Bounds on that slider. The floor is a crawl for watching one basin; the ceiling
+/// is past the point where blending has anything left to smooth.
+const PASS_HZ_MIN: f32 = 1.0;
+const PASS_HZ_MAX: f32 = 30.0;
 /// Default drainage area (in cells) at which a channel is drawn as a river.
 const RIVER_AREA_DEFAULT: f32 = 60.0;
 /// Default water opacity. Low enough that the riverbed reads through a channel,
@@ -242,10 +277,47 @@ struct TerrainDemo {
     /// The Perlin base heightmap, before erosion. Kept so the erosion sliders can
     /// re-erode without re-running the (separate) noise generation.
     base: Vec<f32>,
-    /// The eroded heights actually rendered (`n * n`).
+
+    /// **The time axis: the landscape at every pass, indexed by pass number.**
+    /// `history[0]` is the un-eroded base.
+    ///
+    /// This is the whole trick behind a scrub that runs *backwards*. Erosion is
+    /// irreversible — there is no inverse pass — so the only way to show pass 30
+    /// after reaching pass 90 is to have pass 30 written down. Recomputing it
+    /// instead was measured and rejected: 150 passes at 128² costs 336 ms in a
+    /// release build and **2.7 s in a debug one**, which is the build the demo is
+    /// normally run under, so every drag of the slider would have been a freeze.
+    ///
+    /// Storing it costs `4·n²` bytes a pass — 9.6 MB across the whole axis at the
+    /// default 128², 39 MB at the 256² maximum. That is a lot of memory to spend
+    /// on a demo and it is the right trade by a wide margin: it turns a rewind
+    /// into an array index, which is instant in *any* build.
+    ///
+    /// Water is deliberately **not** stored alongside. It is another `8·n²` bytes
+    /// a pass (three times the total), and it is only ever needed for the two
+    /// passes currently on screen — see [`TerrainDemo::snap_water`].
+    history: Vec<Vec<f32>>,
+    /// Which pass the blend starts from; the head of the time axis.
+    pass: usize,
+    /// The water at `pass` and at `pass + 1` — the two ends of the blend.
+    ///
+    /// Kept as a pair rather than recomputed because flow routing is the expensive
+    /// half of a pass. Walking forward, the far end becomes the near end and only
+    /// one new routing is needed; a scrub, which can land anywhere, pays for two.
+    snap_water: [erosion::Water; 2],
+    /// The `(pass, alpha)` the render buffers below were last filled for. Skips the
+    /// per-frame rebuild when neither has moved — which is every frame while paused.
+    resolved: Option<(usize, f32)>,
+
+    /// The heights actually rendered (`n * n`): the two bracketing passes lerped
+    /// by [`Timeline::alpha`]. Reused between frames rather than reallocated.
     heights: Vec<f32>,
-    /// The water standing on `heights` — lakes and rivers, ready to draw.
+    /// The water actually rendered, blended from [`TerrainDemo::snap_water`] the
+    /// same way.
     water: erosion::Water,
+
+    /// Passes per second the timeline pays out — the fixed-step rate.
+    pass_hz: f32,
     /// Grid side length.
     n: usize,
     /// Resolution slider value, snapped to a multiple of 8.
@@ -301,8 +373,13 @@ impl TerrainDemo {
             params,
             erosion,
             base: hm.heights,
+            history: Vec::new(),
+            pass: 0,
+            snap_water: [erosion::Water::default(), erosion::Water::default()],
+            resolved: None,
             heights: Vec::new(),
             water: erosion::Water::default(),
+            pass_hz: PASS_HZ_DEFAULT,
             n: hm.n,
             res: n as f32,
             show_water: true,
@@ -318,7 +395,8 @@ impl TerrainDemo {
             fps: 60.0,
             handles: None,
         };
-        demo.apply_erosion();
+        demo.reset_history();
+        demo.resolve(0.0);
         demo
     }
 
@@ -328,15 +406,117 @@ impl TerrainDemo {
         let hm = Heightmap::generate(self.n, &self.params);
         self.n = hm.n;
         self.base = hm.heights;
-        self.apply_erosion();
+        self.reset_history();
     }
 
-    /// Re-run the erosion layer (layer 2) on the cached base heightmap, keeping the
-    /// water it leaves behind. Called when an erosion control changes — no need to
-    /// regenerate the noise.
-    fn apply_erosion(&mut self) {
-        self.heights = self.base.clone();
-        self.water = erosion::erode(&mut self.heights, self.n, &self.erosion);
+    /// Throw the time axis away and rebuild it up to the current pass.
+    ///
+    /// Every erosion parameter is baked into the history the moment a pass is
+    /// computed, so changing one invalidates all of it — there is no partial
+    /// update, and pretending otherwise would leave passes computed under a `K` the
+    /// panel no longer shows. This is the expensive path (60 passes is ~120 ms
+    /// release, ~1 s debug), which is why the panel debounces it to mouse-release
+    /// exactly as it did when it was one batch `erode` call.
+    fn reset_history(&mut self) {
+        self.history.clear();
+        self.history.push(self.base.clone());
+        let pass = self.pass;
+        self.pass = 0;
+        self.seek_pass(pass);
+    }
+
+    /// Grow the history until pass `target` exists, capped at the end of the axis.
+    ///
+    /// Each iteration steps a clone of the newest state, which is the cheap way
+    /// round: [`erosion::step`] hands back the water belonging to the state it was
+    /// *given*, so walking forward never routes the same flow twice.
+    fn extend_to(&mut self, target: usize) {
+        let target = target.min(MAX_PASS);
+        while self.history.len() <= target {
+            let mut next = self.history[self.history.len() - 1].clone();
+            erosion::step(&mut next, self.n, &self.erosion);
+            self.history.push(next);
+        }
+    }
+
+    /// The water on a stored pass, clamped to the end of the axis.
+    fn water_at(&self, index: usize) -> erosion::Water {
+        let index = index.min(self.history.len().saturating_sub(1));
+        erosion::water_of(&self.history[index], self.n)
+    }
+
+    /// Move the head to `pass`, computing whatever the axis and the blend pair need.
+    ///
+    /// The jump case: both ends of the blend are unknown, so both are routed. Used
+    /// by the scrub slider, which can land anywhere including behind us.
+    fn seek_pass(&mut self, pass: usize) {
+        self.pass = pass.min(MAX_PASS);
+        self.extend_to(self.pass + 1);
+        self.snap_water = [self.water_at(self.pass), self.water_at(self.pass + 1)];
+        self.resolved = None;
+    }
+
+    /// Step one pass along the axis — the common case, and the cheap one.
+    ///
+    /// The state being moved onto was the *far* end of last frame's blend, so its
+    /// water has already been routed; only the new far end is unknown. That is what
+    /// keeps a playing timeline at one flow routing per pass instead of two.
+    fn advance_pass(&mut self) {
+        if self.pass >= MAX_PASS {
+            return;
+        }
+        self.pass += 1;
+        self.extend_to(self.pass + 1);
+        self.snap_water.swap(0, 1);
+        self.snap_water[1] = self.water_at(self.pass + 1);
+        self.resolved = None;
+    }
+
+    /// Fill the render buffers by blending the bracketing passes.
+    ///
+    /// **This is the half of [`Timeline::alpha`] no consumer had exercised.**
+    /// `scene.rs` renders between steps by evaluating a pose function at a sub-step
+    /// instant, which a landscape cannot do — there is no closed form for "pass
+    /// 43.6". So this is the other case the engine's docs name: a consumer holding
+    /// two snapshots and interpolating them.
+    ///
+    /// It is load-bearing rather than polish. The probe says a single cell moves up
+    /// to 0.0147 of the height range in the first pass — about half a grid cell —
+    /// so at eight passes a second the early landscape visibly jumps without it.
+    ///
+    /// The water blends the same way, and that turned out to be enough on its own:
+    /// only 0.2–0.6% of cells change wet/dry in a pass (rivers usually under 0.1%),
+    /// so lerping depth and area retreats a lake edge smoothly instead of popping
+    /// it. A soft threshold was planned for the river network and never needed.
+    fn resolve(&mut self, alpha: f32) {
+        // At the end of the axis there is nothing ahead to blend toward.
+        let t = if self.pass >= MAX_PASS {
+            0.0
+        } else {
+            alpha.clamp(0.0, 1.0)
+        };
+        if self.resolved == Some((self.pass, t)) {
+            return;
+        }
+        self.resolved = Some((self.pass, t));
+
+        let far = (self.pass + 1).min(self.history.len().saturating_sub(1));
+        let (a, b) = (&self.history[self.pass], &self.history[far]);
+        let lerp = |x: &f32, y: &f32| x + (y - x) * t;
+
+        self.heights.clear();
+        self.heights
+            .extend(a.iter().zip(b).map(|(x, y)| lerp(x, y)));
+
+        let (wa, wb) = (&self.snap_water[0], &self.snap_water[1]);
+        self.water.depth.clear();
+        self.water
+            .depth
+            .extend(wa.depth.iter().zip(&wb.depth).map(|(x, y)| lerp(x, y)));
+        self.water.area.clear();
+        self.water
+            .area
+            .extend(wa.area.iter().zip(&wb.area).map(|(x, y)| lerp(x, y)));
     }
 
     /// Upload the current terrain, and the water on it, as the engine's draw-list.
@@ -540,6 +720,16 @@ impl TerrainDemo {
         let theme = self.theme;
         let pending = self.pending_base || self.pending_erode;
 
+        // Transport state is read off the engine's clock *before* the UI borrows
+        // the renderer, and written back after it is dropped — the same shape
+        // `scene.rs` uses, for the same borrow reason.
+        let mut paused = renderer.time().is_paused();
+        let mut scrub = self.pass as f32;
+        let mut pass_hz = self.pass_hz;
+        let mut single_step = false;
+        let mut scrubbed = false;
+        let pass = self.pass;
+
         let mut ui = renderer.ui();
         // One line, at the top of the frame, and the whole UI is styled. Nothing
         // style-shaped is retained by the toolkit between frames.
@@ -558,6 +748,42 @@ impl TerrainDemo {
                 // (click a heading) — between them the panel stays on screen
                 // however many knobs it grows.
                 ui.scroll_area("params", PANEL_SCROLL_MAX, |ui| {
+                    // --- The time axis ---
+                    //
+                    // First in the panel because it is what the demo now *is*: the
+                    // landscape is a position on this axis, and everything below
+                    // describes the process that generated it.
+                    ui.section("Time", |ui| {
+                        // Two buttons need `columns`, not `horizontal` — a button
+                        // allocates whatever is left of the line, so in a row the
+                        // first takes all of it and the second is clipped off the
+                        // panel edge. Slice 12 shipped that bug and a screenshot
+                        // found it; this is the fix arriving pre-applied.
+                        ui.columns(2, |ui, i| {
+                            if i == 0 {
+                                let label = if paused { "play" } else { "pause" };
+                                if ui.button(label).show().clicked {
+                                    paused = !paused;
+                                }
+                            } else {
+                                single_step =
+                                    ui.button("step").variant(Variant::Secondary).show().clicked;
+                            }
+                        });
+                        // The scrub, and the reason this slice picked a stored
+                        // history over a recomputed one: dragging this backwards is
+                        // an array index, so it is as cheap as dragging it forwards.
+                        scrubbed = ui
+                            .slider("pass", &mut scrub, 0.0, MAX_PASS as f32)
+                            .decimals(0)
+                            .show()
+                            .changed;
+                        ui.slider("passes/sec", &mut pass_hz, PASS_HZ_MIN, PASS_HZ_MAX)
+                            .decimals(0)
+                            .show();
+                    });
+                    ui.separator();
+
                     // --- Layer 1: the Perlin base shape ---
                     let mut base = false;
                     let mut preset = None;
@@ -609,16 +835,12 @@ impl TerrainDemo {
                     // --- Layer 2: erosion ---
                     let mut erode = false;
                     ui.section("Fluvial erosion", |ui| {
-                        let mut iters = self.erosion.iterations as f32;
-                        if ui
-                            .slider("passes", &mut iters, 0.0, PASSES_MAX)
-                            .decimals(0)
-                            .show()
-                            .changed
-                        {
-                            self.erosion.iterations = iters.round() as u32;
-                            erode = true;
-                        }
+                        // "passes" used to live here, as the headline knob. It is
+                        // gone from this section on purpose: a pass count is a
+                        // position in *time*, not a property of the model, and it
+                        // now drives the Time section above rather than sitting
+                        // among the constants it is not one of.
+                        //
                         // The demo's own widget: erodibility is only tunable on
                         // a log track.
                         erode |= log_slider(
@@ -733,6 +955,7 @@ impl TerrainDemo {
         ui.panel(Anchor::TopRight, HUD_W, |ui| {
             ui.label_value("fps", &format!("{fps:.0}"));
             ui.label_value("grid", &format!("{n}x{n}"));
+            ui.label_value("pass", &format!("{pass}/{MAX_PASS}"));
             ui.checkbox("wireframe", &mut self.wireframe);
             ui.checkbox("light", &mut light);
         });
@@ -741,6 +964,29 @@ impl TerrainDemo {
         drop(ui);
 
         self.theme = if light { Theme::light() } else { Theme::dark() };
+
+        // --- Transport, written back to the engine's clock ---
+        //
+        // The rate is the pass rate: **one fixed step is one erosion pass**, which
+        // is what makes `alpha` mean "how far between two passes are we" and lets
+        // the blend fall straight out of it. Driving a 60 Hz clock and counting
+        // passes separately would have worked and would have thrown that away.
+        self.pass_hz = pass_hz;
+        renderer.time_mut().set_rate(pass_hz);
+        renderer.time_mut().set_paused(paused);
+        if single_step {
+            renderer.time_mut().step_once();
+        }
+        if scrubbed {
+            // A seek the engine explicitly says it cannot do for you: its clock
+            // moves, and rewinding the *consumer* is the consumer's problem. This
+            // demo can solve it only because it wrote every pass down — which is
+            // the whole design, stated as one line of code.
+            self.seek_pass(scrub.round().max(0.0) as usize);
+            renderer
+                .time_mut()
+                .seek(self.pass as f32 / pass_hz.max(1.0));
+        }
 
         if reset {
             self.params = NoiseParams::default();
@@ -827,6 +1073,23 @@ impl Application for TerrainDemo {
         self.upload(renderer);
     }
 
+    /// One erosion pass, and nothing else.
+    ///
+    /// **The entire simulation lives here**, which is what buys the transport
+    /// controls above: the landscape advances only when the engine says a fixed
+    /// step is due, so pausing genuinely stops geology rather than merely freezing
+    /// a camera. Nothing in [`Application::update`] moves the terrain — it only
+    /// decides how to *draw* whatever pass the axis is currently sitting on.
+    ///
+    /// `dt` is ignored, and that is honest rather than lazy. A pass is not defined
+    /// in seconds: the model's timestep is folded into the erodibility `K` (see
+    /// [`ErosionParams::erodibility`]), so a pass *is* the unit of simulation time.
+    /// The step rate is set to the pass rate for exactly this reason, which makes
+    /// `dt` a constant the hook has no use for.
+    fn fixed_update(&mut self, _renderer: &mut Renderer, _dt: f32) {
+        self.advance_pass();
+    }
+
     fn update(&mut self, renderer: &mut Renderer) {
         // Smooth the FPS readout (exponential moving average).
         let dt = renderer.dt();
@@ -859,10 +1122,25 @@ impl Application for TerrainDemo {
                 self.n = target_n;
                 self.regenerate_base();
             } else {
-                self.apply_erosion();
+                // An erosion constant changed, so every stored pass was computed
+                // under the old one. The axis is rebuilt from the base rather than
+                // patched — see `reset_history`.
+                self.reset_history();
             }
             self.pending_base = false;
             self.pending_erode = false;
+            dirty = true;
+        }
+
+        // Fill the render buffers for the instant this frame lands on. `resolve`
+        // is a no-op unless the pass or the sub-pass fraction actually moved, so a
+        // paused demo costs no mesh work at all — and a playing one at 75 fps
+        // against 8 passes a second rebuilds for nine frames it would otherwise
+        // have drawn identically, which is the point.
+        let alpha = renderer.time().alpha();
+        let was = self.resolved;
+        self.resolve(alpha);
+        if self.resolved != was {
             dirty = true;
         }
 

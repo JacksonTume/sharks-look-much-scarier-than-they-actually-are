@@ -37,6 +37,20 @@
 //!
 //! Iterate. More passes = a more deeply incised, mature landscape.
 //!
+//! ## A pass is a unit of time, not a parameter
+//!
+//! This module used to expose one batch call — "erode this by N passes" — with N
+//! sitting in [`ErosionParams`] beside the erodibility, as though *how eroded* were
+//! a property of the model. It isn't. It is a position on a **time axis**, and the
+//! difference only became visible when the demo started animating it: the landscape
+//! at pass 60 is not configured differently from the one at pass 30, it is the same
+//! landscape thirty passes later.
+//!
+//! So the batch call is gone and [`step`] is public in its place. The caller runs
+//! passes one at a time, keeps the ones it wants, and treats the sequence as what
+//! it is — a history. [`water_of`] reads the water off any state without advancing
+//! it, which is what lets a caller show a pass it did not just compute.
+//!
 //! ## The water
 //!
 //! Steps 1 and 2 compute, every single pass, exactly the two fields you need to
@@ -51,8 +65,8 @@
 //!   incision is proportional to, which is why the rivers you see are exactly the
 //!   ones doing the carving.
 //!
-//! Both now come back out of [`erode`] as a [`Water`], describing the terrain it
-//! hands you rather than being dropped on the floor.
+//! Both now come back out of [`step`] as a [`Water`], describing the terrain it
+//! was handed rather than being dropped on the floor.
 //!
 //! Drawing them needed one change to the model itself: **lakes have to survive the
 //! pass that finds them**. The implicit update raises a pit toward the rim it was
@@ -71,15 +85,6 @@ use std::collections::BinaryHeap;
 /// Tunable erosion parameters — the knobs the UI exposes.
 #[derive(Debug, Clone, Copy)]
 pub struct ErosionParams {
-    /// Number of erosion timesteps. The headline "how eroded" control: more
-    /// passes cut deeper, more mature valley networks.
-    ///
-    /// It also decides how much **water** survives, which is worth knowing before
-    /// reaching for it. Lakes silt up as the landscape matures (see
-    /// [`deposition`](Self::deposition)), so the default 60 leaves a landscape with
-    /// both lakes and rivers in it; push much past 100 and the lakes are gone and
-    /// only the river network is left.
-    pub iterations: u32,
     /// Fluvial erodibility `K` (folds in the timestep): how strongly rivers pull
     /// the terrain down toward their outlet each step.
     pub erodibility: f32,
@@ -116,7 +121,6 @@ pub struct ErosionParams {
 impl Default for ErosionParams {
     fn default() -> Self {
         Self {
-            iterations: 60,
             erodibility: 0.004,
             m: 0.5,
             deposition: 0.05,
@@ -155,29 +159,34 @@ impl Water {
     }
 }
 
-/// Erode `heights` (an `n × n` grid, modified in place) under `params`, and hand
-/// back the [`Water`] left standing on the result.
+/// The water standing on `heights` right now, without advancing anything.
 ///
-/// The returned water is the *last* pass's — the lakes and rivers belonging to the
-/// terrain you get back, which is exactly what the caller wants to draw. Earlier
-/// passes' water is intermediate state and nobody sees it.
-pub fn erode(heights: &mut [f32], n: usize, params: &ErosionParams) -> Water {
+/// [`step`] hands back the water it was *driven* by, which covers a caller walking
+/// the timeline forward. This covers the one that isn't walking: showing a pass it
+/// did not just compute — a scrub backwards into a stored state, or the raw base
+/// heightmap at pass zero. Raw Perlin noise is full of depressions, and they hold
+/// just as much water for never having been eroded.
+///
+/// It is the expensive half of a pass (the Priority-Flood) and none of the cheap
+/// half, so a caller that can get its water from [`step`] should.
+pub fn water_of(heights: &[f32], n: usize) -> Water {
     if n < 3 {
         return Water::empty(heights.len());
     }
-    let mut water = None;
-    for _ in 0..params.iterations {
-        water = Some(step(heights, n, params));
-    }
-    // Zero passes still has water on it: raw Perlin noise is full of depressions,
-    // and they hold just as much water for never having been eroded.
-    water.unwrap_or_else(|| analyze(heights, n).1)
+    analyze(heights, n).1
 }
 
 /// Advance `heights` by **one** timestep of flow-routed stream-power incision,
 /// siltation, and optional thermal relaxation, returning the [`Water`] that drove
 /// it. See the module docs for the model.
-fn step(heights: &mut [f32], n: usize, params: &ErosionParams) -> Water {
+///
+/// **The returned water belongs to the heights that went *in*, not the ones coming
+/// out** — it is what the pass read to decide where to cut. That pairing is the
+/// useful one for a caller keeping a history: stepping a stored pass `k` yields
+/// both the water to draw *at* `k` and the heights at `k + 1`, so walking the
+/// timeline forward costs exactly one flow routing per pass and never re-analyzes
+/// a state it has already seen.
+pub fn step(heights: &mut [f32], n: usize, params: &ErosionParams) -> Water {
     if n < 3 {
         return Water::empty(heights.len());
     }

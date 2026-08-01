@@ -691,6 +691,20 @@ finally demands one, not as a to-build list:
   now say which to reach for. A dedicated widget still waits until this
   composition is demonstrably not enough — markers along the track remain the
   likely breaking point.
+
+  **A second consumer arrived and changed nothing, which is the useful part.**
+  Engine [Slice
+  13](../ROADMAP.md#slice-13--erosion-as-a-scrubbable-time-axis-done) gave
+  `examples/terrain.rs` its own transport — play/pause, single-step, a passes-per-
+  second slider and a scrub that genuinely rewinds — and it is the same
+  `columns(2)` + `button` + `slider` composition `scene.rs` uses, written
+  independently in a different demo. Two consumers building the identical control
+  out of primitives is normally the moment a widget graduates; here it is the
+  argument *against* one, because neither needed anything the roster lacks and a
+  `transport()` widget would only be those four calls with their arrangement
+  frozen. It stays on this list. What would actually move it is the thing already
+  named above — markers along the track — and terrain has a natural candidate
+  (where the lakes finish draining) that it has not asked for.
 - **Draggable / resizable / dockable panels** — no.
 - **A retained-mode widget tree** — explicitly not the destination (root
   principle 2). The toolkit stays immediate-mode with minimal persistent state.

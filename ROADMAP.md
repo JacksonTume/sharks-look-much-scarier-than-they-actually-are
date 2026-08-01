@@ -352,6 +352,9 @@ the terrain as a second element of a call that has existed since Slice 1.
   believe the result is worth watching, and that is a question about how the water
   and terrain *look* in motion, not about the stepping.
 
+  *This was retried and shipped as **Slice 13**, and the diagnosis above was
+  right about the cause and wrong about the cure — see below.*
+
 - **Translucent water** waited for Slice 10 (per-instance material) and **landed
   there**. It needed alpha, which the engine had nowhere to put — `Vertex` was
   position + RGB and the scene pipeline was `BlendState::REPLACE`. A water-only
@@ -776,6 +779,130 @@ from this file. The nearest candidates already have their evidence recorded unde
 *Beyond*: terrain's deferred erosion animation is now unblocked (this slice was
 its stated blocker) and waits only on a reason to believe it is worth watching,
 and consumer-supplied textures have two independent consumers asking.
+
+*The first of those became **Slice 13**, immediately below, and it is the first
+consumer of `fixed_update` other than the demo it was built for.*
+
+## Back to terrain — Slice 13
+
+### Slice 13 — Erosion as a scrubbable time axis ✅ done
+
+*Roadblock:* Slice 7 built the erosion animation, looked at it, and **pulled it**.
+Slice 12 then removed its stated blocker, so what was left was the harder half:
+"a reason to believe the result is worth watching." That is not a thing this file
+could settle — it is a question about what the landscape *looks like* in motion.
+
+**The pulled attempt's diagnosis was right about the cause and wrong about the
+cure.** It said the terrain "teleports, just via a blur" and concluded that pacing
+had to come off a wall clock. Pacing was necessary and was not sufficient: the
+missing piece is that the interesting thing on screen is not the *rock*, it is the
+**water**, and a pass count is a position in *time* rather than a parameter.
+
+**It started with a probe, not with code.** The roadmap's own rule from Slice 7 —
+*when a simulation looks wrong, measure it before re-tuning it* — applied exactly.
+A headless run over 150 passes at 128² said:
+
+| | pass 1 | pass 20 | pass 60 | pass 110 | pass 150 |
+|---|---|---|---|---|---|
+| movement, % of relief / pass | 0.110 | 0.048 | 0.021 | 0.019 | 0.019 |
+| **lake coverage** | **22.6%** | **19.0%** | **13.5%** | **0.0%** | **0.0%** |
+| river coverage | 5.8% | 5.7% | 5.8% | 5.9% | 6.0% |
+| cells changing wet/dry per pass | — | 0.36% | 0.57% | 0.10% | 0.01% |
+
+Three things fell out of that table, and each one decided a design question:
+
+- **The show is the lakes draining.** Coverage falls monotonically from 22.6% to
+  nothing while the river network barely changes extent. That is the arc, it runs
+  about 110 passes, and at eight passes a second it is a fourteen-second watch —
+  which is what "worth watching" turned out to mean. The rock is nearly static
+  after pass 40; had the demo been judged on the terrain alone it would have been
+  pulled a second time.
+- **The axis has a natural end.** Past pass 110 there is no water left and the
+  land lowers at a flat 0.019% a pass forever. `MAX_PASS` is 150 — a little past
+  the last interesting thing — so the run *finishes* instead of trailing off.
+- **The water needed no special handling.** Only 0.2–0.6% of cells change wet/dry
+  in a pass, rivers usually under 0.1%. A soft threshold to stop the river network
+  popping was designed and then **not built**, because the measurement said there
+  was nothing to fix. Lerping depth and area is enough.
+
+**The second measurement is the one that chose the architecture.** A backwards
+scrub has to produce pass 30 after reaching pass 90, and erosion has no inverse.
+Recomputing from the cached base is the obvious answer and it was timed first:
+
+| | 1 pass | 60 passes | 150 passes |
+|---|---|---|---|
+| release, 128² | 1.9 ms | 120 ms | 336 ms |
+| **debug, 128²** | **16.8 ms** | **1.0 s** | **2.7 s** |
+| debug, 256² | 68 ms | 4.4 s | 11.8 s |
+
+`cargo run --example terrain` is a **debug** build, so every drag of the slider
+would have been a multi-second freeze. So the landscape at every pass is simply
+kept: `history[pass]`, `4·n²` bytes each, 9.6 MB across the whole axis at 128² and
+39 MB at the 256² maximum. **A rewind is an array index**, which is instant in any
+build. Spending tens of megabytes to avoid seconds of recompute is not a close
+call, and it is only obvious once both numbers are on the table.
+
+*Proof:* `cargo run --example terrain` plays a flooded landscape draining into a
+dendritic river network over ~19 s, at 75–86 fps on a 128² grid **with the mesh
+rebuilt every frame**. The transport was driven and checked frame by frame: pause
+froze the pass at 61 while the fps readout kept moving, three clicks of *step*
+gave exactly 62, 63, 64, and dragging *pass* from 150 back to 20 restored the
+lakes the mature run had drained — a real rewind, not a re-erode. Verified on
+native and on web.
+
+**What shipped, and what it cost:**
+
+- **The engine gained nothing at all, for the second time.** Slice 7 was the first
+  slice to buy no capability; this is the second, and it is a stronger result
+  because this one *animates*. Everything it needed — a fixed step, a pause, a
+  seek, a sub-step fraction — Slice 12 had already shipped for `scene.rs`. No new
+  public API, no `Painter` method, no shader edit. A demo that lands on an
+  existing seam without moving it is the best evidence that seam was drawn right.
+- **`ErosionParams::iterations` was deleted, and that is the slice's real idea.**
+  "How eroded" sat among the erodibility and the talus angle as though it were a
+  property of the model. It is a *position on a time axis*: the landscape at pass
+  60 is not configured differently from the one at pass 30, it is the same
+  landscape thirty passes later. Once that is said out loud the batch `erode` has
+  no callers and goes too, replaced by a public `step` and a `water_of`.
+- **This is the first consumer to use `alpha` the way its docs describe.**
+  `Timeline::alpha`'s docs name two cases — evaluate a pose function at a sub-step
+  instant, or hold two snapshots and blend them — and `scene.rs` only ever
+  exercised the first, because a pose *is* a closed form. A landscape is not:
+  there is no formula for "pass 43.6". So terrain blends `history[k]` and
+  `history[k+1]`, and the second half of that doc is no longer a claim.
+- **Blending is a refinement, and the honest reading is smaller than expected.**
+  It was justified by measurement (the fastest cell moves ~half a grid cell in
+  pass 1) and it is worth having. But at eight passes a second against 75 fps the
+  terrain advances well under one pass per frame anyway, and a single pass changes
+  ~0.1% of screen pixels — so the strobing the pulled attempt feared was a product
+  of running **75 passes a second**, not of the absence of interpolation. Stated
+  plainly because the temptation is to credit the fix rather than the pacing.
+- **`step` returns the water it was *given*, not the water it produced**, and that
+  pairing is load-bearing. Walking the axis forward costs exactly one flow routing
+  per pass, because the far end of this frame's blend becomes the near end of the
+  next one. A scrub, which can land anywhere, pays for two. Getting this backwards
+  doubles the cost of the common case.
+
+*What the browser found, and it is a real cost rather than a bug.* The demo runs
+at **21 fps in a debug wasm build and 50–57 in a release one**, against 75–86
+native. The per-frame mesh rebuild that blending requires is the thing that got
+more expensive — Slice 8 removed exactly this work for static scenes, and a
+deforming landscape is the case that has to pay it back. So
+`cargo xtask serve terrain --release` is not optional here the way it used to be,
+and that is worth knowing before anyone concludes the web target regressed.
+
+*One reading of the web that is not a defect.* A tab that is not painting advances
+the erosion far more slowly than wall time — 2 passes in 18 s rather than 8 a
+second. That is Slice 12's documented throttle (`Clock` clamps every frame to
+100 ms, so a suspended tab simply banks no simulation time) meeting a demo whose
+whole subject is elapsed passes. It looks alarming in a screenshot and is the
+intended behaviour; the alternative is a tab that returns to the foreground and
+teleports the landscape.
+
+*What it exposed.* Nothing for the engine, and that is now three slices running
+(11, 12, 13). The candidate with evidence attached is unchanged and unmet:
+consumer-supplied textures, still with two consumers asking and no demo blocked on
+it yet.
 
 ### What stays in the consumer
 
