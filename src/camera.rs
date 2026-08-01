@@ -93,14 +93,26 @@ pub struct CameraUniform {
     /// a projection matrix in the fragment stage without inverting it. So the eye
     /// rides along beside it.
     eye: [f32; 4],
+    /// `[seconds since start, 0, 0, 0]` — wall-clock time, for shading that
+    /// animates.
+    ///
+    /// It rides here rather than in a uniform of its own because it is wanted in
+    /// exactly the same place and at exactly the same rate as the view: once per
+    /// frame, by every pipeline. A surface whose *detail* moves — ripples on
+    /// water, a shimmer, a scroll — should not have to rebuild and re-upload its
+    /// mesh every frame to express that, which is what a consumer is forced into
+    /// when the shader has no clock. Terrain's water was paying 10 ms a frame to
+    /// do on the CPU what this makes free.
+    frame: [f32; 4],
 }
 
 impl CameraUniform {
-    /// Build the uniform payload from a camera.
-    pub fn from_camera(camera: &Camera) -> Self {
+    /// Build the uniform payload from a camera and the frame clock.
+    pub fn new(camera: &Camera, time: f32) -> Self {
         Self {
             view_proj: camera.view_projection().to_cols_array_2d(),
             eye: [camera.eye.x, camera.eye.y, camera.eye.z, 0.0],
+            frame: [time, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -110,6 +122,7 @@ impl Default for CameraUniform {
         Self {
             view_proj: Mat4::IDENTITY.to_cols_array_2d(),
             eye: [0.0; 4],
+            frame: [0.0; 4],
         }
     }
 }

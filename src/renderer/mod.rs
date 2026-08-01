@@ -326,6 +326,11 @@ pub struct Renderer {
     ui_state: UiState,
     /// Frame clock for delta-time and the FPS readout — wall time.
     clock: Clock,
+    /// Wall-clock seconds since the first frame, handed to shaders so surface
+    /// detail can animate without the consumer touching its mesh. Summed from
+    /// clamped frame deltas, so a stalled or backgrounded window advances it
+    /// slowly rather than jumping (the same trade [`Clock`] already makes).
+    elapsed: f32,
     /// Fixed-timestep simulation clock, driven from `clock` each frame. The
     /// counterpart to the above: identical steps rather than real ones.
     timeline: Timeline,
@@ -428,7 +433,7 @@ impl Renderer {
         // --- Camera uniform ------------------------------------------------
         let mut camera = Camera::new(width as f32 / height as f32);
         camera.set_aspect(width, height);
-        let camera_uniform = CameraUniform::from_camera(&camera);
+        let camera_uniform = CameraUniform::new(&camera, 0.0);
 
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera uniform buffer"),
@@ -536,6 +541,7 @@ impl Renderer {
             overlay,
             ui_state: UiState::default(),
             clock: Clock::new(),
+            elapsed: 0.0,
             timeline: Timeline::new(),
             window,
         }
@@ -792,6 +798,7 @@ impl Renderer {
     /// capped cannot arrive here as a hundred queued steps.
     pub(crate) fn begin_frame(&mut self) -> u32 {
         let dt = self.clock.tick();
+        self.elapsed += dt;
         self.overlay.begin_frame();
         self.timeline.begin_frame(dt)
     }
@@ -805,7 +812,7 @@ impl Renderer {
 
     /// Advance per-frame state (camera animation, etc.).
     pub fn update(&mut self) {
-        self.camera_uniform = CameraUniform::from_camera(&self.camera);
+        self.camera_uniform = CameraUniform::new(&self.camera, self.elapsed);
         self.queue.write_buffer(
             &self.camera_buffer,
             0,

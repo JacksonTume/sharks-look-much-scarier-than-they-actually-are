@@ -1022,6 +1022,75 @@ uniform that grew. Thirteen of sixteen is within limits by inspection. That is
 reasoning, not a test — the same sentence Slice 9/10 had to write, now with less
 headroom behind it.
 
+### Slice 15 — Ripples on the GPU (and the performance that bought) ✅ done
+
+*Roadblock:* Slice 14's water was rejected on sight, for two reasons that turned
+out to be the same reason. It **banded** — every lake had straight parallel light
+stripes across it — and it was **slow**, 66 fps where the demo used to hold 75.
+
+*Measured first, and the measurement named the culprit immediately:*
+
+| per frame, 128² | before |
+|---|---|
+| terrain mesh build | 0.76 ms |
+| **water mesh build** | **10.2 ms** |
+
+Ten milliseconds against a 13.3 ms budget, for a surface covering a fifth of the
+screen. And the largest single item inside it was the wave train: four `sin_cos`
+per vertex across ~50,000 vertices, recomputed every frame because the ripples
+lived in the *mesh*.
+
+**Both complaints have one cause: the waves were geometry.** Being geometry made
+them expensive, and it capped their detail at the tessellation — a normal per
+vertex, linearly interpolated across triangles far bigger than a ripple, which is
+precisely what draws stripes instead of water.
+
+- **The engine's clock reached the shader.** `CameraUniform` grew a `frame` field
+  (wall-clock seconds). This is the "time uniform" *Beyond* has been predicting
+  since Slice 7, and it arrived exactly where that entry said it would.
+- **`Material` grew `ripple_strength` / `ripple_scale`**, and the fragment shader
+  grew a six-octave ripple field. It is framed as generic animated normal detail
+  rather than as water, because that is what it is — a moving normal is equally a
+  shimmer or a heat haze. **The two parameters cost zero new vertex attributes**:
+  they ride the spare `w` channels of the two vectors added in Slice 14, which is
+  what the "thirteen of sixteen" note was warning would be necessary.
+- **The banding fix is in the octave layout, and each part is load-bearing.**
+  Every octave is rotated ~113° off the last so none shares an axis with the grid;
+  the frequency ratio is 1.87 so no two octaves share a period; and longer waves
+  travel *faster* (real deep-water dispersion), which is what stops the whole
+  field sliding as one moiré band. Amplitude falls 0.55 as frequency rises 1.87,
+  so every scale contributes the same slope — equal roughness at all scales is
+  the property that reads as water.
+
+**Two more CPU fixes, both from the same profile:** the vertex and index buffers
+are now sized from the previous frame instead of doubling their way up from empty
+(about seventeen reallocations a frame for a count that barely changes), and a
+cell whose four corners are all dry is rejected before either of its triangles is
+contoured — water covers under a fifth of the map, so that skips most of the grid
+on one comparison chain.
+
+*Proof:* **10.2 ms → 2.3 ms** of water mesh build, and **66 fps → 75–80**, which
+is faster than the demo ran *before* Slice 14 added water contouring at all. The
+stripes are gone, replaced by per-pixel glints that do not depend on how finely
+the surface is tessellated. Verified native; 105 tests, clippy clean, both wasm
+targets build.
+
+**One tuning pass was wrong and is recorded because it is the same trap twice.**
+With ripples per-pixel the specular was pushed to 1.35 on the theory that fine
+detail could absorb it. It saturated to flat white across whole lakes — worse than
+the stripes. Per-pixel detail makes a highlight *safe to sharpen*, not *safe to
+brighten*: shininess went up to 90 and strength came **down** to 0.5.
+
+*What is still missing, stated plainly.* This is a lit, moving, correctly-shaped
+surface, and it is not what a modern engine means by water. There is no
+reflection and no refraction, so the Fresnel term still tends toward a flat colour
+rather than an image of the scene — and at the demo's default camera angle water
+is only ~3% reflective anyway, so the honest cue is barely there. Closing that gap
+needs an offscreen render target: render the opaque pass to a texture, then let
+the blended pass sample it for refraction and a screen-space reflection. That is
+the render-graph entry under *Beyond*, it is the next real slice, and no amount of
+tuning the current shader substitutes for it.
+
 ### What stays in the consumer
 
 Recorded because this boundary will be asked about again, and it is the same

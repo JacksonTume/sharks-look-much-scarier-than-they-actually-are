@@ -20,6 +20,9 @@ struct CameraUniform {
     view_proj: mat4x4<f32>,
     // World-space eye. Needed for the two view-dependent terms; `w` is padding.
     eye: vec4<f32>,
+    // x = wall-clock seconds since start. Lets surface detail animate without the
+    // consumer rebuilding a mesh to express it.
+    frame: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -56,9 +59,10 @@ struct InstanceInput {
     @location(8) normal_1: vec3<f32>,
     @location(9) normal_2: vec3<f32>,
     @location(10) tint: vec4<f32>,
-    // [specular strength, shininess, fresnel f0, unused] — packed into one slot
-    // because attribute slots are scarcer than bytes.
+    // [specular strength, shininess, fresnel f0, ripple strength] — packed into
+    // one slot because attribute slots are scarcer than bytes.
     @location(11) shading: vec4<f32>,
+    // [fresnel tint rgb, ripple scale].
     @location(12) fresnel_tint: vec4<f32>,
 };
 
@@ -69,6 +73,7 @@ struct VertexOutput {
     @location(2) world_position: vec3<f32>,
     @location(3) shading: vec4<f32>,
     @location(4) fresnel_tint: vec3<f32>,
+    @location(5) ripple_scale: f32,
 };
 
 @vertex
@@ -98,13 +103,65 @@ fn vs_main(in: VertexInput, instance: InstanceInput) -> VertexOutput {
     out.world_position = world.xyz;
     out.shading = instance.shading;
     out.fresnel_tint = instance.fresnel_tint.xyz;
+    out.ripple_scale = instance.fresnel_tint.w;
     out.clip_position = camera.view_proj * world;
     return out;
 }
 
+// The slope `(dh/dx, dh/dz)` of an animated ripple field at a world position.
+//
+// Six octaves of directional waves. Three things stop it looking like the stripes
+// a naive sum of sines produces, and all three are necessary:
+//
+//   - **Every octave points somewhere else.** The direction is rotated by ~113
+//     degrees each time, so no two octaves share an axis and none lines up with
+//     the grid the geometry was built on.
+//   - **The frequency ratio is not an integer.** At 1.87 the octaves never share
+//     a period, so the pattern does not repeat at any scale you can see.
+//   - **Longer waves travel faster**, which is what real deep water does
+//     (phase speed goes as the square root of wavelength). Octaves marching in
+//     lockstep is what turns a wave field into one sliding moiré band.
+//
+// Amplitude falls by 0.55 while frequency rises by 1.87, so each octave
+// contributes roughly the same *slope* — the surface is equally rough at every
+// scale, which is the property that reads as water rather than as a wobble.
+//
+// Evaluated per fragment, so the detail is per pixel and does not depend on how
+// finely the surface happens to be tessellated.
+fn ripple_slope(p: vec2<f32>, t: f32, scale: f32) -> vec2<f32> {
+    var slope = vec2<f32>(0.0, 0.0);
+    var dir = vec2<f32>(0.8, 0.6);
+    var freq = max(scale, 0.001);
+    var amp = 1.0;
+    for (var i = 0; i < 6; i = i + 1) {
+        let speed = inverseSqrt(freq) * 2.4;
+        let phase = dot(dir, p) * freq + t * speed * freq;
+        slope = slope + dir * (cos(phase) * amp * freq);
+        // Rotate the next octave off this one's axis.
+        let rc = -0.39;
+        let rs = 0.92;
+        dir = vec2<f32>(dir.x * rc - dir.y * rs, dir.x * rs + dir.y * rc);
+        freq = freq * 1.87;
+        amp = amp * 0.55;
+    }
+    // Normalized so `ripple_strength` means the same thing whatever `scale` is.
+    return slope / max(scale, 0.001) * 0.18;
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let normal = normalize(in.world_normal);
+    var normal = normalize(in.world_normal);
+
+    // Animated surface detail, before any lighting reads the normal.
+    let ripple_strength = in.shading.w;
+    if (ripple_strength > 0.0) {
+        let slope = ripple_slope(in.world_position.xz, camera.frame.x, in.ripple_scale);
+        // The perturbation is a horizontal tilt of an up-facing surface, which is
+        // what a ripple on water is. Adding rather than replacing keeps whatever
+        // the geometry itself was doing.
+        normal = normalize(normal + vec3<f32>(-slope.x, 0.0, -slope.y) * ripple_strength);
+    }
+
     let light = normalize(LIGHT_DIR);
     let lambert = max(dot(normal, light), 0.0);
     var rgb = in.color.rgb * (AMBIENT + DIFFUSE * lambert);

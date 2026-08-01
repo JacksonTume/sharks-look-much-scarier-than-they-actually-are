@@ -216,6 +216,24 @@ pub struct Material {
     /// The colour a Fresnel edge tends toward — a sky colour, for water.
     pub fresnel_tint: [f32; 3],
 
+    /// Strength of an **animated procedural ripple** applied to the surface
+    /// normal, in the fragment shader. `0.0` leaves the normal alone.
+    ///
+    /// This is shading detail, not geometry: nothing moves, the surface just
+    /// stops being locally flat. That distinction is the whole value of it — a
+    /// consumer wanting a surface whose detail *animates* would otherwise have to
+    /// rebuild and re-upload its mesh every frame to express it, which is exactly
+    /// what terrain's water was doing at a measured 10 ms a frame. Here it costs
+    /// no mesh work at all and gets per-*pixel* detail rather than per-vertex.
+    ///
+    /// Not a water feature, though water is what asked for it: it is a moving
+    /// normal, which is equally a shimmer, a jelly, or heat haze.
+    pub ripple_strength: f32,
+
+    /// Spatial frequency of the ripple's largest wave, in world units. Higher is
+    /// choppier. Ignored when [`ripple_strength`](Self::ripple_strength) is zero.
+    pub ripple_scale: f32,
+
     /// Force the blended, depth-write-off pipeline even when
     /// [`tint`](Self::tint)'s alpha is `1.0`.
     ///
@@ -234,6 +252,8 @@ impl Material {
         shininess: 32.0,
         fresnel: 0.0,
         fresnel_tint: [1.0, 1.0, 1.0],
+        ripple_strength: 0.0,
+        ripple_scale: 8.0,
         blended: false,
     };
 
@@ -264,6 +284,15 @@ impl Material {
     pub const fn with_fresnel(mut self, f0: f32, tint: [f32; 3]) -> Self {
         self.fresnel = f0;
         self.fresnel_tint = tint;
+        self
+    }
+
+    /// This material with an animated ripple of `strength` on its normal, whose
+    /// largest wave has spatial frequency `scale`. See
+    /// [`ripple_strength`](Self::ripple_strength).
+    pub const fn with_ripples(mut self, strength: f32, scale: f32) -> Self {
+        self.ripple_strength = strength;
+        self.ripple_scale = scale;
         self
     }
 
@@ -365,12 +394,15 @@ pub(crate) struct InstanceRaw {
     /// columns. See [`InstanceRaw::normal_matrix`].
     normal: [[f32; 3]; 3],
     tint: [f32; 4],
-    /// `[specular, shininess, fresnel, unused]` — the view-dependent shading
-    /// terms, packed into one attribute slot rather than three. Three scalars
-    /// would have cost three of the sixteen WebGL2 guarantees to carry twelve
-    /// bytes; this costs one and wastes four.
+    /// `[specular, shininess, fresnel, ripple strength]` — the view-dependent
+    /// shading terms packed into one attribute slot rather than four. Scalars
+    /// would have cost one of the sixteen WebGL2 guarantees each to carry four
+    /// bytes; this costs one slot and wastes none.
     shading: [f32; 4],
-    /// The Fresnel tint, padded to `vec4`. `w` is unused.
+    /// `[fresnel tint rgb, ripple scale]`. The ripple parameters ride the spare
+    /// `w` channels of the two vectors above rather than claiming a slot of
+    /// their own — with thirteen of sixteen attributes already spoken for, the
+    /// padding was the cheaper place to put them.
     fresnel_tint: [f32; 4],
 }
 
@@ -383,8 +415,13 @@ impl InstanceRaw {
             model: model.to_cols_array_2d(),
             normal: Self::normal_matrix(model),
             tint: m.tint,
-            shading: [m.specular, m.shininess, m.fresnel, 0.0],
-            fresnel_tint: [m.fresnel_tint[0], m.fresnel_tint[1], m.fresnel_tint[2], 0.0],
+            shading: [m.specular, m.shininess, m.fresnel, m.ripple_strength],
+            fresnel_tint: [
+                m.fresnel_tint[0],
+                m.fresnel_tint[1],
+                m.fresnel_tint[2],
+                m.ripple_scale,
+            ],
         }
     }
 

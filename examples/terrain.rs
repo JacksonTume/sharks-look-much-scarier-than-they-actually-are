@@ -233,22 +233,17 @@ const RIVER_HALF_WIDTH: f32 = 0.9;
 /// without bound and read as a lake with straight sides.
 const RIVER_HALF_WIDTH_MAX: f32 = 2.4;
 
-/// World-space rise and fall of the wave bob, at full amplitude.
-///
-/// Deliberately tiny — about a seventh of the grid spacing. Vertical motion is
-/// the *least* convincing part of small-scale water and the most likely to tear
-/// the surface away from its banks; the ripples do their work through the normal.
-const WAVE_BOB: f32 = 0.006;
+/// Defaults for the two ripple knobs. Strength is a normal tilt, not a height;
+/// chop is the spatial frequency of the largest wave in world units.
+const RIPPLE_STRENGTH_DEFAULT: f32 = 0.45;
+const RIPPLE_SCALE_DEFAULT: f32 = 9.0;
 
-/// Defaults for the three wave knobs.
-const WAVE_AMPLITUDE_DEFAULT: f32 = 0.55;
-const WAVE_STEEPNESS_DEFAULT: f32 = 0.055;
 /// Strength of the sun glint. Water is a mirror at heart, so this is high
 /// compared with anything else the engine draws.
-const WATER_SPECULAR_DEFAULT: f32 = 0.55;
+const WATER_SPECULAR_DEFAULT: f32 = 0.5;
 /// Blinn-Phong exponent for the glint: tight, because still water throws a small
 /// hard highlight rather than a broad sheen.
-const WATER_SHININESS: f32 = 28.0;
+const WATER_SHININESS: f32 = 90.0;
 /// Schlick reflectance of water at normal incidence. The real physical value —
 /// water really is only 2% reflective face-on, and almost a mirror edge-on.
 const WATER_FRESNEL_F0: f32 = 0.02;
@@ -392,20 +387,21 @@ struct TerrainDemo {
     /// into its shore at any setting of this.
     water_alpha: f32,
 
-    /// Seconds of **wall** time the wave train has been running.
+    /// How hard the ripples tilt the surface normal — the knob that actually
+    /// changes how the water reads, because the specular highlight is a function
+    /// of the normal alone.
     ///
-    /// Wall, not simulation. Ripples are not part of the erosion model and should
-    /// keep moving while the geology is paused — which is exactly the split the
-    /// engine's own time docs draw between [`Renderer::dt`] and the fixed step.
-    /// Pausing the timeline and watching the water still move is the clearest
-    /// demonstration of it the demo has.
-    wave_time: f32,
-    /// How far the surface bobs, `0` for a dead-flat mirror.
-    wave_amplitude: f32,
-    /// How hard the ripples tilt the surface normal. This is the knob that
-    /// actually changes how the water *reads*, because the specular highlight is
-    /// a function of the normal alone.
-    wave_steepness: f32,
+    /// The engine animates this against its own clock, so the water keeps moving
+    /// while the erosion is paused. That is the same wall-versus-simulation split
+    /// the engine's time docs draw, and pausing the timeline to watch the surface
+    /// carry on is the clearest demonstration of it the demo has.
+    ripple_strength: f32,
+    /// Spatial frequency of the largest ripple, in world units.
+    ripple_scale: f32,
+    /// Last frame's water vertex/index counts, so the next build allocates once
+    /// at the right size instead of doubling its way up. A `Cell` because the
+    /// build only needs `&self` otherwise and this is pure bookkeeping.
+    water_capacity: std::cell::Cell<(usize, usize)>,
     /// Strength of the specular sun glint on the water.
     water_specular: f32,
 
@@ -460,9 +456,9 @@ impl TerrainDemo {
             show_water: true,
             river_area: RIVER_AREA_DEFAULT,
             water_alpha: WATER_ALPHA_DEFAULT,
-            wave_time: 0.0,
-            wave_amplitude: WAVE_AMPLITUDE_DEFAULT,
-            wave_steepness: WAVE_STEEPNESS_DEFAULT,
+            ripple_strength: RIPPLE_STRENGTH_DEFAULT,
+            ripple_scale: RIPPLE_SCALE_DEFAULT,
+            water_capacity: std::cell::Cell::new((0, 0)),
             water_specular: WATER_SPECULAR_DEFAULT,
             wireframe: false,
             theme: Theme::dark(),
@@ -659,6 +655,7 @@ impl TerrainDemo {
                         .with_alpha(self.water_alpha)
                         .with_specular(self.water_specular, WATER_SHININESS)
                         .with_fresnel(WATER_FRESNEL_F0, WATER_SKY)
+                        .with_ripples(self.ripple_strength, self.ripple_scale)
                         .blended(),
                 ),
             );
@@ -858,6 +855,11 @@ impl TerrainDemo {
         }
 
         let wet = self.wetness_field();
+        // Sized from last frame's result rather than grown from empty. A water
+        // surface is tens of thousands of vertices, and letting a `Vec` double its
+        // way there re-allocates and memcpys about seventeen times per frame for
+        // a count that barely changes between frames.
+        let (cap_v, cap_i) = self.water_capacity.get();
         // One height field for both kinds of water: a lake sits at the flooded
         // level and a river sits on the ground, and `depth` is what tells them
         // apart — it is the flood's own fill, and it is zero on a river.
@@ -875,8 +877,8 @@ impl TerrainDemo {
             .collect();
 
         let step = (2.0 * HALF) / (n as f32 - 1.0);
-        let mut vertices: Vec<Vertex> = Vec::new();
-        let mut indices: Vec<u32> = Vec::new();
+        let mut vertices: Vec<Vertex> = Vec::with_capacity(cap_v);
+        let mut indices: Vec<u32> = Vec::with_capacity(cap_i);
         let mut poly: Vec<(f32, f32)> = Vec::with_capacity(4);
 
         // **The terrain's own two triangles, not the cell.** Contouring the quad
@@ -900,7 +902,18 @@ impl TerrainDemo {
         ];
 
         for y in 0..n - 1 {
+            let row = y * n;
             for x in 0..n - 1 {
+                // Reject the whole cell before touching either triangle. Water
+                // covers well under a fifth of the map, so this skips most of the
+                // grid on one comparison chain instead of six.
+                if wet[row + x] < WET_EPS
+                    && wet[row + x + 1] < WET_EPS
+                    && wet[row + n + x] < WET_EPS
+                    && wet[row + n + x + 1] < WET_EPS
+                {
+                    continue;
+                }
                 for tri in TRIS {
                     let point = |k: usize| ((x + tri[k].0) as f32, (y + tri[k].1) as f32);
                     let value = |k: usize| wet[(y + tri[k].1) * n + (x + tri[k].0)];
@@ -937,6 +950,7 @@ impl TerrainDemo {
             }
         }
 
+        self.water_capacity.set((vertices.len(), indices.len()));
         (!indices.is_empty()).then(|| Mesh::new(vertices, indices))
     }
 
@@ -950,29 +964,14 @@ impl TerrainDemo {
         // Height matches the terrain's own triangulation — see `sample_triangulated`.
         let height = sample_triangulated(surface, n, fx, fy);
 
-        let wx = -HALF + fx * step;
-        let wz = -HALF + fy * step;
-
-        // Ripples. The slope is what the eye actually reads — a specular highlight
-        // is a function of the normal, not of the height — so the displacement is
-        // kept tiny and the *normal* carries the effect.
-        let (slope_x, slope_z, bob) = ripple(wx, wz, self.wave_time);
-        // Vertical motion is gated on there being water deep enough to hide it.
-        // A river in this model is a skin with no thickness, so bobbing it would
-        // just push it through the riverbed and back out; only a lake has room.
-        let bob_room = (depth / LAKE_OPAQUE_DEPTH).clamp(0.0, 1.0);
-
         Vertex {
-            position: [
-                wx,
-                height + bob * self.wave_amplitude * bob_room * WAVE_BOB + WATER_LIFT,
-                wz,
-            ],
-            normal: normalize3([
-                -slope_x * self.wave_steepness * w,
-                1.0,
-                -slope_z * self.wave_steepness * w,
-            ]),
+            position: [-HALF + fx * step, height + WATER_LIFT, -HALF + fy * step],
+            // Flat. **The ripples are not here any more** — they are a per-fragment
+            // normal perturbation on the material, which is both cheaper and
+            // better: this function used to evaluate four `sin_cos` per vertex and
+            // that alone was measured at ~4 ms a frame, and the result was
+            // detail no finer than the tessellation, which read as stripes.
+            normal: Vertex::UP,
             color: {
                 let c = water_color(depth);
                 // Opacity is the wetness curve, shaped so the very edge goes to
@@ -1183,14 +1182,11 @@ impl TerrainDemo {
                                 // Nor does the glint: it is a material field too.
                                 ui.slider("sun glint", &mut self.water_specular, 0.0, 2.5)
                                     .show();
-                                // These two *do* rebuild — they move vertices and
-                                // tilt normals — but the mesh is already rebuilt
-                                // every frame the waves run, so it costs nothing
-                                // extra to let them be live.
-                                ui.slider("wave height", &mut self.wave_amplitude, 0.0, 2.0)
+                                // Both are material fields evaluated in the
+                                // shader, so neither rebuilds the mesh either.
+                                ui.slider("ripple", &mut self.ripple_strength, 0.0, 1.2)
                                     .show();
-                                ui.slider("ripple", &mut self.wave_steepness, 0.0, 0.5)
-                                    .show();
+                                ui.slider("chop", &mut self.ripple_scale, 2.0, 30.0).show();
                                 changed
                             });
                         }
@@ -1275,8 +1271,8 @@ impl TerrainDemo {
             self.show_water = true;
             self.river_area = RIVER_AREA_DEFAULT;
             self.water_alpha = WATER_ALPHA_DEFAULT;
-            self.wave_amplitude = WAVE_AMPLITUDE_DEFAULT;
-            self.wave_steepness = WAVE_STEEPNESS_DEFAULT;
+            self.ripple_strength = RIPPLE_STRENGTH_DEFAULT;
+            self.ripple_scale = RIPPLE_SCALE_DEFAULT;
             self.water_specular = WATER_SPECULAR_DEFAULT;
             base = true;
         }
@@ -1427,13 +1423,10 @@ impl Application for TerrainDemo {
             dirty = true;
         }
 
-        // The ripples run on the wall clock, so they keep moving when the erosion
-        // is paused — and that means the water mesh is dirty every frame the
-        // waves are switched on, whatever the timeline is doing.
-        if self.show_water && self.wave_amplitude * self.wave_steepness > 0.0 {
-            self.wave_time += dt;
-            dirty = true;
-        }
+        // Nothing here advances the waves any more. They are a material property
+        // evaluated per fragment against the engine's own clock, so they keep
+        // moving while the erosion is paused *and* cost no mesh work — which is
+        // the difference between a 10 ms per-frame rebuild and none.
 
         if dirty {
             self.upload(renderer);
@@ -1525,39 +1518,6 @@ fn water_color(depth: f32) -> [f32; 3] {
         SHALLOW[1] + (DEEP[1] - SHALLOW[1]) * t,
         SHALLOW[2] + (DEEP[2] - SHALLOW[2]) * t,
     ]
-}
-
-/// The travelling wave train the water surface rides, as `(dh/dx, dh/dz, h)` at a
-/// world position and a time.
-///
-/// A sum of four directional sines with incommensurate directions, frequencies
-/// and speeds. Four is enough that the pattern does not visibly repeat and few
-/// enough to evaluate per vertex per frame; the directions are deliberately not
-/// axis-aligned, because a wave running along X on a grid built from X and Z is
-/// the one thing guaranteed to look like a grid.
-///
-/// The *derivatives* are the point. A specular highlight depends on the surface
-/// normal and not at all on its height, so what makes water sparkle is the slope
-/// field — which is why these come back alongside the displacement rather than
-/// being estimated from it by differencing.
-fn ripple(x: f32, z: f32, t: f32) -> (f32, f32, f32) {
-    // (direction x, direction z, spatial frequency, amplitude, phase speed)
-    const TRAIN: [(f32, f32, f32, f32, f32); 4] = [
-        (0.94, 0.34, 5.1, 1.00, 1.05),
-        (-0.42, 0.91, 8.3, 0.62, 1.5),
-        (0.71, -0.70, 13.0, 0.34, 2.1),
-        (-0.87, -0.49, 20.0, 0.19, 2.8),
-    ];
-    let (mut dx, mut dz, mut h) = (0.0, 0.0, 0.0);
-    for (ux, uz, freq, amp, speed) in TRAIN {
-        let phase = (ux * x + uz * z) * freq + t * speed;
-        let (sin, cos) = phase.sin_cos();
-        h += amp * sin;
-        let slope = amp * cos * freq;
-        dx += slope * ux;
-        dz += slope * uz;
-    }
-    (dx, dz, h)
 }
 
 /// Distance from a grid point to the segment `a -> b`, all in cell units.
