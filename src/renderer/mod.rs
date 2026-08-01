@@ -441,7 +441,12 @@ impl Renderer {
                 label: Some("camera bind group layout"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    // Both stages: the vertex shader projects with `view_proj`,
+                    // and the fragment shader needs `eye` for the view direction
+                    // the specular and Fresnel terms are built on. Leaving this
+                    // at VERTEX is a *pipeline creation* panic rather than a
+                    // wrong picture, which is the good kind of failure.
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,

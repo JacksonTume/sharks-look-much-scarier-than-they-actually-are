@@ -101,17 +101,17 @@ impl Scene {
                     Vertex {
                         position: [0.0, 0.5, 0.0],
                         normal: FACING,
-                        color: [1.0, 0.2, 0.3],
+                        color: [1.0, 0.2, 0.3, 1.0],
                     },
                     Vertex {
                         position: [-0.5, -0.5, 0.0],
                         normal: FACING,
-                        color: [0.2, 1.0, 0.4],
+                        color: [0.2, 1.0, 0.4, 1.0],
                     },
                     Vertex {
                         position: [0.5, -0.5, 0.0],
                         normal: FACING,
-                        color: [0.3, 0.4, 1.0],
+                        color: [0.3, 0.4, 1.0, 1.0],
                     },
                 ],
                 vec![0, 1, 2],
@@ -121,22 +121,22 @@ impl Scene {
                     Vertex {
                         position: [-0.5, -0.5, 0.0],
                         normal: FACING,
-                        color: [1.0, 0.2, 0.3],
+                        color: [1.0, 0.2, 0.3, 1.0],
                     },
                     Vertex {
                         position: [0.5, -0.5, 0.0],
                         normal: FACING,
-                        color: [0.2, 1.0, 0.4],
+                        color: [0.2, 1.0, 0.4, 1.0],
                     },
                     Vertex {
                         position: [0.5, 0.5, 0.0],
                         normal: FACING,
-                        color: [0.3, 0.4, 1.0],
+                        color: [0.3, 0.4, 1.0, 1.0],
                     },
                     Vertex {
                         position: [-0.5, 0.5, 0.0],
                         normal: FACING,
-                        color: [1.0, 1.0, 0.3],
+                        color: [1.0, 1.0, 0.3, 1.0],
                     },
                 ],
                 // Two triangles, wound CCW (front toward the camera).
@@ -198,7 +198,7 @@ fn grid_mesh() -> Mesh {
             vertices.push(Vertex {
                 position: [x, y, z],
                 normal: [-dx / len, 1.0 / len, -dz / len],
-                color,
+                color: [color[0], color[1], color[2], 1.0],
             });
         }
     }

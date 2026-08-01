@@ -76,7 +76,7 @@ fn grid_mesh() -> Mesh {
             vertices.push(Vertex {
                 position: [x, y, z],
                 normal: surface_normal(x, z, step),
-                color,
+                color: [color[0], color[1], color[2], 1.0],
             });
         }
     }

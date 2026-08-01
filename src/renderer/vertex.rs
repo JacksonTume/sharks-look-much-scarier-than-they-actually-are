@@ -20,9 +20,29 @@ pub struct Vertex {
     /// A mesh that genuinely has no surface (a line list, a point cloud) can pass
     /// [`Vertex::UP`] and ignore the lighting.
     pub normal: [f32; 3],
-    /// Per-vertex RGB color, multiplied by the instance's
+    /// Per-vertex **RGBA** color, multiplied by the instance's
     /// [`Material::tint`](crate::Material::tint) and then by the light.
-    pub color: [f32; 3],
+    ///
+    /// # Why there is an alpha here
+    ///
+    /// There deliberately wasn't one until now. Slice 10 put transparency on the
+    /// [`Material`](crate::Material) and wrote down the reason: see-through is a
+    /// property of *this placement of a mesh*, not of its corners, and widening
+    /// every vertex of a 128² terrain to carry a whole-object property is the
+    /// wrong end. That argument was right, and it is still right — a *uniformly*
+    /// translucent object should tint the instance and leave this at `1.0`.
+    ///
+    /// What it did not cover is a surface whose transparency **varies across
+    /// itself**. Terrain's water is that surface: it has to fade out where it
+    /// meets the shore, or the lake ends on a hard line that no amount of
+    /// instance alpha can soften. That is per-corner opacity, it is the thing
+    /// Slice 10 said nothing wanted, and it now has a consumer.
+    ///
+    /// The two compose rather than compete: the vertex alpha is the *shape* of
+    /// the transparency and the material tint is its overall strength, so
+    /// terrain's opacity slider still works on a surface that is already fading
+    /// at its edges.
+    pub color: [f32; 4],
 }
 
 impl Vertex {
@@ -31,12 +51,12 @@ impl Vertex {
     pub const UP: [f32; 3] = [0.0, 1.0, 0.0];
 
     /// The color the engine's [primitive builders](crate::Mesh::cuboid) emit:
-    /// plain white, so a per-instance [`Material`](crate::Material) tint shows
+    /// opaque white, so a per-instance [`Material`](crate::Material) tint shows
     /// through unaltered.
-    pub const WHITE: [f32; 3] = [1.0, 1.0, 1.0];
+    pub const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
     const ATTRS: [wgpu::VertexAttribute; 3] =
-        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3];
+        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4];
 
     /// The vertex buffer layout matching [`Vertex`] and `shader.wgsl`.
     pub const fn layout() -> wgpu::VertexBufferLayout<'static> {

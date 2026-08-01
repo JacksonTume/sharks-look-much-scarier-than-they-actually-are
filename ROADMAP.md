@@ -904,6 +904,124 @@ teleports the landscape.
 consumer-supplied textures, still with two consumers asking and no demo blocked on
 it yet.
 
+### Slice 14 — Water that looks like water ✅ done
+
+*Roadblock:* two complaints about the same surface, and they turned out to need
+opposite halves of the codebase. The water was a **staircase** — lakes with
+axis-aligned edges and rivers made of squares — and it was **dead**, a flat blue
+sheet that a wave could not have been seen on even if one had been there.
+
+*The ceiling, stated first because it was asked about.* Real-time water in a
+modern engine is planar reflections, screen-space refraction and caustics. All
+three need an offscreen render target, which is the `render graph` entry under
+*Beyond* and is not what this slice is. What is reachable without one is a
+correctly-shaped, correctly-shaded, moving surface — and the distance from a flat
+stair-stepped polygon to that turns out to be most of the way.
+
+#### The staircase was a *sampling* problem, not a smoothing one
+
+The old mesh classified whole grid **cells** as wet or dry and drew their corners,
+so a shoreline could only ever land on a grid line. No amount of softening fixes
+that; the boundary has to be allowed to land *between* samples.
+
+So both kinds of water now write into one continuous **wetness field**, which is
+then contoured with marching squares. Lakes write flood depth. Rivers write
+something better than a threshold: each `c -> receiver[c]` link of the flow
+network is splatted as a **segment with a width**, so a river follows its own
+diagonal instead of the grid's, and a trunk carrying thirty tributaries is drawn
+wider than they are. `Water` grew a `receiver` field to make that possible — the
+network as a *graph* rather than as a per-cell mask.
+
+The same field does a second job: its value is the surface's **opacity**, so the
+water fades out as it shallows instead of ending on a line. Between that, sampling
+the surface height from `terrain + depth` (which is zero at the waterline, so the
+edge sits exactly on the ground), and tapering the lift, there is no seam left to
+see.
+
+#### Three bugs, each of which needed measuring rather than guessing
+
+This slice is the clearest case yet for the project's own rule, because **all
+three of my first diagnoses were wrong** and each was corrected by an experiment
+rather than by thinking harder.
+
+1. **The water came out faint and mottled.** The guess was a stray ε film; the
+   measurement was the lake depth distribution, and it was decisive: the median
+   lake shallows from `0.064` at pass 0 to `0.0041` by pass 60 — **sixteen-fold**
+   — as siltation fills the basins. The opacity ramp had been sized for the
+   *typical* depth, which left literally 0% of the lake at full opacity by pass
+   60, exactly where the demo spends its time. Sizing it against the shallowest
+   water worth seeing fixes it at both ends of the timeline. A fixed ramp is only
+   safe once you know the quantity it is measuring is not itself a moving target.
+2. **The rivers were strings of little triangular holes.** Guessed z-fighting
+   twice — first blaming bilinear-vs-triangulated height sampling (a real bug, and
+   fixing it changed nothing visible), then depth precision (wrong by two orders
+   of magnitude: `Depth32Float` resolves ~2.5e-5 world units here against a
+   0.0025 lift). The actual cause is geometric and exact: fan-triangulating a
+   contoured cell splits it along `a–c`, while the terrain splits along `d–b`.
+   The corner heights agree; the *interpolation between them* does not, so the two
+   surfaces cross inside every cell and half the water is below ground. **No lift
+   can fix it**, because the error scales with the quad's twist. Contouring the
+   terrain's own two triangles instead of the cell makes both surfaces piecewise-
+   planar on the identical partition, and the holes vanish.
+3. **The ripples rendered as sharp scratches.** Not geometry at all — a Blinn-Phong
+   exponent of 260 against a coherent sine wave train draws the locus where the
+   half-vector aligns, which is a set of thin curves. Isolating it by switching the
+   shading off entirely is what identified it in one build; a broader exponent and
+   gentler slopes turn the same waves into a sheen.
+
+#### What the engine gained, and one reversal
+
+Three slices in a row had cost the engine nothing. This one could not: water reads
+as wet almost entirely through **view-dependent** shading, and the fragment shader
+had no idea where the viewer was.
+
+- **`CameraUniform` carries the eye**, and the camera bind group became
+  `VERTEX_FRAGMENT`. Leaving it at `VERTEX` is a pipeline-creation panic rather
+  than a wrong picture, which is the good kind of failure.
+- **The lighting model grew a Blinn-Phong specular term and a Schlick Fresnel
+  edge**, driven by new `Material` fields. Both default to zero, so every other
+  demo renders identically — verified by screenshot before any water work started.
+  The Fresnel is honest about being a stand-in: with no second pass it tends
+  toward a flat sky colour rather than an image of the scene.
+- **`Vertex::color` became RGBA, reversing a decision Slice 10 recorded
+  explicitly.** That slice put alpha on the `Material` and argued see-through is a
+  property of a *placement*, not of a mesh's corners — "nothing wants per-corner
+  opacity". The argument was right and remains right for uniformly translucent
+  objects. What it did not cover is a surface whose transparency varies *across
+  itself*, which is exactly a shoreline. The two compose: vertex alpha is the
+  shape of the transparency, material alpha its overall strength.
+- **`Material::blended()`**, because per-vertex alpha is invisible to the pipeline
+  choice. Without it, dragging terrain's opacity slider to 1.0 drops the surface
+  into the opaque pass and the soft shoreline snaps back to a hard line.
+- **Thirteen of WebGL2's sixteen vertex attributes** are now spoken for, up from
+  eleven. Recorded on `InstanceRaw::ATTRS`: the next thing wanting per-instance
+  data should pack into the spare `w` channels rather than claim a slot.
+
+*Proof:* `cargo run --example terrain` shows lakes with curved, soft shorelines
+that fade into their banks, a continuous dendritic river network whose trunks are
+visibly wider than their tributaries, and a moving sheen — at 66 fps on a 128²
+grid with the mesh rebuilt every frame. The waves run on the **wall** clock, so
+pausing the erosion leaves the water moving, which is the demo's clearest
+illustration of the split the engine's own time docs draw. Measured rather than
+asserted: consecutive frames differ over 4% of the 3D viewport, against 0.04–0.11%
+for erosion alone.
+
+*What it cost in frame rate.* 75 fps to 66 at 128². The wetness field, the splat
+and the contouring all run per frame on the CPU because the mesh is rebuilt per
+frame anyway (Slice 13). That is the honest price of doing water geometry on the
+CPU, and it is the strongest argument yet for the shader-side time uniform under
+*Beyond* — waves want to be a vertex-shader displacement, not a rebuilt buffer.
+
+*On the parity risk, and this is the weakest claim in the slice.* Checked in a
+browser and correct — 56 fps under a release wasm build, with the deep basins at
+pass 0 reading dark navy where the mature shallow lakes read pale, which is the
+depth palette doing visible work. **But Chrome served it WebGPU, so the WebGL2
+fallback was again not exercised**, and this slice is precisely the kind that
+lives there: two more instance attributes, a widened vertex attribute, and a
+uniform that grew. Thirteen of sixteen is within limits by inspection. That is
+reasoning, not a test — the same sentence Slice 9/10 had to write, now with less
+headroom behind it.
+
 ### What stays in the consumer
 
 Recorded because this boundary will be asked about again, and it is the same

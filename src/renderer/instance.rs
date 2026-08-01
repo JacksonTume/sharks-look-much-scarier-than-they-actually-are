@@ -162,30 +162,86 @@ impl Default for Transform {
 ///
 /// Deliberately *not* a material system — no shader graph, no pipeline
 /// permutations, no textures. When something demands those, they are named in
-/// `ROADMAP.md` under *Beyond*. There is no specular or shininess field either:
-/// the lighting model is Lambert diffuse, which has no specular term, so the
-/// field would be storage for a number nothing reads.
+/// `ROADMAP.md` under *Beyond*.
+///
+/// # The specular fields, and why they exist now
+///
+/// This type shipped with a tint and nothing else, and said so: "the lighting
+/// model is Lambert diffuse, which has no specular term, so the field would be
+/// storage for a number nothing reads." That was correct until something needed
+/// to look *wet*. Water reads as water almost entirely through view-dependent
+/// shading — a moving sun glint and a bright grazing edge — and under pure
+/// Lambert a rippling surface and a flat one are very nearly the same picture.
+/// So the lighting model grew the term first and these fields describe it.
+///
+/// They default to zero, which is exactly the old behavior: every demo that does
+/// not ask for a highlight renders identically to before.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Material {
     /// Linear RGBA multiplied into the vertex color.
     ///
     /// Alpha below `1.0` moves the instance into the transparent pass: it is
-    /// blended over whatever is behind it and does not write depth. Alpha lives
-    /// here rather than on [`Vertex`](crate::Vertex) because "see-through" is a
-    /// property of *this placement of a mesh*, not of the mesh's corners.
+    /// blended over whatever is behind it and does not write depth.
+    ///
+    /// This is the *overall* strength of the transparency; [`Vertex::color`]'s
+    /// alpha is its shape across the surface. A uniformly translucent object
+    /// should use this one and leave the vertices opaque.
+    ///
+    /// [`Vertex::color`]: crate::Vertex::color
     pub tint: [f32; 4],
+
+    /// How strong the specular highlight is. `0.0` is the Lambert-only surface
+    /// every demo had before this field existed.
+    pub specular: f32,
+
+    /// Blinn-Phong exponent: how *tight* the highlight is. Low values give a
+    /// broad sheen (a damp rock), high values a small sharp glint (still water).
+    /// Ignored when [`specular`](Self::specular) is zero.
+    pub shininess: f32,
+
+    /// Schlick reflectance at normal incidence, driving a Fresnel edge.
+    ///
+    /// A transparent surface viewed face-on is mostly see-through and viewed at a
+    /// grazing angle is mostly reflective — the effect that makes a lake mirror
+    /// the sky at the far shore while showing its bed at your feet. Nonzero
+    /// values brighten the surface toward [`fresnel_tint`](Self::fresnel_tint)
+    /// and raise its opacity as the view angle flattens. Water is about `0.02`.
+    ///
+    /// This is a *stand-in* for a reflection, not a reflection: there is no
+    /// second render pass, so the surface goes toward a flat colour rather than
+    /// toward an image of the scene. That is the honest ceiling until the engine
+    /// grows an offscreen target (see `ROADMAP.md`, *Beyond*).
+    pub fresnel: f32,
+
+    /// The colour a Fresnel edge tends toward — a sky colour, for water.
+    pub fresnel_tint: [f32; 3],
+
+    /// Force the blended, depth-write-off pipeline even when
+    /// [`tint`](Self::tint)'s alpha is `1.0`.
+    ///
+    /// Needed because per-vertex alpha is invisible to the pipeline choice: a
+    /// mesh whose corners fade out but whose tint is fully opaque would otherwise
+    /// be drawn in the opaque pass and its fade ignored. Terrain's water hits
+    /// this the moment its opacity slider is dragged to maximum.
+    pub blended: bool,
 }
 
 impl Material {
-    /// Draw the mesh exactly as authored: white, fully opaque.
+    /// Draw the mesh exactly as authored: white, fully opaque, no highlight.
     pub const OPAQUE: Self = Self {
         tint: [1.0, 1.0, 1.0, 1.0],
+        specular: 0.0,
+        shininess: 32.0,
+        fresnel: 0.0,
+        fresnel_tint: [1.0, 1.0, 1.0],
+        blended: false,
     };
 
     /// An opaque tint from linear RGB.
     pub const fn rgb(r: f32, g: f32, b: f32) -> Self {
         Self {
             tint: [r, g, b, 1.0],
+            ..Self::OPAQUE
         }
     }
 
@@ -195,9 +251,32 @@ impl Material {
         self
     }
 
+    /// This material with a specular highlight of `strength`, tightened by
+    /// `shininess` (the Blinn-Phong exponent).
+    pub const fn with_specular(mut self, strength: f32, shininess: f32) -> Self {
+        self.specular = strength;
+        self.shininess = shininess;
+        self
+    }
+
+    /// This material with a Fresnel edge of reflectance `f0`, tending toward
+    /// `tint` at grazing angles. See [`fresnel`](Self::fresnel).
+    pub const fn with_fresnel(mut self, f0: f32, tint: [f32; 3]) -> Self {
+        self.fresnel = f0;
+        self.fresnel_tint = tint;
+        self
+    }
+
+    /// Draw this instance in the blended pass whatever its tint alpha says.
+    /// See [`blended`](Self::blended).
+    pub const fn blended(mut self) -> Self {
+        self.blended = true;
+        self
+    }
+
     /// Whether this material needs the blended, depth-write-off draw.
     pub(crate) fn is_transparent(&self) -> bool {
-        self.tint[3] < 1.0
+        self.blended || self.tint[3] < 1.0
     }
 }
 
@@ -286,16 +365,26 @@ pub(crate) struct InstanceRaw {
     /// columns. See [`InstanceRaw::normal_matrix`].
     normal: [[f32; 3]; 3],
     tint: [f32; 4],
+    /// `[specular, shininess, fresnel, unused]` — the view-dependent shading
+    /// terms, packed into one attribute slot rather than three. Three scalars
+    /// would have cost three of the sixteen WebGL2 guarantees to carry twelve
+    /// bytes; this costs one and wastes four.
+    shading: [f32; 4],
+    /// The Fresnel tint, padded to `vec4`. `w` is unused.
+    fresnel_tint: [f32; 4],
 }
 
 impl InstanceRaw {
     /// Bake an instance's transform and material into what the shader reads.
     pub(crate) fn from_instance(instance: &Instance) -> Self {
         let model = Mat4::from_cols_array_2d(&instance.model);
+        let m = &instance.material;
         Self {
             model: model.to_cols_array_2d(),
             normal: Self::normal_matrix(model),
-            tint: instance.material.tint,
+            tint: m.tint,
+            shading: [m.specular, m.shininess, m.fresnel, 0.0],
+            fresnel_tint: [m.fresnel_tint[0], m.fresnel_tint[1], m.fresnel_tint[2], 0.0],
         }
     }
 
@@ -323,16 +412,21 @@ impl InstanceRaw {
     /// A `mat4x4` costs four attribute slots — WGSL has no matrix vertex
     /// attribute, so the shader reassembles it from four `vec4` columns at
     /// locations 3–6, then the normal matrix from three `vec3` columns at 7–9,
-    /// then the tint at 10. Locations 0–2 belong to [`Vertex`](crate::Vertex).
+    /// then the tint at 10, the packed shading terms at 11, and the Fresnel tint
+    /// at 12. Locations 0–2 belong to [`Vertex`](crate::Vertex).
     ///
-    /// That is eleven of the sixteen vertex attributes WebGL2 guarantees. Room
-    /// remains, but it is no longer generous — worth knowing before anything else
-    /// asks to ride this buffer.
+    /// **That is thirteen of the sixteen vertex attributes WebGL2 guarantees.**
+    /// Slice 9/10 recorded eleven and called the remaining room "no longer
+    /// generous"; two more went here. Three slots are left, which is one `mat4`
+    /// short of anything structural — the next thing that wants per-instance data
+    /// of any size should expect to pack it into the spare `w` channels above
+    /// rather than claim a slot, or to wait for storage buffers (which the
+    /// WebGL2 fallback does not have at all).
     #[rustfmt::skip]
-    const ATTRS: [wgpu::VertexAttribute; 8] = wgpu::vertex_attr_array![
+    const ATTRS: [wgpu::VertexAttribute; 10] = wgpu::vertex_attr_array![
         3 => Float32x4, 4 => Float32x4, 5 => Float32x4, 6 => Float32x4,
         7 => Float32x3, 8 => Float32x3, 9 => Float32x3,
-        10 => Float32x4,
+        10 => Float32x4, 11 => Float32x4, 12 => Float32x4,
     ];
 
     /// The instance-step buffer layout matching `shader.wgsl`.

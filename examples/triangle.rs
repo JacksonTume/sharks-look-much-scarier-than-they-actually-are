@@ -25,17 +25,17 @@ impl Application for TriangleDemo {
                 Vertex {
                     position: [0.0, 0.5, 0.0],
                     normal: FACING,
-                    color: [1.0, 0.2, 0.3],
+                    color: [1.0, 0.2, 0.3, 1.0],
                 },
                 Vertex {
                     position: [-0.5, -0.5, 0.0],
                     normal: FACING,
-                    color: [0.2, 1.0, 0.4],
+                    color: [0.2, 1.0, 0.4, 1.0],
                 },
                 Vertex {
                     position: [0.5, -0.5, 0.0],
                     normal: FACING,
-                    color: [0.3, 0.4, 1.0],
+                    color: [0.3, 0.4, 1.0, 1.0],
                 },
             ],
             vec![0, 1, 2],

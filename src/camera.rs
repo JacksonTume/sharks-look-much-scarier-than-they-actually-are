@@ -76,7 +76,7 @@ impl Camera {
     }
 }
 
-/// GPU-friendly view-projection uniform.
+/// GPU-friendly view-projection uniform, plus where the eye is.
 ///
 /// `glam::Mat4` is already 16-byte aligned and `repr(C)`-compatible, so we can
 /// hand it straight to the GPU once wrapped in a `Pod` type.
@@ -84,6 +84,15 @@ impl Camera {
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CameraUniform {
     view_proj: [[f32; 4]; 4],
+    /// World-space eye position, padded to `vec4` for std140 alignment (`w` is
+    /// unused).
+    ///
+    /// The matrix alone is enough to *place* a fragment but not to shade one
+    /// view-dependently: a specular highlight and a Fresnel edge both need to
+    /// know which way the viewer is, and that direction cannot be recovered from
+    /// a projection matrix in the fragment stage without inverting it. So the eye
+    /// rides along beside it.
+    eye: [f32; 4],
 }
 
 impl CameraUniform {
@@ -91,6 +100,7 @@ impl CameraUniform {
     pub fn from_camera(camera: &Camera) -> Self {
         Self {
             view_proj: camera.view_projection().to_cols_array_2d(),
+            eye: [camera.eye.x, camera.eye.y, camera.eye.z, 0.0],
         }
     }
 }
@@ -99,6 +109,7 @@ impl Default for CameraUniform {
     fn default() -> Self {
         Self {
             view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+            eye: [0.0; 4],
         }
     }
 }

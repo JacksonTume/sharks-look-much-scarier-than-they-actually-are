@@ -202,6 +202,60 @@ fn disp(h: f32) -> f32 {
 /// How far the water surface floats above the terrain it covers, in world units.
 /// Enough to beat depth-buffer precision, far below the ~0.04 grid spacing.
 const WATER_LIFT: f32 = 0.0025;
+
+/// Standing depth at which a lake reaches full opacity, in normalized height
+/// units — the width of the shallows, and the number that decides how soft a
+/// shoreline looks.
+///
+/// **Measured, after guessing wrong twice.** The obvious reasoning — "a lake is
+/// order 1% of the relief deep, so fade over that" — gives about `0.012` and is
+/// badly wrong, because lake depth is not a constant of the model. A headless
+/// probe over the run says the median lake shallows from `0.064` at pass 0 to
+/// `0.0041` by pass 60, a **sixteen-fold** drop, as siltation fills the basins.
+/// At `0.012` that leaves *zero* percent of the lake area at full opacity by
+/// pass 60: the water goes faint and mottled exactly where the demo spends most
+/// of its time, and the lakes appear to evaporate rather than drain.
+///
+/// So this is sized against the *shallowest* water worth seeing rather than the
+/// typical, which keeps a lake solid at both ends of the timeline and leaves the
+/// fade to the genuinely shallow fringe.
+const LAKE_OPAQUE_DEPTH: f32 = 0.0015;
+
+/// Wetness below which nothing is drawn. The contour is taken at this value, so
+/// it wants to be barely above zero — it is "where the water ends", not a
+/// threshold with an opinion.
+const WET_EPS: f32 = 0.02;
+
+/// Half-width, in grid cells, of the narrowest drawn river — one exactly at the
+/// drainage-area threshold.
+const RIVER_HALF_WIDTH: f32 = 0.9;
+/// Half-width of the widest. A trunk carrying the whole map would otherwise grow
+/// without bound and read as a lake with straight sides.
+const RIVER_HALF_WIDTH_MAX: f32 = 2.4;
+
+/// World-space rise and fall of the wave bob, at full amplitude.
+///
+/// Deliberately tiny — about a seventh of the grid spacing. Vertical motion is
+/// the *least* convincing part of small-scale water and the most likely to tear
+/// the surface away from its banks; the ripples do their work through the normal.
+const WAVE_BOB: f32 = 0.006;
+
+/// Defaults for the three wave knobs.
+const WAVE_AMPLITUDE_DEFAULT: f32 = 0.55;
+const WAVE_STEEPNESS_DEFAULT: f32 = 0.055;
+/// Strength of the sun glint. Water is a mirror at heart, so this is high
+/// compared with anything else the engine draws.
+const WATER_SPECULAR_DEFAULT: f32 = 0.55;
+/// Blinn-Phong exponent for the glint: tight, because still water throws a small
+/// hard highlight rather than a broad sheen.
+const WATER_SHININESS: f32 = 28.0;
+/// Schlick reflectance of water at normal incidence. The real physical value —
+/// water really is only 2% reflective face-on, and almost a mirror edge-on.
+const WATER_FRESNEL_F0: f32 = 0.02;
+/// What a Fresnel edge tends toward, standing in for a sky the engine cannot
+/// reflect. Matched to the horizon so distant water reads as reflecting *this*
+/// scene rather than an unrelated blue.
+const WATER_SKY: [f32; 3] = [0.42, 0.56, 0.72];
 /// The last pass on the time axis — where the scrub slider tops out, and where
 /// the simulation stops advancing.
 ///
@@ -228,7 +282,7 @@ const PASS_HZ_MAX: f32 = 30.0;
 const RIVER_AREA_DEFAULT: f32 = 60.0;
 /// Default water opacity. Low enough that the riverbed reads through a channel,
 /// high enough that a deep lake still looks like water rather than a stain.
-const WATER_ALPHA_DEFAULT: f32 = 0.62;
+const WATER_ALPHA_DEFAULT: f32 = 0.72;
 /// How tall the panel's scrolling body is allowed to get, in UI points.
 ///
 /// A constant rather than "whatever fits the window": a panel is anchored to a
@@ -332,7 +386,28 @@ struct TerrainDemo {
     /// How opaque the water surface is. `1.0` is the solid blue this demo shipped
     /// with; anything less is the engine's blended pass, and the riverbed shows
     /// through. Purely visual, like `river_area`.
+    ///
+    /// This scales the *whole* surface. The per-vertex alpha that fades the
+    /// shallows is separate and multiplies underneath it, so a lake still fades
+    /// into its shore at any setting of this.
     water_alpha: f32,
+
+    /// Seconds of **wall** time the wave train has been running.
+    ///
+    /// Wall, not simulation. Ripples are not part of the erosion model and should
+    /// keep moving while the geology is paused — which is exactly the split the
+    /// engine's own time docs draw between [`Renderer::dt`] and the fixed step.
+    /// Pausing the timeline and watching the water still move is the clearest
+    /// demonstration of it the demo has.
+    wave_time: f32,
+    /// How far the surface bobs, `0` for a dead-flat mirror.
+    wave_amplitude: f32,
+    /// How hard the ripples tilt the surface normal. This is the knob that
+    /// actually changes how the water *reads*, because the specular highlight is
+    /// a function of the normal alone.
+    wave_steepness: f32,
+    /// Strength of the specular sun glint on the water.
+    water_specular: f32,
 
     /// Draw the terrain as a wireframe instead of shaded triangles.
     wireframe: bool,
@@ -385,6 +460,10 @@ impl TerrainDemo {
             show_water: true,
             river_area: RIVER_AREA_DEFAULT,
             water_alpha: WATER_ALPHA_DEFAULT,
+            wave_time: 0.0,
+            wave_amplitude: WAVE_AMPLITUDE_DEFAULT,
+            wave_steepness: WAVE_STEEPNESS_DEFAULT,
+            water_specular: WATER_SPECULAR_DEFAULT,
             wireframe: false,
             theme: Theme::dark(),
             pending_base: false,
@@ -517,6 +596,13 @@ impl TerrainDemo {
         self.water
             .area
             .extend(wa.area.iter().zip(&wb.area).map(|(x, y)| lerp(x, y)));
+        // The receiver tree is taken from the near pass rather than blended,
+        // because a link is an *index* and there is no halfway between flowing
+        // north and flowing east. Nothing is lost: the network's topology changes
+        // in well under a tenth of a percent of cells per pass, so the channel a
+        // river is drawn along is the same one at both ends of the blend.
+        self.water.receiver.clear();
+        self.water.receiver.extend_from_slice(&wa.receiver);
     }
 
     /// Upload the current terrain, and the water on it, as the engine's draw-list.
@@ -559,9 +645,22 @@ impl TerrainDemo {
             // engine code exists: it is the same `Material` any instance can set,
             // and the engine sorts the blended run after the opaque terrain and
             // draws it without writing depth.
+            // What makes it read as water rather than as blue plastic, and none
+            // of it is water-specific engine code: a tight sun glint off the
+            // ripples, and a Fresnel edge that turns the surface toward the sky
+            // colour and closes it up as the view flattens. `blended()` is the
+            // one that is easy to miss — the per-vertex shore fade is invisible
+            // to the pipeline choice, so without it dragging opacity to 1.0 would
+            // drop the whole surface into the opaque pass and the soft shoreline
+            // would snap back to a hard line.
             instances.push(
-                Instance::at(water_handle)
-                    .with_material(Material::OPAQUE.with_alpha(self.water_alpha)),
+                Instance::at(water_handle).with_material(
+                    Material::OPAQUE
+                        .with_alpha(self.water_alpha)
+                        .with_specular(self.water_specular, WATER_SHININESS)
+                        .with_fresnel(WATER_FRESNEL_F0, WATER_SKY)
+                        .blended(),
+                ),
             );
         }
         renderer.set_instances(&instances);
@@ -611,7 +710,10 @@ impl TerrainDemo {
                 vertices.push(Vertex {
                     position: [wx, wy, wz],
                     normal,
-                    color: palette(t, slope),
+                    color: {
+                        let c = palette(t, slope);
+                        [c[0], c[1], c[2], 1.0]
+                    },
                 });
             }
         }
@@ -631,86 +733,253 @@ impl TerrainDemo {
         Mesh::new(vertices, indices)
     }
 
-    /// Build the water surface: lakes where the flood is standing, rivers where
-    /// enough drainage area has collected. `None` when there is nothing wet to
-    /// draw (or the toggle is off), so the draw-list just holds the terrain.
+    /// The **wetness field**: how much water covers each grid point, `0` dry to
+    /// `1` fully submerged. Lakes and rivers both write into it, and everything
+    /// downstream reads only this.
     ///
-    /// Both fields come straight out of the erosion pass — see [`erosion::Water`].
-    /// Nothing here simulates anything; this function only decides what the model
-    /// already computed should *look* like.
+    /// This exists because the old water mesh classified whole *cells* as wet or
+    /// dry and drew their four corners. That quantises every shoreline to the
+    /// grid, which is why lakes had axis-aligned staircase edges and a river was a
+    /// chain of squares — the boundary could only ever land on a grid line. A
+    /// continuous field can be contoured *between* samples instead, so the
+    /// shoreline goes where the water actually stops.
+    ///
+    /// It also does a second job that turns out to matter as much: the value is
+    /// the surface's **opacity**, so water fades out as it shallows instead of
+    /// ending on a hard line.
+    fn wetness_field(&self) -> Vec<f32> {
+        let n = self.n;
+        let mut wet = vec![0.0f32; n * n];
+
+        // --- Lakes: straight off the flood depth ---
+        //
+        // Saturating within a hair of the shore keeps the drawn edge at the true
+        // waterline while still giving the shallows a few cells of fade.
+        //
+        // Measured from `MIN_POND`, not from zero, and that subtraction is
+        // load-bearing rather than tidy. The Priority-Flood lifts each cell a
+        // hair above the one it was reached from, so depths of a few ε are strewn
+        // across the map — the old per-cell test discarded them by construction,
+        // but a *continuous* field happily draws them, and the result is a faint
+        // blue-green film over half the landscape that reads as the terrain
+        // having changed colour rather than as water being present.
+        for (w, &d) in wet.iter_mut().zip(&self.water.depth) {
+            *w = ((d - erosion::MIN_POND) / LAKE_OPAQUE_DEPTH).clamp(0.0, 1.0);
+        }
+
+        // --- Rivers: splat each flow link as a segment with a width ---
+        //
+        // A river is drawn from the network's *edges*, not its cells. Each
+        // `c -> receiver[c]` link is a segment, and every grid point within the
+        // channel's half-width of it gets wet, tapering to nothing at the bank.
+        // That is what makes a river follow its own diagonal instead of
+        // staircasing along the grid, and what lets a trunk be wider than the
+        // tributaries feeding it.
+        let river_area = self.river_area.max(1.0);
+        for c in 0..n * n {
+            // Deliberately *not* skipping cells that are already lake, which is
+            // the obvious optimisation and punches holes in the rivers. A cell
+            // whose depth sits just above `MIN_POND` would be dropped here while
+            // contributing almost nothing as lake — it falls through the gap
+            // between the two rules — and since the flood's ε leaves plenty of
+            // river cells in exactly that band, the network ends up riddled with
+            // single-point dry spots. Each one shows up as a little diamond of
+            // bare ground, because its four surrounding cells each contour around
+            // it. Splatting regardless costs nothing: the combine below is a
+            // `max`, and a channel drawn across a lake that is already fully wet
+            // changes not one pixel.
+            if self.water.area[c] < river_area {
+                continue;
+            }
+            let r = self.water.receiver[c];
+            if r == c {
+                continue;
+            }
+            // Physically a channel widens with the square root of its discharge,
+            // which is also what reads correctly: doubling the catchment should be
+            // visible but not dramatic.
+            let half = (RIVER_HALF_WIDTH * (self.water.area[c] / river_area).sqrt())
+                .clamp(RIVER_HALF_WIDTH, RIVER_HALF_WIDTH_MAX);
+
+            let (ax, ay) = ((c % n) as f32, (c / n) as f32);
+            let (bx, by) = ((r % n) as f32, (r / n) as f32);
+
+            let lo_x = (ax.min(bx) - half).floor().max(0.0) as usize;
+            let hi_x = (ax.max(bx) + half).ceil().min(n as f32 - 1.0) as usize;
+            let lo_y = (ay.min(by) - half).floor().max(0.0) as usize;
+            let hi_y = (ay.max(by) + half).ceil().min(n as f32 - 1.0) as usize;
+
+            for gy in lo_y..=hi_y {
+                for gx in lo_x..=hi_x {
+                    let d = point_segment_distance(gx as f32, gy as f32, ax, ay, bx, by);
+                    let v = 1.0 - d / half;
+                    if v > 0.0 {
+                        let slot = &mut wet[gy * n + gx];
+                        // `max`, not `+`: two links overlapping at a confluence
+                        // must not read as twice as wet, or every junction shows
+                        // up as a bright blob.
+                        *slot = slot.max(v);
+                    }
+                }
+            }
+        }
+        wet
+    }
+
+    /// Build the water surface by **contouring** the wetness field.
+    ///
+    /// `None` when there is nothing wet to draw (or the toggle is off), so the
+    /// draw-list just holds the terrain.
+    ///
+    /// # How the hard edges went away
+    ///
+    /// Marching squares, with the interior filled rather than just the contour
+    /// line traced. Each grid cell looks at the wetness at its four corners and
+    /// emits a polygon made of the corners that are wet plus the points where the
+    /// field crosses [`WET_EPS`] along the edges between a wet corner and a dry
+    /// one. That crossing is found by interpolation, so it lands *between* grid
+    /// samples — which is the entire difference between a coastline and a
+    /// staircase.
+    ///
+    /// Three separate things then stop the water meeting the land in a visible
+    /// seam, and all three matter:
+    ///
+    /// - The surface height is sampled from `terrain + depth`, and depth is zero
+    ///   at the waterline, so the edge of the water sits exactly on the ground it
+    ///   is lapping against rather than hovering over it.
+    /// - Opacity is the wetness, which is zero at that same boundary, so the
+    ///   surface fades out instead of stopping.
+    /// - The lift that keeps water off the terrain is scaled by wetness too, so
+    ///   it tapers away at the shore rather than leaving a rim standing proud.
     fn build_water_mesh(&self) -> Option<Mesh> {
         let n = self.n;
-        if !self.show_water || self.water.depth.len() != n * n {
+        if !self.show_water || self.water.depth.len() != n * n || n < 2 {
             return None;
         }
 
-        // Classify every grid point once: dry, river, or lake (and how deep).
-        let wet = |i: usize| -> Option<(f32, bool)> {
-            let depth = self.water.depth[i];
-            if depth > erosion::MIN_POND {
-                // A lake sits at the flooded surface: terrain plus its own depth.
-                Some((disp(self.heights[i] + depth), true))
-            } else if self.water.area[i] >= self.river_area {
-                // A river is a skin on the terrain — it has no depth in this model,
-                // it is just where the water is.
-                Some((disp(self.heights[i]), false))
-            } else {
-                None
-            }
-        };
+        let wet = self.wetness_field();
+        // One height field for both kinds of water: a lake sits at the flooded
+        // level and a river sits on the ground, and `depth` is what tells them
+        // apart — it is the flood's own fill, and it is zero on a river.
+        //
+        // Stored already in **world units**, with `disp` applied per grid point
+        // exactly as the terrain mesh applies it to its own vertices. Displaying
+        // after interpolating instead would reintroduce a mismatch at the height
+        // clamp, and the whole point of this field is that it agrees with the
+        // ground wherever the depth is zero.
+        let surface: Vec<f32> = self
+            .heights
+            .iter()
+            .zip(&self.water.depth)
+            .map(|(h, d)| disp(h + d))
+            .collect();
 
         let step = (2.0 * HALF) / (n as f32 - 1.0);
-
         let mut vertices: Vec<Vertex> = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
+        let mut poly: Vec<(f32, f32)> = Vec::with_capacity(4);
+
+        // **The terrain's own two triangles, not the cell.** Contouring the quad
+        // and fan-splitting the result is the obvious way and it is subtly wrong:
+        // a fan from corner `a` divides the cell along `a–c`, while the terrain
+        // divides it along `d–b`. The four corner heights agree either way, but
+        // the two surfaces interpolate across *different diagonals*, so they
+        // cross somewhere inside every cell. Half of each cell's water then sits
+        // below the ground and is eaten by the depth test — which is why the
+        // rivers came out as chains of little triangular holes, each one exactly
+        // half a grid cell. No lift fixes it, because the error scales with how
+        // twisted the quad is and not with any constant.
+        //
+        // Clipping the same triangles the terrain draws makes the water
+        // piecewise-planar on the identical partition, so the two agree
+        // everywhere and a hair of lift is enough. Counter-clockwise from above,
+        // matching the terrain's winding.
+        const TRIS: [[(usize, usize); 3]; 2] = [
+            [(0, 0), (0, 1), (1, 0)], // a, d, b
+            [(1, 0), (0, 1), (1, 1)], // b, d, c
+        ];
 
         for y in 0..n - 1 {
             for x in 0..n - 1 {
-                let corners = [(x, y), (x, y + 1), (x + 1, y + 1), (x + 1, y)];
-                let states = corners.map(|(cx, cy)| wet(cy * n + cx));
-                // Draw a cell if *any* corner is wet, not all four. A river is one
-                // cell wide, so an all-wet test would find no complete quad along
-                // it and render nothing at all — the whole network would vanish and
-                // only lakes would show. Spilling onto the dry corners costs half a
-                // cell of width and tucks the bank into the ground.
-                if states.iter().all(Option::is_none) {
-                    continue;
-                }
+                for tri in TRIS {
+                    let point = |k: usize| ((x + tri[k].0) as f32, (y + tri[k].1) as f32);
+                    let value = |k: usize| wet[(y + tri[k].1) * n + (x + tri[k].0)];
 
-                let base = vertices.len() as u32;
-                for (k, (cx, cy)) in corners.iter().enumerate() {
-                    let i = cy * n + cx;
-                    let (h, lake) = match states[k] {
-                        // Dry corner: sit on the terrain so the edge meets the bank.
-                        None => (disp(self.heights[i]), false),
-                        Some(state) => state,
-                    };
-                    vertices.push(Vertex {
-                        position: [
-                            -HALF + *cx as f32 * step,
-                            h + WATER_LIFT,
-                            -HALF + *cy as f32 * step,
-                        ],
-                        // A still surface is flat, so it faces straight up. The
-                        // engine lights it from the same direction as the land,
-                        // which is what the hand-computed `shade` used to buy.
-                        normal: Vertex::UP,
-                        color: water_color(if lake { self.water.depth[i] } else { 0.0 }),
-                    });
+                    poly.clear();
+                    for k in 0..3 {
+                        let (v0, v1) = (value(k), value((k + 1) % 3));
+                        let (p0, p1) = (point(k), point((k + 1) % 3));
+                        if v0 >= WET_EPS {
+                            poly.push(p0);
+                        }
+                        // Exactly one end wet: the boundary crosses this edge, so
+                        // put a vertex where it actually crosses.
+                        if (v0 >= WET_EPS) != (v1 >= WET_EPS) {
+                            let t = ((WET_EPS - v0) / (v1 - v0)).clamp(0.0, 1.0);
+                            poly.push((p0.0 + (p1.0 - p0.0) * t, p0.1 + (p1.1 - p0.1) * t));
+                        }
+                    }
+                    if poly.len() < 3 {
+                        continue;
+                    }
+
+                    let base = vertices.len() as u32;
+                    for &(fx, fy) in &poly {
+                        vertices.push(self.water_vertex(fx, fy, step, &wet, &surface));
+                    }
+                    // A convex polygon walked in order: a fan is safe, and it is
+                    // at most two triangles because clipping a triangle by one
+                    // half-plane yields three or four points.
+                    for k in 1..poly.len() as u32 - 1 {
+                        indices.extend_from_slice(&[base, base + k, base + k + 1]);
+                    }
                 }
-                // Same counter-clockwise-from-above winding as the terrain.
-                indices.extend_from_slice(&[
-                    base,
-                    base + 1,
-                    base + 3,
-                    base + 3,
-                    base + 1,
-                    base + 2,
-                ]);
             }
         }
 
         (!indices.is_empty()).then(|| Mesh::new(vertices, indices))
+    }
+
+    /// One water vertex at fractional grid position `(fx, fy)`: where it sits,
+    /// which way it faces once the ripples have moved it, and how blue and how
+    /// see-through it is.
+    fn water_vertex(&self, fx: f32, fy: f32, step: f32, wet: &[f32], surface: &[f32]) -> Vertex {
+        let n = self.n;
+        let w = bilinear(wet, n, fx, fy);
+        let depth = bilinear(&self.water.depth, n, fx, fy);
+        // Height matches the terrain's own triangulation — see `sample_triangulated`.
+        let height = sample_triangulated(surface, n, fx, fy);
+
+        let wx = -HALF + fx * step;
+        let wz = -HALF + fy * step;
+
+        // Ripples. The slope is what the eye actually reads — a specular highlight
+        // is a function of the normal, not of the height — so the displacement is
+        // kept tiny and the *normal* carries the effect.
+        let (slope_x, slope_z, bob) = ripple(wx, wz, self.wave_time);
+        // Vertical motion is gated on there being water deep enough to hide it.
+        // A river in this model is a skin with no thickness, so bobbing it would
+        // just push it through the riverbed and back out; only a lake has room.
+        let bob_room = (depth / LAKE_OPAQUE_DEPTH).clamp(0.0, 1.0);
+
+        Vertex {
+            position: [
+                wx,
+                height + bob * self.wave_amplitude * bob_room * WAVE_BOB + WATER_LIFT,
+                wz,
+            ],
+            normal: normalize3([
+                -slope_x * self.wave_steepness * w,
+                1.0,
+                -slope_z * self.wave_steepness * w,
+            ]),
+            color: {
+                let c = water_color(depth);
+                // Opacity is the wetness curve, shaped so the very edge goes to
+                // nothing quickly and the body of a lake reaches full strength.
+                [c[0], c[1], c[2], smoothstep(w)]
+            },
+        }
     }
 
     /// Lay out the parameter panel and HUD, returning what it asked for.
@@ -911,6 +1180,17 @@ impl TerrainDemo {
                                     .slider("opacity", &mut self.water_alpha, 0.15, 1.0)
                                     .show()
                                     .changed;
+                                // Nor does the glint: it is a material field too.
+                                ui.slider("sun glint", &mut self.water_specular, 0.0, 2.5)
+                                    .show();
+                                // These two *do* rebuild — they move vertices and
+                                // tilt normals — but the mesh is already rebuilt
+                                // every frame the waves run, so it costs nothing
+                                // extra to let them be live.
+                                ui.slider("wave height", &mut self.wave_amplitude, 0.0, 2.0)
+                                    .show();
+                                ui.slider("ripple", &mut self.wave_steepness, 0.0, 0.5)
+                                    .show();
                                 changed
                             });
                         }
@@ -995,6 +1275,9 @@ impl TerrainDemo {
             self.show_water = true;
             self.river_area = RIVER_AREA_DEFAULT;
             self.water_alpha = WATER_ALPHA_DEFAULT;
+            self.wave_amplitude = WAVE_AMPLITUDE_DEFAULT;
+            self.wave_steepness = WAVE_STEEPNESS_DEFAULT;
+            self.water_specular = WATER_SPECULAR_DEFAULT;
             base = true;
         }
         if let Some(i) = preset {
@@ -1144,6 +1427,14 @@ impl Application for TerrainDemo {
             dirty = true;
         }
 
+        // The ripples run on the wall clock, so they keep moving when the erosion
+        // is paused — and that means the water mesh is dirty every frame the
+        // waves are switched on, whatever the timeline is doing.
+        if self.show_water && self.wave_amplitude * self.wave_steepness > 0.0 {
+            self.wave_time += dt;
+            dirty = true;
+        }
+
         if dirty {
             self.upload(renderer);
         }
@@ -1219,16 +1510,129 @@ fn palette(t: f32, slope: f32) -> [f32; 3] {
 /// from a shallow one once you can see through both. What did go is the `shade`
 /// argument — the engine lights this surface now.
 fn water_color(depth: f32) -> [f32; 3] {
-    const SHALLOW: [f32; 3] = [0.29, 0.55, 0.72];
-    const DEEP: [f32; 3] = [0.06, 0.17, 0.36];
-    // Saturates around a tenth of the terrain's full relief — past that a lake is
-    // simply "deep" and gets no darker.
-    let t = (depth / 0.1).clamp(0.0, 1.0);
+    const SHALLOW: [f32; 3] = [0.17, 0.44, 0.58];
+    const DEEP: [f32; 3] = [0.02, 0.10, 0.25];
+    // Saturates well before the deepest water the model produces, because the
+    // depths themselves shrink sixteen-fold over the run (see
+    // `LAKE_OPAQUE_DEPTH`). Scaled to a tenth of the relief, every late lake sits
+    // at the shallow end of the ramp and the whole landscape's water is one flat
+    // colour for the second half of the timeline. This way the young flooded
+    // basins read as genuinely deep and the mature ponds as shallow, which is a
+    // real thing the simulation is doing and was previously invisible.
+    let t = (depth / 0.05).clamp(0.0, 1.0);
     [
         SHALLOW[0] + (DEEP[0] - SHALLOW[0]) * t,
         SHALLOW[1] + (DEEP[1] - SHALLOW[1]) * t,
         SHALLOW[2] + (DEEP[2] - SHALLOW[2]) * t,
     ]
+}
+
+/// The travelling wave train the water surface rides, as `(dh/dx, dh/dz, h)` at a
+/// world position and a time.
+///
+/// A sum of four directional sines with incommensurate directions, frequencies
+/// and speeds. Four is enough that the pattern does not visibly repeat and few
+/// enough to evaluate per vertex per frame; the directions are deliberately not
+/// axis-aligned, because a wave running along X on a grid built from X and Z is
+/// the one thing guaranteed to look like a grid.
+///
+/// The *derivatives* are the point. A specular highlight depends on the surface
+/// normal and not at all on its height, so what makes water sparkle is the slope
+/// field — which is why these come back alongside the displacement rather than
+/// being estimated from it by differencing.
+fn ripple(x: f32, z: f32, t: f32) -> (f32, f32, f32) {
+    // (direction x, direction z, spatial frequency, amplitude, phase speed)
+    const TRAIN: [(f32, f32, f32, f32, f32); 4] = [
+        (0.94, 0.34, 5.1, 1.00, 1.05),
+        (-0.42, 0.91, 8.3, 0.62, 1.5),
+        (0.71, -0.70, 13.0, 0.34, 2.1),
+        (-0.87, -0.49, 20.0, 0.19, 2.8),
+    ];
+    let (mut dx, mut dz, mut h) = (0.0, 0.0, 0.0);
+    for (ux, uz, freq, amp, speed) in TRAIN {
+        let phase = (ux * x + uz * z) * freq + t * speed;
+        let (sin, cos) = phase.sin_cos();
+        h += amp * sin;
+        let slope = amp * cos * freq;
+        dx += slope * ux;
+        dz += slope * uz;
+    }
+    (dx, dz, h)
+}
+
+/// Distance from a grid point to the segment `a -> b`, all in cell units.
+fn point_segment_distance(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+    let (ex, ey) = (bx - ax, by - ay);
+    let len_sq = ex * ex + ey * ey;
+    // A degenerate link is a point; the clamp below would divide by zero.
+    let t = if len_sq > 1e-12 {
+        (((px - ax) * ex + (py - ay) * ey) / len_sq).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let (dx, dy) = (px - (ax + ex * t), py - (ay + ey * t));
+    (dx * dx + dy * dy).sqrt()
+}
+
+/// Sample a height field the way the **terrain mesh** interpolates it: linearly
+/// across the two triangles each grid cell is split into.
+///
+/// This is not a refinement of [`bilinear`], it is a correctness requirement, and
+/// getting it wrong is visible. A quad split into triangles is *not* a bilinear
+/// patch — the two agree at the four corners and nowhere else, differing most
+/// along the diagonal. So a water surface sampled bilinearly sits below a terrain
+/// drawn as triangles across half of every cell, by far more than any sane lift
+/// can cover, and the water gets eaten by the depth test in a pattern that
+/// follows the triangulation: rivers break into strings of beads and lakes grow
+/// holes.
+///
+/// Matching the split makes the two surfaces agree *exactly* wherever the water
+/// depth is zero, which is precisely the river network and every shoreline — the
+/// places a disagreement would show. The terrain builds each cell as `(a, d, b)`
+/// and `(b, d, c)`, so the diagonal runs from `d` to `b` and the halves are
+/// `u + v <= 1` and `u + v >= 1`.
+fn sample_triangulated(field: &[f32], n: usize, fx: f32, fy: f32) -> f32 {
+    let max = n as f32 - 1.0;
+    let (fx, fy) = (fx.clamp(0.0, max), fy.clamp(0.0, max));
+    // The last row and column have no cell of their own to sit in.
+    let x0 = (fx.floor() as usize).min(n - 2);
+    let y0 = (fy.floor() as usize).min(n - 2);
+    let (u, v) = (fx - x0 as f32, fy - y0 as f32);
+
+    let at = |dx: usize, dy: usize| field[(y0 + dy) * n + (x0 + dx)];
+    let (a, b, c, d) = (at(0, 0), at(1, 0), at(1, 1), at(0, 1));
+
+    if u + v <= 1.0 {
+        a + u * (b - a) + v * (d - a)
+    } else {
+        c + (1.0 - u) * (d - c) + (1.0 - v) * (b - c)
+    }
+}
+
+/// Bilinear sample of an `n × n` field at fractional grid coordinates.
+///
+/// Contour vertices land between grid samples by construction, so every field the
+/// surface reads has to be readable there too — sampling at the nearest cell
+/// would put the smooth outline back on the grid it was just taken off.
+///
+/// Fine for the quantities that only shade the surface (wetness, depth). The
+/// *height* must not use this — see [`sample_triangulated`].
+fn bilinear(field: &[f32], n: usize, fx: f32, fy: f32) -> f32 {
+    let max = n as f32 - 1.0;
+    let (fx, fy) = (fx.clamp(0.0, max), fy.clamp(0.0, max));
+    let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
+    let (x1, y1) = ((x0 + 1).min(n - 1), (y0 + 1).min(n - 1));
+    let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+    let top = field[y0 * n + x0] * (1.0 - tx) + field[y0 * n + x1] * tx;
+    let bottom = field[y1 * n + x0] * (1.0 - tx) + field[y1 * n + x1] * tx;
+    top * (1.0 - ty) + bottom * ty
+}
+
+/// Hermite smoothstep on `[0, 1]` — an ease with zero slope at both ends, which
+/// is what stops a fade having a visible start and finish.
+fn smoothstep(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn normalize3(v: [f32; 3]) -> [f32; 3] {

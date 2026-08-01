@@ -147,6 +147,16 @@ pub struct Water {
     /// itself included. `1.0` on a ridge top, thousands in a trunk river — so a
     /// threshold on this is the river network.
     pub area: Vec<f32>,
+    /// Downstream neighbour of each cell; outlets and boundary cells receive
+    /// themselves.
+    ///
+    /// This is the river network as a *graph* rather than as a per-cell mask, and
+    /// it is here because drawing a river well needs the links, not the cells. A
+    /// threshold on [`area`](Self::area) says which cells are wet and nothing
+    /// about which way the water goes, so a mask can only ever be rendered as the
+    /// grid-aligned staircase it is. Each `c -> receiver[c]` link is a *segment*,
+    /// and a segment can be given a direction, a width, and a bank.
+    pub receiver: Vec<usize>,
 }
 
 impl Water {
@@ -155,6 +165,7 @@ impl Water {
         Self {
             depth: vec![0.0; count],
             area: vec![1.0; count],
+            receiver: (0..count).collect(),
         }
     }
 }
@@ -196,7 +207,7 @@ pub fn step(heights: &mut [f32], n: usize, params: &ErosionParams) -> Water {
     // already at its new height when we solve the cell above it:
     //   z'[c] = (z[c] + f·z'[r]) / (1 + f),   f = K·Aᵐ / L.
     for &c in &flow.order {
-        let r = flow.receiver[c];
+        let r = water.receiver[c];
         if r == c {
             continue; // outlet / fixed base level
         }
@@ -247,13 +258,18 @@ pub fn step(heights: &mut [f32], n: usize, params: &ErosionParams) -> Water {
 /// The shared first half of a pass: route the flow, accumulate drainage area, and
 /// read the standing water off the filled surface.
 fn analyze(z: &[f32], n: usize) -> (Flow, Water) {
-    let flow = flow_route(z, n);
+    let mut flow = flow_route(z, n);
+    // The receiver tree moves into the `Water`, which is what gets handed to the
+    // caller: it is as much a description of where the water *is* as the depths
+    // are, and the renderer needs it to draw a river as a channel rather than as
+    // a set of squares. `Flow` keeps the parts only the solver uses.
+    let receiver = std::mem::take(&mut flow.receiver);
 
     // Drainage area: every cell contributes one unit of area to itself, then
     // pushes its total down to its receiver (reverse topological order).
     let mut area = vec![1.0f32; z.len()];
     for &c in flow.order.iter().rev() {
-        let r = flow.receiver[c];
+        let r = receiver[c];
         if r != c {
             area[r] += area[c];
         }
@@ -268,7 +284,14 @@ fn analyze(z: &[f32], n: usize) -> (Flow, Water) {
         .map(|(f, h)| (f - h).max(0.0))
         .collect();
 
-    (flow, Water { depth, area })
+    (
+        flow,
+        Water {
+            depth,
+            area,
+            receiver,
+        },
+    )
 }
 
 /// Depth below which "standing water" is really just accumulated flood ε.
