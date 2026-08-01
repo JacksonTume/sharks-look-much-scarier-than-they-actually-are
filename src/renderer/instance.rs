@@ -381,8 +381,10 @@ impl Instance {
     }
 }
 
-/// The per-instance payload the vertex shader reads: the model matrix, the
-/// matrix that transforms its normals, and the material tint.
+/// The per-instance payload the shaders read: the model matrix, the matrix that
+/// transforms its normals, and the material — tint plus the view-dependent
+/// shading terms, which the vertex stage passes straight through to the
+/// fragment stage.
 ///
 /// `repr(C)` + `Pod` so a `&[InstanceRaw]` uploads straight into a buffer, the
 /// same trick [`Vertex`](crate::Vertex) uses.

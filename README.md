@@ -21,8 +21,11 @@ renders identically on native and web.
 
 The capstone is `examples/terrain`: a fractal Perlin heightmap carved by live
 hydro-thermal **stream-power erosion**, every layer tunable from an on-screen
-panel. The whole algorithm lives in the demo — `wgpu` and `winit` appear nowhere
-in it, which is the point.
+panel. Erosion is a **time axis** rather than a setting — play it, pause it,
+single-step it, or drag it backwards and watch the drained lakes refill — and the
+water that does the carving is drawn as a contoured, rippling, view-dependently
+lit surface. The whole algorithm lives in the demo; `wgpu` and `winit` appear
+nowhere in it, which is the point.
 
 The UI lives in its own zero-dependency crate,
 [`slmsttaa-ui`](slmsttaa-ui/README.md), so a widget toolkit doesn't grow inside a
@@ -33,8 +36,11 @@ by good intentions. It is re-exported as `slmsttaa::ui`, so consumers still see
 one dependency, and it plans its own work in
 [`slmsttaa-ui/ROADMAP.md`](slmsttaa-ui/ROADMAP.md).
 
-Still to grow into: materials, multiple meshes with transforms, a real lighting
-model, and a render graph — each waiting for a demo that actually demands it.
+Materials, transforms with an instanced draw-list, and a lighting model with
+view-dependent terms have since been pulled in by demos that demanded them. Still
+to grow into: a render graph with an offscreen target — which is what real water
+reflection and refraction need — and consumer-supplied textures. Each waits for a
+demo that is actually blocked on it.
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for how the pieces fit together and the
 cross-platform gotchas that shaped them, and [`ROADMAP.md`](ROADMAP.md) for where
@@ -59,17 +65,19 @@ it's going and why.
 | `src/app.rs`             | winit `ApplicationHandler`: window + event loop.         |
 | `src/renderer/mod.rs`    | wgpu device/surface/pipeline; per-frame render.          |
 | `src/renderer/mesh.rs`   | `Mesh` (vertices + indices) the consumer hands over.     |
-| `src/renderer/vertex.rs` | Vertex format (position + normal + color) + buffer layout. |
-| `src/renderer/shader.wgsl` | WGSL vertex/fragment shaders.                          |
-| `src/camera.rs`          | Perspective camera + GPU uniform.                        |
+| `src/renderer/vertex.rs` | Vertex format (position + normal + RGBA color) + buffer layout. |
+| `src/renderer/primitives.rs` | `Mesh::plane`/`cuboid`/`sphere`/`capsule` builders.  |
+| `src/renderer/instance.rs` | `Transform`, `Material`, `Instance` + the instance buffer. |
+| `src/renderer/shader.wgsl` | WGSL shaders: diffuse + specular + Fresnel + ripples.  |
+| `src/camera.rs`          | Perspective camera + GPU uniform (view-proj, eye, clock).|
 | `src/renderer/overlay.rs` | Screen-space 2D pass + glyph atlas (`Painter` impl).   |
-| `src/time.rs`            | Cross-platform frame clock (`Renderer::dt`).             |
+| `src/time.rs`            | Frame clock (`Renderer::dt`) + fixed-step `Timeline`.    |
 | `examples/triangle.rs`   | Reference consumer: draws one triangle (native + web).   |
 | `examples/cube.rs`       | Spinning solid cube: indexed mesh + depth + culling.     |
 | `examples/scene.rs`      | Articulated figures from engine primitives: transforms, materials, joints. |
 | `examples/gallery.rs`    | Scene switcher: web buttons swap demos; native cycles.   |
 | `examples/grid.rs`       | Orbitable terrain grid: the input + camera seam.         |
-| `examples/terrain.rs`    | **Capstone**: Perlin + stream-power erosion, live panel.  |
+| `examples/terrain.rs`    | **Capstone**: Perlin + stream-power erosion as a scrubbable time axis, contoured water, live panel. |
 | `slmsttaa-ui/src/`       | The UI toolkit crate (zero deps): `Painter`, `Theme`, widgets. |
 | `slmsttaa-ui/tests/`     | Layout, hit-testing, theming, typography + animation tests (headless recording painter). |
 | `web/index.html`         | Browser harness for the wasm build (loads `pkg/app.js`). |
