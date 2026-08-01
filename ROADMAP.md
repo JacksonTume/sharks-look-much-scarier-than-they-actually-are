@@ -653,12 +653,20 @@ first slice since 7 that ends without evidence for the next one. Slice 12
 (fixed-timestep clock) is still argued for by `scene.rs` moving on the wall clock,
 exactly as written down before this slice started.
 
-### Slice 12 — Fixed-timestep clock + time control
+### Slice 12 — Fixed-timestep clock + time control ✅ done
 
 *Roadblock:* `scene.rs`'s motion is frame-rate coupled — it looks different at
 60 Hz and 144 Hz, and replaying it doesn't reproduce. The demo wants to pause,
 single-step, and scrub the scene, and `Renderer::dt()` (raw wall-clock) cannot
 express any of that.
+
+*Half of that roadblock was wrong, and finding out which half is where the slice
+started.* `scene.rs` was **not** frame-rate coupled: it had done `self.time += dt`
+since Slice 8, and the field's own doc comment said so. The demos that genuinely
+carried the defect were `cube.rs` and `gallery.rs`, both adding a flat `0.01` per
+*frame* — so the spin really was twice as fast on a 144 Hz machine, in the two
+places nobody had looked. The rest of the roadblock held exactly as written: no
+run reproduces, and `dt()` cannot express pause, step, or scrub.
 
 *Terrain will want this too.* Slice 7's deferred animation is blocked on exactly
 this: advancing erosion passes on the frame clock means the same settings erode
@@ -669,7 +677,9 @@ slice moves up to meet it.
 
 - An **accumulator** driving a fixed-step hook at a consumer-chosen rate, plus an
   **interpolation alpha** so rendering between steps is smooth rather than juddery.
-- Consumer-facing time control: pause, time scale, single-step, and seek.
+- Consumer-facing time control: pause, time scale, single-step, and seek — with
+  the caveat, settled below, that a seek moves *the engine's clock* and cannot
+  rewind a consumer.
 - **Determinism as a property of the seam.** The engine's contribution is simply
   that a consumer which advances its state *only* in the fixed hook gets the same
   result regardless of frame rate — the engine stops being the source of
@@ -678,8 +688,94 @@ slice moves up to meet it.
 - Terrain benefits too: any retry of its erosion animation is a simulation
   advancing on the frame clock, which is this slice's whole subject.
 
-*Proof:* `scene.rs` runs identically at capped and uncapped frame rates, and its
-transport controls (play/pause/step/scrub) drive the scene from the UI panel.
+*Proof:* `cargo run --example scene` shows a HUD reading **sim time**, **wall
+time**, and a cumulative **steps** count. At vsync (75 fps) they read 11.95s /
+11.97s / 723; flipped to `AutoNoVsync` at **1270 fps** — seventeen times the
+frame rate — they read 12.05s / 12.06s / 723 at the same wall instant. The
+transport controls work: pause froze sim time at 12.42s and the step count at 745
+while wall time ran on from 13.00s to 16.45s and the FPS readout kept updating;
+six clicks of **step** moved it to exactly 751 steps and 12.52s (six sixtieths,
+not five or seven). Verified on native and on web under `BrowserWebGpu`.
+
+**What shipped, and what it cost:**
+
+- **One type, one trait method, one accessor pair.** `Timeline` (`src/time.rs`)
+  beside the existing `Clock`; `Application::fixed_update(renderer, dt)`,
+  defaulted; `Renderer::time()` / `time_mut()`. The default is what kept the cost
+  down — `triangle.rs`, `grid.rs` and `terrain.rs` were not touched at all, which
+  is the first trait change since Slice 0 to break nothing.
+- **`time_mut()` is a handle, following `camera_mut`.** Pause, scale, single-step,
+  seek and rate are one subject, and five more setters on `Renderer` would have
+  said so less clearly.
+- **Seek moves the engine's clock and nothing else, and that is stated rather
+  than hidden.** The engine cannot un-erode a landscape, so it does not pretend a
+  scrub rewinds a consumer. `scene.rs` pays the honest cost in two lines
+  (`self.time = t; renderer.time_mut().seek(t)`) and can only do that because its
+  state is a pure function of time. A consumer carrying irreversible state should
+  ship no scrub control, which is the same ruling that keeps the erosion solver
+  in the terrain demo.
+- **The interpolation alpha is a number, not a system.** At 1270 fps roughly
+  nineteen frames in twenty run *zero* steps, and the stage still moves smoothly —
+  because `scene.rs` renders at `time + alpha * step`. That is not blending two
+  snapshots; the pose is a pure function of time, so it evaluates the function at
+  a sub-step instant. Which of those a consumer does is the consumer's business,
+  and the engine hands over one `f32` either way. (This is the same shape UI
+  Slice 6 recorded: the engine provided a number of seconds, not an animation
+  system.)
+- **A step cap, because `set_scale` outruns the existing stall clamp.** `Clock`
+  already caps a frame at 100 ms — six steps at 60 Hz — but a time scale
+  multiplies it, so `MAX_STEPS_PER_FRAME` is what makes the bound hold whatever
+  the scale. Past it the remainder is dropped and simulation time falls behind
+  wall time, which is the correct failure; carrying it forward is the classic
+  spiral.
+- **The engine's first tests outside `primitives.rs`, and for the same reason.**
+  `Timeline` touches no platform API and needs no GPU, so it has eight unit tests
+  — including the one that matters, that a second of wall time yields the same 64
+  steps however it is chopped into frames. They are written against
+  exactly-representable step sizes (1/64, 1/128) on purpose: a 1/60 step against
+  1/144 frames leaves the count one either side of a boundary at the mercy of
+  float rounding, which is a flaky test rather than a real assertion.
+
+**Two things were cut after being built, both by looking at the screen.**
+
+The first was a bug: the transport row used `ui.horizontal`, and a button
+allocates *"whatever is left of the line"* — so `pause` took the whole row and
+`step` was pushed off the panel, clipped mid-word at the edge. `ui.columns(2)`
+divides the line up front and fixes it. Every test passed; a screenshot did not.
+This is the fifth time in this project's record that the demo caught what the
+suite couldn't, and the second (after UI Slice 2) where clipping turned an
+invisible overflow into a visible one.
+
+The second was subtler and is the more interesting note. The HUD first reported
+**steps/frame**, which is exactly right and completely useless: at 75 Hz against
+a 60 Hz step the per-frame count strobes `0,1,1,1,1` forever, so a single sample
+tells you nothing — and three consecutive screenshots all caught the zero, which
+is what prompted looking. A 300-frame probe confirmed the distribution (61 zeros,
+239 ones) and that nothing was broken. The readout became a **cumulative** step
+count, which is monotone and is the number the frame-rate claim is actually
+about. `Timeline::steps_last_frame` was then deleted rather than left unread — a
+public accessor with no caller is the speculative build principle 2 forbids, and
+the cap biting is already visible as sim time falling behind wall time.
+
+*On the parity risk.* `Timeline` sits entirely above `Clock`, so it needed no
+`#[cfg]` and adds no vertex attribute, draw call, or shader edit — there is no
+instance-buffer surface here of the kind Slice 8's `first_instance` bug lived in.
+It was checked in a browser anyway, and the browser found something real: a
+throttled tab accumulates simulation time far more slowly than real time, because
+`Clock` clamps each frame to 100 ms. That is the intended behavior — the
+alternative is a tab that returns to the foreground and teleports — but it is
+recorded in `ARCHITECTURE.md` because "wall time" summed from frame deltas is not
+wall time in a tab that wasn't drawing.
+
+*What it exposed.* Nothing new for the engine, which makes two slices in a row
+(11 and 12) that end without evidence for a next one. That is worth stating
+plainly rather than filling: **the second vertical is complete**, `scene.rs` can
+do everything Slices 8–12 were pulled into existence for, and the honest next
+move is a demo that hits a wall none of them cover — not another item invented
+from this file. The nearest candidates already have their evidence recorded under
+*Beyond*: terrain's deferred erosion animation is now unblocked (this slice was
+its stated blocker) and waits only on a reason to believe it is worth watching,
+and consumer-supplied textures have two independent consumers asking.
 
 ### What stays in the consumer
 

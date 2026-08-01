@@ -41,6 +41,9 @@ use slmsttaa::{
 /// The scenes the gallery can show, in button order.
 const SCENES: [Scene; 4] = [Scene::Triangle, Scene::Quad, Scene::Cube, Scene::Grid];
 
+/// How fast the spinning scenes turn, in radians per second of simulation time.
+const SPIN_RATE: f32 = 0.6;
+
 /// On native, advance to the next scene every this many frames (~3s at 60fps).
 #[cfg(not(target_arch = "wasm32"))]
 const NATIVE_CYCLE_FRAMES: u32 = 180;
@@ -311,6 +314,15 @@ impl Application for GalleryDemo {
             .set_instances(&[Instance::at(self.meshes[sel]).with_material(SCENES[sel].material())]);
     }
 
+    /// The spin, on the fixed clock. This used to be a flat `0.01` added per
+    /// *frame* down in `update`, which made the cube's speed a property of the
+    /// machine rather than of the demo.
+    fn fixed_update(&mut self, _renderer: &mut Renderer, dt: f32) {
+        if SCENES[self.current].spins() {
+            self.angle += SPIN_RATE * dt;
+        }
+    }
+
     fn update(&mut self, renderer: &mut Renderer) {
         // Native has no buttons, so step through the scenes automatically.
         #[cfg(not(target_arch = "wasm32"))]
@@ -335,8 +347,8 @@ impl Application for GalleryDemo {
 
         let scene = SCENES[self.current];
         let transform = if scene.spins() {
-            self.angle += 0.01;
-            // Yaw about Y, plus a gentler pitch about X.
+            // Yaw about Y, plus a gentler pitch about X. The angle itself is
+            // advanced in `fixed_update`, not here.
             Transform::IDENTITY.with_rotation([self.angle * 0.6, self.angle, 0.0])
         } else {
             Transform::IDENTITY

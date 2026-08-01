@@ -33,15 +33,21 @@ src/
 │                     the event loop feeds it, the consumer reads it via
 │                     Renderer::input(). Also absolute cursor position + mouse
 │                     press-edges, for screen-space UI hit-testing.
-├── time.rs           Clock: a cross-platform frame clock (delta-time). Native
-│                     Instant; web performance.now() (Instant panics on wasm).
-│                     Surfaced as Renderer::dt().
+├── time.rs           Two clocks. Clock: a cross-platform frame clock
+│                     (delta-time). Native Instant; web performance.now()
+│                     (Instant panics on wasm). Surfaced as Renderer::dt().
+│                     Timeline: the fixed-timestep simulation clock built on it
+│                     — accumulates the wall delta and pays it out in identical
+│                     steps, with pause / scale / single-step / seek and an
+│                     interpolation alpha. Surfaced as Renderer::time(). It
+│                     touches no platform API, so it needed no #[cfg] and is
+│                     unit-tested without a GPU.
 └── renderer/
     ├── mod.rs        Renderer: wgpu instance/adapter/device/queue/surface, the
     │                 solid + blended + wireframe render pipelines (RenderMode
     │                 and per-instance alpha select between them), the depth
     │                 buffer, the mesh registry + instance draw-list, the overlay,
-    │                 the UI state + clock, and per-frame
+    │                 the UI state + both clocks, and per-frame
     │                 begin_frame()/update()/render().
     │                 Renderer::ui() also translates Input + the surface size ->
     │                 ui::UiInput, which is what keeps the UI crate free of any
@@ -144,9 +150,14 @@ xtask/                Dev tooling (a separate workspace member, no deps). `cargo
    consumer's one-time `Application::init` (where it uploads geometry).
 4. Between redraws, keyboard/mouse `WindowEvent`s are folded into the renderer's
    `Input` snapshot (see *Input flow* below).
-5. Each `RedrawRequested`: `Renderer::begin_frame()` ticks the frame clock (so
-   `Renderer::dt()` is fresh) and clears last frame's overlay geometry. Then
-   `Application::update` advances the consumer's state (reading `Renderer::input()`,
+5. Each `RedrawRequested`: `Renderer::begin_frame()` ticks both clocks (so
+   `Renderer::dt()` is fresh), clears last frame's overlay geometry, and returns
+   how many **fixed steps** this frame owes. The loop calls
+   `Application::fixed_update(dt)` that many times — zero while paused, several
+   after a slow frame — which is where a consumer advances simulation state and
+   the reason a run reproduces at any frame rate. Everything after this happens
+   exactly once per frame, because it is rendering rather than simulation. Then
+   `Application::update` builds the frame (reading `Renderer::input()`,
    driving the camera via `Renderer::camera_mut`, and building its UI via
    `Renderer::ui()`). Then `Renderer::update()` re-uploads the camera uniform, and
    `Renderer::render()` records **two** passes into one command encoder: the 3D
@@ -186,6 +197,24 @@ timing. It is the wasm-safe `Instant` this note
 anticipated — native `Instant`, web `performance.now()` (`std::time::Instant`
 panics on wasm). Key-driven camera motion still uses a fixed per-frame step;
 nothing has demanded converting that yet.
+
+**There are now two clocks, and picking the wrong one is the easy mistake.**
+`Renderer::dt()` is wall time and should drive anything that must keep moving
+while the simulation is stopped — the FPS readout, and the UI's hover fades and
+collapse animations (`Renderer::ui()` fills `UiInput.dt` from it deliberately: a
+paused scene must not freeze a fade half-way). `Timeline`, reached through
+`Renderer::time()`, is simulation time, and the `dt` handed to
+`Application::fixed_update` is the same number on every machine. A consumer that
+advances state only in that hook is frame-rate independent; the engine's
+guarantee stops exactly there and does not extend to making the consumer itself
+deterministic.
+
+One consequence worth knowing before it surprises someone: `Clock` clamps a
+frame to 100 ms, so a throttled background browser tab accumulates *simulation*
+time far more slowly than real time. That is the intended failure — the
+alternative is a tab that returns to the foreground and teleports — but it means
+"wall time" measured as a sum of frame deltas is not wall time in a tab that
+wasn't drawing.
 
 ## The overlay pass and the UI
 
@@ -393,9 +422,6 @@ These are subtle and easy to reintroduce, so they're documented here:
 The scaffold leaves obvious seams:
 
 - **MSAA** (`multisample` is currently the 1-sample default).
-- **A fixed-timestep clock.** `Renderer::dt()` is raw wall-clock, so a consumer
-  advancing state by it is frame-rate coupled and cannot pause, single-step, or
-  reproduce a run (`ROADMAP.md` Slice 12).
 - A small **render-graph**: there are now two passes (3D + overlay) wired by hand
   in `render()`. A second consumer wanting its own pass is the roadblock that turns
   this into a real graph.
@@ -414,7 +440,9 @@ overlay pass + decoupled immediate-mode UI** with a wasm-safe frame clock
 (Slice 5), a **portable wireframe render mode** (`RenderMode`, line topology —
 Slice 6), and **per-object transforms + an instance draw-list** (Slice 8 — meshes
 are uploaded once for a handle and placed by `Transform`, so nothing re-uploads
-geometry to move it). On the overlay side specifically: **ordered draw layers** in
+geometry to move it), and a **fixed-timestep clock + time control** (Slice 12 —
+`Timeline`, `Application::fixed_update`, and `Renderer::time_mut` for pause,
+scale, single-step and seek). On the overlay side specifically: **ordered draw layers** in
 `Overlay::flush` and a **`scale_factor`-aware surface** (UI Slice 1 — the toolkit
 speaks logical points and the overlay scales on the way to vertices),
 **rounded-rect, border, and clip support** in `overlay.wgsl` (UI Slice 2), and a

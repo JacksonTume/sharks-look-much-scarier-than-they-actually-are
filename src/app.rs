@@ -191,11 +191,22 @@ impl ApplicationHandler<Renderer> for App {
             }
 
             WindowEvent::RedrawRequested => {
-                // Start the frame: advance the clock and clear the overlay so the
-                // consumer's `update` sees a fresh delta-time and an empty UI to
-                // rebuild into.
-                renderer.begin_frame();
-                // Let the consumer advance its state first, then draw.
+                // Start the frame: advance both clocks and clear the overlay so
+                // the consumer's hooks see a fresh delta-time and an empty UI to
+                // rebuild into. The count is this frame's fixed-step debt.
+                let steps = renderer.begin_frame();
+
+                // Simulation first, in whole identical steps — zero of them while
+                // paused, several after a slow frame. This is the loop that makes
+                // a consumer's state frame-rate independent (see `Timeline`);
+                // everything below it happens exactly once, because it is
+                // rendering rather than simulation.
+                let step = renderer.time().step();
+                for _ in 0..steps {
+                    self.application.fixed_update(renderer, step);
+                }
+
+                // Then let the consumer build the frame, and draw.
                 // `render` handles recoverable surface conditions internally.
                 self.application.update(renderer);
                 renderer.update();

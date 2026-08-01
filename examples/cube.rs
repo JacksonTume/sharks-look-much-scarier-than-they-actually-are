@@ -32,20 +32,27 @@ use slmsttaa::{run, Application, Instance, Material, Mesh, MeshHandle, Renderer,
 struct CubeDemo {
     /// The uploaded geometry, set once in `init` and never re-uploaded.
     cube: Option<MeshHandle>,
-    /// Accumulated rotation, advanced every frame.
+    /// Accumulated rotation, advanced one fixed step at a time.
     angle: f32,
 }
+
+/// How fast the cube spins, in radians per second of simulation time.
+const SPIN_RATE: f32 = 0.6;
 
 impl Application for CubeDemo {
     fn init(&mut self, renderer: &mut Renderer) {
         self.cube = Some(renderer.upload_mesh(&Mesh::cuboid([1.0; 3])));
     }
 
-    fn update(&mut self, renderer: &mut Renderer) {
-        // Fixed per-frame step: simplest cross-platform spin (no timer). The rate
-        // is frame-rate dependent, which is fine for a demo.
-        self.angle += 0.01;
+    /// This demo used to add a flat `0.01` per *frame*, so the cube spun half as
+    /// fast on a 30 Hz machine and twice as fast on a 144 Hz one. It was the
+    /// clearest instance of the defect in the tree, and moving one line into the
+    /// fixed hook is the whole fix: the step is the same number everywhere.
+    fn fixed_update(&mut self, _renderer: &mut Renderer, dt: f32) {
+        self.angle += SPIN_RATE * dt;
+    }
 
+    fn update(&mut self, renderer: &mut Renderer) {
         let Some(cube) = self.cube else { return };
         // Yaw about Y and pitch about X, exactly as the old CPU rotation did —
         // but as one matrix the GPU applies, rather than eight rotated corners

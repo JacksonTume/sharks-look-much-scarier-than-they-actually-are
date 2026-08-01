@@ -11,7 +11,8 @@
 //! - [`renderer`] — the wgpu device/surface/pipeline plumbing.
 //! - [`camera`]  — a minimal perspective camera producing a view-projection matrix.
 //! - [`input`]   — per-frame keyboard/mouse state, decoupled from winit.
-//! - [`time`]    — a cross-platform frame clock (delta time).
+//! - [`time`]    — a cross-platform frame clock (delta time) and the
+//!   fixed-timestep [`Timeline`] that drives `Application::fixed_update`.
 //! - [`ui`]      — the immediate-mode UI toolkit, re-exported from the separate
 //!   [`slmsttaa-ui`](slmsttaa_ui) crate and drawn by the overlay pass.
 //!
@@ -41,6 +42,7 @@ pub use application::Application;
 pub use camera::Camera;
 pub use input::{Input, Key, MouseButton};
 pub use renderer::{Instance, Material, Mesh, MeshHandle, RenderMode, Renderer, Transform, Vertex};
+pub use time::Timeline;
 pub use ui::{Color, Painter, Ui};
 
 use winit::event_loop::{ControlFlow, EventLoop};

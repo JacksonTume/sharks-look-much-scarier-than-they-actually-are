@@ -24,7 +24,7 @@ use winit::window::Window;
 
 use crate::camera::{Camera, CameraUniform};
 use crate::input::{Input, MouseButton};
-use crate::time::Clock;
+use crate::time::{Clock, Timeline};
 use overlay::Overlay;
 use slmsttaa_ui::{Ui, UiInput, UiState};
 
@@ -324,8 +324,11 @@ pub struct Renderer {
     overlay: Overlay,
     /// Persistent immediate-mode UI state (active widget, panel height).
     ui_state: UiState,
-    /// Frame clock for delta-time and the FPS readout.
+    /// Frame clock for delta-time and the FPS readout — wall time.
     clock: Clock,
+    /// Fixed-timestep simulation clock, driven from `clock` each frame. The
+    /// counterpart to the above: identical steps rather than real ones.
+    timeline: Timeline,
 
     /// Keeps the window alive for as long as the surface borrows it, and is read
     /// for its scale factor so the UI can be laid out in logical points.
@@ -528,6 +531,7 @@ impl Renderer {
             overlay,
             ui_state: UiState::default(),
             clock: Clock::new(),
+            timeline: Timeline::new(),
             window,
         }
     }
@@ -696,11 +700,36 @@ impl Renderer {
         &self.input
     }
 
-    /// Seconds elapsed since the previous frame (delta-time), for frame-rate-
-    /// independent animation. Updated once per frame by the engine before
-    /// `Application::update` runs; clamped to a sane maximum (see [`Clock`]).
+    /// Seconds of **wall time** elapsed since the previous frame. Updated once
+    /// per frame by the engine before `Application::update` runs; clamped to a
+    /// sane maximum (see [`Clock`]).
+    ///
+    /// This is the clock for things that should keep moving while the simulation
+    /// is stopped — an FPS readout, a UI hover fade. Simulation state should be
+    /// advanced by the fixed step handed to `Application::fixed_update` instead;
+    /// see [`Renderer::time`] for why.
     pub fn dt(&self) -> f32 {
         self.clock.dt()
+    }
+
+    /// The fixed-timestep simulation clock: elapsed simulation time, the
+    /// interpolation alpha, and the step count the last frame ran.
+    ///
+    /// The counterpart to [`Renderer::dt`]. Where that reports how long the last
+    /// frame took — a different number on every machine — this one is paid out in
+    /// identical steps, which is what lets a run reproduce and what makes "pause"
+    /// and "one step, please" expressible at all.
+    pub fn time(&self) -> &Timeline {
+        &self.timeline
+    }
+
+    /// Drive the simulation clock: pause, time scale, single-step, seek, and the
+    /// step rate. See [`Timeline`].
+    ///
+    /// Mirrors [`Renderer::camera_mut`] — a handle rather than a spray of setters
+    /// on this type, because these five controls are one subject.
+    pub fn time_mut(&mut self) -> &mut Timeline {
+        &mut self.timeline
     }
 
     /// Begin a UI frame and return the immediate-mode [`Ui`] builder.
@@ -746,14 +775,20 @@ impl Renderer {
         Ui::new(&mut self.overlay, input, &mut self.ui_state)
     }
 
-    /// Advance the frame clock and reset per-frame overlay geometry.
+    /// Advance both clocks, reset per-frame overlay geometry, and report how many
+    /// fixed steps this frame owes the consumer.
     ///
-    /// Engine-internal: the event loop calls this at the start of each frame,
-    /// before `Application::update`, so the consumer's `update` sees a fresh
-    /// [`Renderer::dt`] and an empty overlay to rebuild its UI into.
-    pub(crate) fn begin_frame(&mut self) {
-        self.clock.tick();
+    /// Engine-internal: the event loop calls this at the start of each frame, so
+    /// the consumer's hooks see a fresh [`Renderer::dt`] and an empty overlay to
+    /// rebuild its UI into. The returned count is how many times the loop should
+    /// call `Application::fixed_update` before `Application::update`.
+    ///
+    /// The timeline is fed the *clamped* delta, so a stall that [`Clock`] already
+    /// capped cannot arrive here as a hundred queued steps.
+    pub(crate) fn begin_frame(&mut self) -> u32 {
+        let dt = self.clock.tick();
         self.overlay.begin_frame();
+        self.timeline.begin_frame(dt)
     }
 
     /// Mutable access to the input snapshot, for the event loop to feed events

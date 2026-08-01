@@ -27,7 +27,7 @@
 //!   native — `cargo run --example scene`
 //!   web    — `cargo xtask serve scene`
 
-use slmsttaa::ui::{Anchor, Theme};
+use slmsttaa::ui::{Anchor, Theme, Variant};
 use slmsttaa::{
     run, Application, Instance, Key, Material, Mesh, MeshHandle, MouseButton, RenderMode, Renderer,
     Transform,
@@ -43,6 +43,11 @@ const SPACING: f32 = 2.4;
 const SIDE_DEFAULT: f32 = 3.0;
 const SIDE_MIN: f32 = 1.0;
 const SIDE_MAX: f32 = 5.0;
+
+/// How far the scrub slider reaches, in seconds of simulation time. An arbitrary
+/// window: the walk cycle never repeats exactly (every figure has its own
+/// irrational rate), so any instant is as good as any other to jump to.
+const SCRUB_MAX: f32 = 60.0;
 
 // --- Figure proportions ------------------------------------------------------
 //
@@ -90,15 +95,24 @@ struct SceneDemo {
     /// The UI theme, owned by the consumer and re-applied every frame.
     theme: Theme,
 
-    /// Seconds since start, accumulated from the frame clock. Frame-rate
-    /// *independent* motion, unlike `cube`'s fixed per-frame step — but still
-    /// wall-clock, which is the defect the fixed-timestep slice exists to fix.
+    /// Seconds of *simulation* time, accumulated one fixed step at a time in
+    /// [`Application::fixed_update`] and nowhere else. That restriction is the
+    /// whole contract: it is what makes the stage reproduce, and what lets the
+    /// transport controls below pause and scrub it.
+    ///
+    /// It is also this demo's entire simulation state — everything else you see
+    /// is derived from it every frame.
     time: f32,
 
     /// Orbit camera state (azimuth, elevation, range).
     yaw: f32,
     pitch: f32,
     distance: f32,
+
+    /// Seconds of *wall* time since start, for the HUD row beside `time`. The
+    /// two agreeing at any frame rate is this demo's proof; they part only when
+    /// the transport controls make them.
+    wall: f32,
 
     /// Smoothed frames-per-second for the HUD.
     fps: f32,
@@ -116,6 +130,7 @@ impl Default for SceneDemo {
             wireframe: false,
             theme: Theme::dark(),
             time: 0.0,
+            wall: 0.0,
             yaw: 0.7,
             pitch: 0.35,
             distance: 12.0,
@@ -277,11 +292,16 @@ impl SceneDemo {
         }
     }
 
-    /// Rebuild the draw-list for the current time.
+    /// Rebuild the draw-list for an instant on the timeline.
     ///
     /// The per-frame cost of a moving scene: a handful of matrices per figure. No
     /// mesh is touched, which is why the HUD can honestly claim zero uploads.
-    fn rebuild_instances(&mut self) {
+    ///
+    /// `time` is deliberately a *parameter* rather than `self.time`. The stage's
+    /// pose is a pure function of time, so rendering between two fixed steps means
+    /// evaluating that function at a sub-step instant — no snapshot blending
+    /// required. See the call site in `update`.
+    fn rebuild_instances(&mut self, time: f32) {
         let Some(meshes) = self.meshes else { return };
         self.instances.clear();
 
@@ -311,7 +331,7 @@ impl SceneDemo {
                 // buys: the limb angles below are all about X, the facing is about
                 // Y, and only a matrix composes the two correctly.
                 let facing = if self.turn {
-                    self.time * 0.6 * rate + offset
+                    time * 0.6 * rate + offset
                 } else {
                     0.0
                 };
@@ -323,7 +343,7 @@ impl SceneDemo {
                         origin + row as f32 * SPACING,
                     ],
                     facing,
-                    self.time * self.tempo * rate + offset,
+                    time * self.tempo * rate + offset,
                     self.swing,
                 );
                 self.push_figure(meshes, &pose, tint_for(i));
@@ -340,6 +360,19 @@ impl SceneDemo {
         let parts = self.instances.len().saturating_sub(1);
         let mut light = self.theme == Theme::light();
 
+        // The transport state belongs to the *engine's* clock, so it is
+        // snapshotted here and applied after the panel closes — the same shape
+        // the `light` toggle above already uses, because `ui` borrows the
+        // renderer for as long as the closures run.
+        let mut paused = renderer.time().is_paused();
+        let mut speed = renderer.time().scale();
+        let mut scrub = self.time;
+        let mut single_step = false;
+        let mut seeked = false;
+        let sim = self.time;
+        let wall = self.wall;
+        let steps = renderer.time().steps();
+
         let mut ui = renderer.ui();
         ui.set_theme(theme);
 
@@ -352,6 +385,35 @@ impl SceneDemo {
             ui.slider("tempo", &mut self.tempo, 0.0, 4.0).show();
             ui.slider("swing", &mut self.swing, 0.0, 1.4).show();
             ui.checkbox("turn on the spot", &mut self.turn);
+
+            // Transport, composed from the button and slider the toolkit already
+            // ships — no new widget. The UI roadmap predicted this slice would ask
+            // for a scrubber and ruled that the crude version comes first; a
+            // dedicated one waits until this is demonstrably not enough.
+            ui.section("Time", |ui| {
+                // `columns`, not `horizontal`: a button allocates "whatever is
+                // left of the line", so two in a row means the first takes the
+                // whole width and the second is pushed off the panel. Columns
+                // divide the line up front.
+                ui.columns(2, |ui, column| {
+                    if column == 0 {
+                        let label = if paused { "play" } else { "pause" };
+                        if ui.button(label).show().clicked {
+                            paused = !paused;
+                        }
+                    } else {
+                        // Only meaningful while paused — stepping a running clock
+                        // just takes a step it was about to take anyway.
+                        single_step = ui.button("step").variant(Variant::Secondary).show().clicked;
+                    }
+                });
+                ui.slider("speed", &mut speed, 0.1, 4.0).show();
+                seeked = ui
+                    .slider("scrub", &mut scrub, 0.0, SCRUB_MAX)
+                    .decimals(1)
+                    .show()
+                    .changed;
+            });
         });
 
         ui.panel(Anchor::TopRight, HUD_W, |ui| {
@@ -363,6 +425,13 @@ impl SceneDemo {
             // however many parts there are.
             ui.label_value("draw calls", "4");
             ui.label_value("uploads/frame", "0");
+            ui.separator();
+            // The slice's proof, in two rows: whatever the frame rate does, these
+            // two track each other. They diverge only when *you* make them —
+            // pausing, scaling, or scrubbing.
+            ui.label_value("sim time", &format!("{sim:.2}s"));
+            ui.label_value("wall time", &format!("{wall:.2}s"));
+            ui.label_value("steps", &format!("{steps}"));
             ui.checkbox("wireframe", &mut self.wireframe);
             ui.checkbox("light", &mut light);
         });
@@ -371,6 +440,22 @@ impl SceneDemo {
         drop(ui);
 
         self.theme = if light { Theme::light() } else { Theme::dark() };
+
+        renderer.time_mut().set_paused(paused);
+        renderer.time_mut().set_scale(speed);
+        if single_step {
+            renderer.time_mut().step_once();
+        }
+        if seeked {
+            // Both halves of a seek, and the honest cost of the engine's clock-only
+            // rule: the demo moves its own state, then keeps the engine's clock in
+            // agreement. It can do that at all only because its state is a pure
+            // function of time — a consumer carrying irreversible state (eroded
+            // terrain) would offer no scrub control.
+            self.time = scrub;
+            renderer.time_mut().seek(scrub);
+        }
+
         wants_pointer
     }
 
@@ -435,17 +520,35 @@ impl Application for SceneDemo {
         });
     }
 
+    /// The stage's entire simulation: one float, advanced by a step that is the
+    /// same number on every machine.
+    ///
+    /// Nothing else in this file touches `self.time`, which is what the fixed hook
+    /// is for — the contract is a *place*, not a convention. (The one exception is
+    /// the scrub control, which sets it outright and tells the engine's clock so.)
+    fn fixed_update(&mut self, _renderer: &mut Renderer, dt: f32) {
+        self.time += dt;
+    }
+
     fn update(&mut self, renderer: &mut Renderer) {
+        // Wall time, deliberately: an FPS readout that froze with the simulation
+        // would be useless for judging whether pausing cost anything.
         let dt = renderer.dt();
         if dt > 0.0 {
             self.fps = self.fps * 0.9 + (1.0 / dt) * 0.1;
         }
-        // Motion off the frame clock, so the stage moves at the same speed
-        // whatever the frame rate.
-        self.time += dt;
+        self.wall += dt;
+
+        // Render *between* steps. At 144 Hz against a 60 Hz step most frames fall
+        // mid-step, and drawing the last completed one on each of them judders;
+        // `alpha` is how far through the pending step this frame is. The pose is a
+        // pure function of time, so this evaluates it at a sub-step instant rather
+        // than blending two stored snapshots — which is a consumer's choice to
+        // make, not the engine's.
+        let time = self.time + renderer.time().alpha() * renderer.time().step();
 
         // Built before the UI so the HUD's part count describes this frame.
-        self.rebuild_instances();
+        self.rebuild_instances(time);
         let ui_has_pointer = self.build_ui(renderer);
         self.drive_camera(renderer, ui_has_pointer);
 

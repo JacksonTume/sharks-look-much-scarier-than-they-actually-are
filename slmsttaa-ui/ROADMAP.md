@@ -676,13 +676,21 @@ finally demands one, not as a to-build list:
   that lets the *user* do it at runtime is a separate thing, and stays under the
   "no" below until something wants it.
 - **A transport / timeline scrubber** — play, pause, single-step, and seek along a
-  time axis, with tick marks or event markers. The driver is real and close: the
-  engine's [Slice 12](../ROADMAP.md#slice-12--fixed-timestep-clock--time-control)
-  gives `scene.rs` a fixed-step clock the demo has to *drive from somewhere*. Not
-  scheduled anyway, because the crude version composes from today's `button` +
-  `slider` — which is the correct first move. A dedicated widget waits until that
-  composition is demonstrably not enough (markers along the track are the likely
-  breaking point).
+  time axis, with tick marks or event markers. **The driver arrived, and the
+  prediction held.** Engine [Slice
+  12](../ROADMAP.md#slice-12--fixed-timestep-clock--time-control) shipped the
+  fixed-step clock, and `examples/scene.rs` drives it from a `Time` section built
+  out of `button` + `slider` and nothing else — a play/pause button whose label
+  swaps, a secondary `step`, and two sliders for speed and scrub. This crate cost
+  the engine nothing and gained nothing, which is the third slice running
+  (4, 6, and now this) where the seam absorbed a demand without moving.
+  One thing the demo *did* find, and it belongs here rather than in the engine
+  roadmap: two buttons in a `horizontal` row do not share it. A button allocates
+  "whatever is left of the line", so the first takes the whole width and the
+  second is clipped off the panel edge. `columns(2)` is the answer and the docs
+  now say which to reach for. A dedicated widget still waits until this
+  composition is demonstrably not enough — markers along the track remain the
+  likely breaking point.
 - **Draggable / resizable / dockable panels** — no.
 - **A retained-mode widget tree** — explicitly not the destination (root
   principle 2). The toolkit stays immediate-mode with minimal persistent state.

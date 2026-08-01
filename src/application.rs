@@ -21,7 +21,37 @@ pub trait Application {
     /// Called once, after the renderer exists. Upload initial geometry here.
     fn init(&mut self, renderer: &mut Renderer);
 
-    /// Called every frame, just before the engine draws. Mutate per-frame state
-    /// (geometry, later the camera) here. The default does nothing.
+    /// Called zero or more times per frame, before [`Application::update`], to
+    /// advance simulation state by a **fixed** `dt`.
+    ///
+    /// `dt` is always the same number — [`Timeline::step`] — however long the
+    /// frame took; a slow frame runs this hook more times rather than with a
+    /// bigger step. That is what makes a run reproduce, and it is the difference
+    /// between this and [`Renderer::dt`].
+    ///
+    /// **The contract is "advance simulation state here and nowhere else."** A
+    /// consumer that honors it is frame-rate independent and can be paused,
+    /// slowed, single-stepped and scrubbed via [`Renderer::time_mut`]; one that
+    /// also mutates state in `update` has opted out, and the engine cannot tell.
+    /// The engine's guarantee is narrow on purpose: it stops being a source of
+    /// wall-clock nondeterminism. It does not make you deterministic.
+    ///
+    /// Not everything belongs here. Camera work, the draw-list, and the UI are
+    /// *rendering*, they should run once per frame whatever the step rate, and
+    /// they go in [`Application::update`]. The default does nothing, so a
+    /// consumer with no simulation ignores this hook entirely.
+    ///
+    /// [`Timeline::step`]: crate::time::Timeline::step
+    /// [`Renderer::dt`]: Renderer::dt
+    /// [`Renderer::time_mut`]: Renderer::time_mut
+    fn fixed_update(&mut self, _renderer: &mut Renderer, _dt: f32) {}
+
+    /// Called every frame, just before the engine draws. Build the draw-list, the
+    /// UI, and the camera here. The default does nothing.
+    ///
+    /// Rendering between two fixed steps is what [`Timeline::alpha`] is for — see
+    /// its docs. Simulation state belongs in [`Application::fixed_update`].
+    ///
+    /// [`Timeline::alpha`]: crate::time::Timeline::alpha
     fn update(&mut self, _renderer: &mut Renderer) {}
 }
