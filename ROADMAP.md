@@ -1313,14 +1313,34 @@ and the fourteen-of-sixteen attribute budget is unchanged. Chrome again served
 **WebGPU**, so the WebGL2 fallback is still not exercised; that is now the fourth
 slice in a row to write that sentence.
 
-*What it exposed, and it is not this slice's to fix.* The whole picture renders
-**noticeably darker on the web than on native** — the ground plane reads mid-grey
-in a native window and near-black in Chrome. `Renderer::new` prefers an sRGB
-surface format and falls back to `surface_caps.formats[0]` when none is offered,
-which is the shape of a bug that would do exactly this. It is pre-existing, it
-affects every demo equally, and it was not introduced or touched here, so it is
-recorded rather than fixed — confirming it means logging the format actually
-chosen on each target.
+*What it exposed, and it was worth chasing.* The whole picture rendered
+**noticeably darker on the web than on native** — the ground plane mid-grey in a
+native window and near-black in Chrome. Logging the formats settled it in one
+run: a WebGPU canvas offers `[Bgra8Unorm, Rgba8Unorm, Rgba16Float]` and **not one
+of them is sRGB**, where Vulkan lists `Bgra8UnormSrgb` first. `Renderer::new`
+preferred an sRGB format and fell back to `formats[0]`, so on the web every
+colour was displayed without its encode.
+
+Fixed here rather than deferred, because native/web parity is a rule this file
+sets rather than an aspiration, and because it was one slice's worth of
+divergence away from being load-bearing for someone. The surface is configured
+with the format it offered and every pipeline renders through an sRGB **view** of
+it — `view_formats` exists for precisely this. It is gated on
+`DownlevelFlags::SURFACE_VIEW_FORMATS`, since GLES/WebGL cannot re-view a surface
+texture, so the WebGL2 fallback keeps the old too-dark behaviour rather than
+failing to start.
+
+Two things make the claim checkable rather than plausible: `add_srgb_suffix` is
+the identity on an already-sRGB format, so **the native picture is unchanged**
+(verified by screenshot before and after), and the web now logs
+`surface format: Bgra8Unorm; rendering through Bgra8UnormSrgb`. Side by side the
+two targets finally show the same ground, the same sky and the same panel.
+
+*It is worth noting how long this hid.* It predates every slice that looked at a
+browser, and each of those looked at **terrain**, which is dark, textured and
+judged on shape rather than tone. A flat grey ground plane under six pastel
+objects is what made it obvious — which is an argument for a demo whose colours
+are boring on purpose.
 
 ### What stays in the consumer
 

@@ -564,6 +564,36 @@ These are subtle and easy to reintroduce, so they're documented here:
   is actually available, and use `downlevel_webgl2_defaults` limits there so a GL
   adapter can satisfy the device request.
 
+- **A WebGPU canvas offers no sRGB surface format, and the whole picture is too
+  dark if you accept that.** Measured, not guessed — the engine logs both lists at
+  startup:
+
+  | | formats offered | |
+  |---|---|---|
+  | Vulkan (desktop) | `Bgra8UnormSrgb, Rgba8UnormSrgb, Bgra8Unorm, Rgba8Unorm, Rgb10a2Unorm` | an sRGB format is available |
+  | WebGPU (Chrome) | `Bgra8Unorm, Rgba8Unorm, Rgba16Float` | **none is sRGB** |
+
+  Shading is done in linear space and the encode is meant to be the GPU's job on
+  write. "Prefer an sRGB format, else take what's offered" therefore silently
+  produced an unencoded frame on the web: the editor's ground plane read mid-grey
+  natively and near-black in a browser, for **every demo**, and it survived
+  unnoticed for many slices because both targets *ran* and nobody put the two
+  windows side by side.
+
+  The fix is `SurfaceConfiguration::view_formats`, which exists for this: the
+  surface is configured with the format it offered and every pipeline renders
+  through an sRGB **view** of the same texture (`Renderer::render_format`, applied
+  both to `create_view` and to every pipeline/graph/overlay target). Two things
+  matter when touching it — `TextureViewDescriptor::default()` takes the
+  *texture's* format and skips the encode, so the view's format must be stated;
+  and `add_srgb_suffix()` is the identity on a format that is already sRGB, so
+  the desktop path is provably unchanged (verified by screenshot).
+
+  Gated on `DownlevelFlags::SURFACE_VIEW_FORMATS`, because GLES/WebGL cannot
+  re-view a surface texture at all. The WebGL2 fallback therefore keeps the old,
+  too-dark behaviour rather than failing to start — the one target where this is
+  still wrong, and wrong visibly rather than fatally.
+
 - **Colours in a shader are linear, and the surface is sRGB.** `Bgra8UnormSrgb`
   means the GPU encodes whatever a fragment returns, so a value picked by eye
   comes out much brighter than intended — 0.55 linear displays at about 0.77. The

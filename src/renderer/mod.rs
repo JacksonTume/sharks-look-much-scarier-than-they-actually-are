@@ -392,6 +392,11 @@ pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    /// The format every pipeline renders into, which is **not** always
+    /// [`Renderer::config`]'s. On a WebGPU canvas the surface is linear and this
+    /// is an sRGB view of it, so shading stays linear and the GPU does the
+    /// encode. See the selection in [`Renderer::new`].
+    render_format: wgpu::TextureFormat,
     size: winit::dpi::PhysicalSize<u32>,
 
     pipeline: wgpu::RenderPipeline,
@@ -526,14 +531,46 @@ impl Renderer {
             .expect("failed to create device");
 
         let surface_caps = surface.get_capabilities(&adapter);
-        // Prefer an sRGB surface format so colors look correct without manual
-        // gamma handling in the shader.
-        let surface_format = surface_caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| f.is_srgb())
-            .unwrap_or(surface_caps.formats[0]);
+        // The format the surface is *configured* with, and the (possibly
+        // different) format everything actually **renders through**.
+        //
+        // Shading is done in linear space and the sRGB encode is the GPU's job on
+        // write, which is why every pipeline wants an sRGB target. A desktop
+        // backend simply offers one: Vulkan here lists `Bgra8UnormSrgb` first.
+        // **A WebGPU canvas offers none at all** — Chrome offers exactly
+        // `[Bgra8Unorm, Rgba8Unorm, Rgba16Float]` — so the old code fell through
+        // to a linear format and every colour in the frame was displayed without
+        // its encode. That is not subtle: the ground plane read mid-grey on
+        // native and near-black in a browser, for every demo, and it went
+        // unnoticed because both targets *ran*.
+        //
+        // The fix is `view_formats`, which exists for exactly this: configure the
+        // surface with the format it offered, then render into an sRGB **view**
+        // of the same texture. `add_srgb_suffix` is the identity on a format that
+        // is already sRGB, so the desktop path is unchanged.
+        let surface_format = surface_caps.formats[0];
+        let srgb_format = surface_format.add_srgb_suffix();
+
+        // GLES/WebGL cannot re-view a surface texture at all (the flag's own docs
+        // say so), so the WebGL2 fallback keeps the old behaviour rather than
+        // failing to start. It is the one target where this is still wrong, and
+        // it is wrong *visibly* rather than fatally.
+        let can_review_surface = adapter
+            .get_downlevel_capabilities()
+            .flags
+            .contains(wgpu::DownlevelFlags::SURFACE_VIEW_FORMATS);
+        let render_format = if can_review_surface {
+            srgb_format
+        } else {
+            surface_format
+        };
+
+        log::info!(
+            "surface format: {surface_format:?}; rendering through {render_format:?} \
+             (srgb: {}); offered: {:?}",
+            render_format.is_srgb(),
+            surface_caps.formats
+        );
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -544,7 +581,11 @@ impl Renderer {
             // to `AutoNoVsync` to benchmark uncapped frame rates.
             present_mode: wgpu::PresentMode::AutoVsync,
             alpha_mode: surface_caps.alpha_modes[0],
-            view_formats: vec![],
+            view_formats: if render_format == surface_format {
+                vec![]
+            } else {
+                vec![render_format]
+            },
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
@@ -643,7 +684,7 @@ impl Renderer {
             &device,
             &pipeline_layout,
             &shader,
-            config.format,
+            render_format,
             wgpu::PrimitiveTopology::TriangleList,
             Some(wgpu::Face::Back),
             false,
@@ -652,7 +693,7 @@ impl Renderer {
             &device,
             &scene_pipeline_layout,
             &shader,
-            config.format,
+            render_format,
             wgpu::PrimitiveTopology::TriangleList,
             Some(wgpu::Face::Back),
             true,
@@ -661,7 +702,7 @@ impl Renderer {
             &device,
             &pipeline_layout,
             &shader,
-            config.format,
+            render_format,
             wgpu::PrimitiveTopology::LineList,
             None,
             false,
@@ -672,7 +713,7 @@ impl Renderer {
             &device,
             &pipeline_layout,
             &fullscreen_shader,
-            config.format,
+            render_format,
             "fs_sky",
             "sky pipeline",
         );
@@ -680,7 +721,7 @@ impl Renderer {
             &device,
             &scene_pipeline_layout,
             &fullscreen_shader,
-            config.format,
+            render_format,
             "fs_composite",
             "composite pipeline",
         );
@@ -691,7 +732,7 @@ impl Renderer {
         // pass reads and writes. Written in reading order anyway, because a
         // frame that reads top-to-bottom is easier to follow — the point is
         // that the order is no longer load-bearing.
-        let mut graph = RenderGraph::new(config.format);
+        let mut graph = RenderGraph::new(render_format);
         let scene_color = graph.resource("scene color", ResourceFormat::Color);
         let scene_depth = graph.resource("scene depth", ResourceFormat::Depth);
 
@@ -741,13 +782,14 @@ impl Renderer {
 
         let instance_buffer = create_instance_buffer(&device, INITIAL_INSTANCE_CAPACITY);
 
-        let overlay = Overlay::new(&device, &queue, config.format, width, height);
+        let overlay = Overlay::new(&device, &queue, render_format, width, height);
 
         Self {
             surface,
             device,
             queue,
             config,
+            render_format,
             size,
             pipeline,
             blend_pipeline,
@@ -1125,9 +1167,13 @@ impl Renderer {
             }
         };
 
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        // Rendered through `render_format`, which on a WebGPU canvas is an sRGB
+        // re-view of a linear surface texture. `Default::default()` would take
+        // the texture's own format and silently skip the encode.
+        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(self.render_format),
+            ..Default::default()
+        });
 
         let mut encoder = self
             .device
