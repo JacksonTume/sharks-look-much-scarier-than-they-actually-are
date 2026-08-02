@@ -17,6 +17,37 @@ const OPENGL_TO_WGPU_MATRIX: Mat4 = Mat4::from_cols_array(&[
     0.0, 0.0, 0.5, 1.0,
 ]);
 
+/// A half-line in world space: where it starts, and which way it goes.
+///
+/// The engine's answer to "what am I pointing at?" — and deliberately only half
+/// an answer. Producing a ray needs the camera and the size of the render
+/// target, which are the engine's; deciding what the ray *hits* needs a model of
+/// the scene, which is the consumer's. So the engine hands over the ray and
+/// stops, the same way it hands over a heightmap's worth of pixels and lets the
+/// terrain demo own the erosion.
+///
+/// Plain arrays, like [`Transform`](crate::Transform) and
+/// [`Camera::look_from_to`]: a consumer intersects this with its own boxes and
+/// planes without taking a math dependency.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ray {
+    /// Where the ray starts, in world space — a point on the near plane.
+    pub origin: [f32; 3],
+    /// Unit direction the ray travels.
+    pub direction: [f32; 3],
+}
+
+impl Ray {
+    /// The point `distance` units along the ray.
+    pub fn at(&self, distance: f32) -> [f32; 3] {
+        [
+            self.origin[0] + self.direction[0] * distance,
+            self.origin[1] + self.direction[1] * distance,
+            self.origin[2] + self.direction[2] * distance,
+        ]
+    }
+}
+
 /// A perspective camera positioned somewhere in the world, looking at a target.
 #[derive(Debug, Clone, Copy)]
 pub struct Camera {
@@ -66,6 +97,33 @@ impl Camera {
     pub fn look_from_to(&mut self, eye: [f32; 3], target: [f32; 3]) {
         self.eye = Vec3::from(eye);
         self.target = Vec3::from(target);
+    }
+
+    /// The world-space ray through a point in normalized device coordinates:
+    /// `x` and `y` both in `[-1, 1]`, with `+y` **up**.
+    ///
+    /// Unprojects the near and far plane points and joins them, which is the
+    /// formulation that stays correct if this camera ever stops being a
+    /// perspective one — the eye position is not a valid ray origin under an
+    /// orthographic projection, and the near-plane point always is.
+    ///
+    /// Engine-internal because nothing has asked to cast a ray through anywhere
+    /// but the pointer. [`Renderer::pointer_ray`](crate::Renderer::pointer_ray)
+    /// is the public door, and it owns the pixels-to-NDC conversion because it is
+    /// the half that knows how big the render target is.
+    pub(crate) fn ray_through_ndc(&self, ndc: [f32; 2]) -> Ray {
+        let inverse = self.view_projection().inverse();
+        // wgpu's clip space puts the near plane at z = 0 and the far at z = 1.
+        let unproject = |z: f32| {
+            let clip = inverse * glam::Vec4::new(ndc[0], ndc[1], z, 1.0);
+            clip.truncate() / clip.w
+        };
+        let near = unproject(0.0);
+        let direction = (unproject(1.0) - near).normalize_or_zero();
+        Ray {
+            origin: near.to_array(),
+            direction: direction.to_array(),
+        }
     }
 
     /// Update the aspect ratio, e.g. after a window resize.
@@ -136,5 +194,88 @@ impl Default for CameraUniform {
             eye: [0.0; 4],
             frame: [0.0; 4],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A camera looking down -Z from a little above the origin.
+    fn camera() -> Camera {
+        let mut camera = Camera::new(16.0 / 9.0);
+        camera.look_from_to([0.0, 2.0, 6.0], [0.0, 0.0, 0.0]);
+        camera
+    }
+
+    #[test]
+    fn centre_ray_aims_at_the_target() {
+        let camera = camera();
+        let ray = camera.ray_through_ndc([0.0, 0.0]);
+        let to_target = (camera.target - camera.eye).normalize();
+        let direction = Vec3::from(ray.direction);
+        assert!(
+            (direction - to_target).length() < 1e-4,
+            "centre ray {direction:?} should aim at the target along {to_target:?}"
+        );
+    }
+
+    #[test]
+    fn directions_are_unit_length() {
+        let camera = camera();
+        for ndc in [[0.0, 0.0], [-1.0, -1.0], [1.0, 1.0], [0.7, -0.3]] {
+            let length = Vec3::from(camera.ray_through_ndc(ndc).direction).length();
+            assert!(
+                (length - 1.0).abs() < 1e-5,
+                "ndc {ndc:?} gave length {length}"
+            );
+        }
+    }
+
+    /// The property that actually matters for picking: project a known world
+    /// point, cast a ray back through the pixel it landed on, and the point must
+    /// lie on that ray. This is what catches a flipped Y or the wrong near-plane
+    /// depth convention — both of which produce a plausible-looking ray that
+    /// selects the wrong object.
+    #[test]
+    fn a_ray_through_a_projected_point_hits_that_point() {
+        let camera = camera();
+        for point in [
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.5, 0.5, -2.0),
+            Vec3::new(-2.0, 1.0, 1.0),
+        ] {
+            let clip = camera.view_projection() * point.extend(1.0);
+            let ndc = clip.truncate() / clip.w;
+            let ray = camera.ray_through_ndc([ndc.x, ndc.y]);
+
+            let origin = Vec3::from(ray.origin);
+            let direction = Vec3::from(ray.direction);
+            let along = (point - origin).dot(direction);
+            assert!(along > 0.0, "{point:?} landed behind the ray origin");
+            let closest = origin + direction * along;
+            assert!(
+                (closest - point).length() < 1e-3,
+                "{point:?} missed by {}",
+                (closest - point).length()
+            );
+        }
+    }
+
+    /// Right on screen is right in the world, and up is up. A Y flip passes both
+    /// tests above and fails this one.
+    #[test]
+    fn ndc_axes_point_the_expected_way() {
+        let camera = camera();
+        let centre = Vec3::from(camera.ray_through_ndc([0.0, 0.0]).direction);
+        let right = Vec3::from(camera.ray_through_ndc([0.9, 0.0]).direction);
+        let up = Vec3::from(camera.ray_through_ndc([0.0, 0.9]).direction);
+
+        // The camera looks down -Z from +Z, so world +X is to the right of centre.
+        assert!(
+            right.x > centre.x,
+            "ndc +x should look further along world +x"
+        );
+        assert!(up.y > centre.y, "ndc +y should look further along world +y");
     }
 }

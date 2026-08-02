@@ -239,6 +239,28 @@ principle 1). Input is funneled instead:
    press-edges (held state survives), so the next `update` sees only that frame's
    motion.
 
+**Input also goes the other way, from a pixel back into the world.**
+`Renderer::pointer_ray()` unprojects the cursor into a world-space `Ray`
+(`camera.rs`), which is the whole of the engine's contribution to picking. It
+needs three things a consumer cannot reach — the inverse view-projection, the
+render target's size in pixels, and the scale factor relating them — and it
+stops there: what a ray *hits* is a model of the scene, which is the consumer's
+(see `examples/editor.rs`, which does its own ray-vs-box test). The near-plane
+point is used as the origin rather than the eye, so the formulation survives a
+future orthographic camera.
+
+**A press edge is not the same as "the button is down", and the difference is
+only visible on the web.** `Input` reports both (`is_mouse_pressed` vs
+`is_mouse_held`), and the tempting shape for a consumer is to bail out unless the
+button is held and *then* look for the press. On native that is
+indistinguishable from correct: a human click always spans at least one frame at
+75 fps. In a browser, a click can arrive as `mousedown` and `mouseup` between one
+frame and the next, so at frame time the press edge is set and the held state is
+already `false` — and the whole click is dropped. `editor.rs` was written this
+way, picked objects perfectly on native, and did nothing at all in Chrome.
+**Handle the press edge first; ask whether the button is still held only for the
+drag that follows.**
+
 The **frame clock** that was once deferred here now exists (`time.rs`,
 `Renderer::dt()`): the terrain demo's FPS readout needed frame-rate-independent
 timing. It is the wasm-safe `Instant` this note

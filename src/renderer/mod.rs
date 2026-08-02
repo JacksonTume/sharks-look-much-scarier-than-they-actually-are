@@ -27,7 +27,7 @@ use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
-use crate::camera::{Camera, CameraUniform};
+use crate::camera::{Camera, CameraUniform, Ray};
 use crate::input::{Input, MouseButton};
 use crate::time::{Clock, Timeline};
 use graph::{Load, Pass, PassKind, RenderGraph, ResourceFormat, ResourceId, SWAPCHAIN};
@@ -954,6 +954,44 @@ impl Renderer {
     /// only the current frame (see [`Input`]).
     pub fn input(&self) -> &Input {
         &self.input
+    }
+
+    /// A world-space [`Ray`] through the pointer, or `None` when the pointer is
+    /// not over the window.
+    ///
+    /// The engine's whole contribution to picking. Turning a cursor into a ray
+    /// needs three things a consumer cannot reach: the camera's inverse
+    /// view-projection, the size of the render target in pixels, and the display
+    /// scale factor relating the two. Everything *after* the ray — what counts as
+    /// a hit, which hit wins, what a click then means — is the consumer's, in the
+    /// same way the erosion solver is the terrain demo's. The engine does not know
+    /// what is in the scene, and this is the seam that lets it keep not knowing.
+    ///
+    /// It reads the camera as it stands *now*, so a consumer that moves the camera
+    /// and then picks in the same frame gets the moved one.
+    ///
+    /// ```no_run
+    /// # use slmsttaa::Renderer;
+    /// # fn demo(renderer: &Renderer) {
+    /// if let Some(ray) = renderer.pointer_ray() {
+    ///     // Meet the ground plane at y = 0.
+    ///     let t = -ray.origin[1] / ray.direction[1];
+    ///     let ground = ray.at(t);
+    /// }
+    /// # }
+    /// ```
+    pub fn pointer_ray(&self) -> Option<Ray> {
+        let (x, y) = self.input.cursor_position()?;
+        let (w, h) = (self.size.width as f32, self.size.height as f32);
+        if w <= 0.0 || h <= 0.0 {
+            return None;
+        }
+        // Physical pixels, top-left origin → NDC, centre origin, +y up. The
+        // cursor is already in physical pixels (unlike the toolkit's, which
+        // `Renderer::ui` converts to points), so it shares the surface's units
+        // and no scale factor appears here.
+        let ndc = [2.0 * x / w - 1.0, 1.0 - 2.0 * y / h];
+        Some(self.camera.ray_through_ndc(ndc))
     }
 
     /// Seconds of **wall time** elapsed since the previous frame. Updated once

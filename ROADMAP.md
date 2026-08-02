@@ -1210,6 +1210,118 @@ screen. Both are the defining limits of screen-space techniques rather than gaps
 in this implementation, and escaping them means cube maps or a real reflection
 pass, neither of which has a demo asking.
 
+## The third vertical — a scene you can edit (Slice 17)
+
+Slices 11, 12 and 13 each ended without evidence for a next one, and Slice 16
+closed with its own list of things nothing had asked for. The roadmap's answer to
+that state is written into it: *the honest next move is a demo that hits a wall
+none of them cover — not another item invented from this file.* So the next slice
+was chosen by picking a demo, not a feature.
+
+### Slice 17 — Picking: letting the pointer reach the world ✅ done
+
+*Roadblock:* every demo so far is a one-way street. The consumer computes a scene
+and the engine draws it; input has only ever moved the camera or moved a slider
+that moved a number. **Nothing has ever asked "what did I just click on?"** — and
+the answer needs something the engine could not express.
+
+The wall was visible in the source before a line of the demo was written.
+`Camera::view_projection()` returns a `glam::Mat4` and `Camera`'s fields are
+`Vec3`, so the only route from a cursor position to a world-space ray was for the
+demo to take a `glam` dependency — the exact thing `look_from_to`'s own doc
+comment says the API exists to avoid. Meanwhile `CameraUniform` **already carried
+the inverse view-projection**, because Slice 16's sky pass needed it. The engine
+was computing precisely the matrix picking wants and had no way to hand it over.
+
+The driving demo is **`examples/editor.rs`** — click an object to select it, drag
+it across the ground, inspect and edit it in a panel, spawn and delete. Content-
+free in the same way `scene.rs` is: no game, no tool chain, just "objects you can
+point at, pick up, change, and throw away."
+
+**What the engine gained, and it is deliberately half an answer.**
+
+- **`Ray { origin, direction }`** (`camera.rs`) and **`Renderer::pointer_ray()`**.
+  Plain arrays, following the rule `Transform` and `look_from_to` already set.
+  That is the entire public surface.
+- **The split is the point.** Producing a ray needs the camera, the render
+  target's size, and the scale factor — all the engine's. Deciding what the ray
+  *hits* needs a model of the scene — the consumer's. So `editor.rs` owns its own
+  ray-vs-box test, which is the same ruling that keeps stream-power erosion in
+  the terrain demo. A bounding box is a decision about how forgiving clicking
+  should be, not a fact about a mesh, and the engine has no business having an
+  opinion.
+- **`Camera::ray_through_ndc` stayed `pub(crate)`.** Nothing has asked to cast a
+  ray through anywhere but the pointer, and a second public entry point would be
+  the speculative build principle 2 forbids. It unprojects the near *and* far
+  plane and joins them rather than starting from the eye — the eye is not a valid
+  ray origin under an orthographic projection, and the near-plane point always is.
+- **Four unit tests, for the same reason `Timeline` got eight.** This is pure
+  math with no GPU behind it. The one that earns its place round-trips a world
+  point through the projection and casts a ray back through the pixel it landed
+  on: a flipped Y or the wrong near-plane depth convention both produce a
+  plausible-looking ray that quietly selects the wrong object, and no screenshot
+  would show it.
+
+**Two predictions this slice made about itself, and how they came out.**
+
+- **Object lifetime would pull in `MeshHandle` removal** — Slice 8 deferred it
+  pending "a demo that actually spawns and destroys objects", and this is that
+  demo. It did **not** pull it in, and that is the more interesting result: an
+  object here *is* a placement of one of three shared meshes, so spawning and
+  deleting cost no mesh traffic at all. The deferral was right, and it stays
+  deferred until something uploads geometry per object.
+- **Showing what is selected would need a per-instance render mode.** It did not,
+  after the first attempt failed. A translucent swollen shell — the obvious
+  inverted-hull trick — washes the object pale, which destroys exactly the
+  property the inspector exists to edit; a hue slider is useless when selecting
+  something drains its colour. The fix was **not** an engine feature but a
+  **cage**: the twelve edges of the object's bounds, drawn as thin boxes from the
+  cuboid the demo had already uploaded. It reads unmistakably as "selected",
+  leaves the object's colour alone, costs one draw call, and is re-implementable
+  by any consumer from public API — which is the test this file sets before
+  anything is pushed down into the engine.
+
+**The bug, and it is the best argument in this document for the web check.**
+
+Picking worked perfectly on native and did **nothing at all** in Chrome. The
+cause is not graphics: `handle_pointer` bailed out unless the left button was
+held and only *then* looked for a press edge. A human click at 75 fps always
+spans a frame, so the two are indistinguishable on the desktop. A browser can
+deliver `mousedown` and `mouseup` between one frame and the next — so at frame
+time the press edge is set and the held state is already false, and the entire
+click is discarded. Handling the press first and asking about "still held" only
+for the drag is the fix, and it is recorded in `ARCHITECTURE.md` because it is a
+trap for the next consumer that reads a button.
+
+This is the third web-only defect in the project's record (after Slice 8's
+`first_instance` and Slice 5's canvas sizing), and the first that has nothing to
+do with the GPU. `--target wasm32-unknown-unknown --lib` compiled it happily.
+
+*Proof:* `cargo run --example editor` opens six objects on a ground plane at
+75–87 fps. Clicking one selects it — verified with the ray printed beside the
+cursor and the hit index, `593,465` → `0.60,-0.50,-0.62` → `hit #1` — draws a
+cage around it, and fills the inspector with that object's real values. Dragging
+carries it under the pointer across the ground (`x 1.30 → 3.38`, the object
+staying where the cursor put it rather than sliding at a rate that depends on
+camera angle). Spawn, copy and delete move the object count 6 → 7 → 8 → 7 and
+clear the selection. Verified on native and in a browser under `BrowserWebGpu`,
+where the same click selects the same object and draws the same cage.
+
+*On the parity risk.* This slice adds no vertex attribute, no shader edit and no
+pipeline, so the instance-buffer surface Slice 8's bug lived in is untouched —
+and the fourteen-of-sixteen attribute budget is unchanged. Chrome again served
+**WebGPU**, so the WebGL2 fallback is still not exercised; that is now the fourth
+slice in a row to write that sentence.
+
+*What it exposed, and it is not this slice's to fix.* The whole picture renders
+**noticeably darker on the web than on native** — the ground plane reads mid-grey
+in a native window and near-black in Chrome. `Renderer::new` prefers an sRGB
+surface format and falls back to `surface_caps.formats[0]` when none is offered,
+which is the shape of a bug that would do exactly this. It is pre-existing, it
+affects every demo equally, and it was not introduced or touched here, so it is
+recorded rather than fixed — confirming it means logging the format actually
+chosen on each target.
+
 ### What stays in the consumer
 
 Recorded because this boundary will be asked about again, and it is the same
@@ -1271,6 +1383,11 @@ moved out of this list and into Slices 8–12 above, because `scene.rs` demands
 them; the render graph and "water that looks wet" left it in Slice 16, because
 terrain did.) Each of the rest waits for a consumer to ask:
 
+- ~~**Picking / hit-testing**~~ — **landed as Slice 17.** Never listed here, which
+  is worth noting: it was found by choosing a demo rather than by reading this
+  file, and the seam it needed (`Renderer::pointer_ray`) took nine lines. The
+  items below have been sitting here longer and are still waiting for the same
+  thing — a consumer that is actually blocked.
 - **Consumer-supplied textures.** The overlay already samples a glyph atlas, so
   the shader work is adjacent, but no public API exists to upload an image and
   nothing has demanded one. Two things would: a 3D demo wanting surface detail
