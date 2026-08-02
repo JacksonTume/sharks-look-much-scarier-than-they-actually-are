@@ -1091,6 +1091,125 @@ the blended pass sample it for refraction and a screen-space reflection. That is
 the render-graph entry under *Beyond*, it is the next real slice, and no amount of
 tuning the current shader substitutes for it.
 
+*It was the next slice, and it is **Slice 16**, below.*
+
+### Slice 16 — An offscreen target, and the render graph that needed ✅ done
+
+*Roadblock:* the one Slice 15 wrote down for itself. The water was lit, moving and
+correctly shaped, and it still reflected nothing and refracted nothing, because
+the shader had no way to see the scene it was sitting on. That needs the opaque
+pass rendered to a **texture**, which needs a frame with more than one dependency
+in it — the first thing this engine has built that the hand-wired `render()`
+could not hold.
+
+**The frame went from two passes to five**: sky, opaque, composite, blended,
+overlay. Only one of those is water; the other two are the price of it.
+
+#### The render graph, and the honest size of it
+
+`renderer/graph.rs` declares resources with a format and passes with what they
+read and write, then resolves the order, allocates the textures and re-allocates
+them on resize. It is **`pub(crate)` and its pass list is a closed enum**, because
+the trigger this file records for a *public* graph is "a second consumer wanting
+its own pass" and there still isn't one. What pulled this in was the engine's own
+fourth pass, so the engine is the only thing that can add to it.
+
+Two things justified building it rather than adding a third `begin_render_pass`
+by hand, and both are about mistakes rather than elegance:
+
+- **A texture cannot be an attachment and a sampled input at once.** This is the
+  obvious mistake when the water wants "the scene behind me" and the scene is
+  right there, and the graph rejects it at startup. It is also *why* the composite
+  pass exists at all: the opaque scene has to be copied to the swapchain before
+  the water can draw over it while reading it.
+- **Three attachments now have to track the surface size.** `ARCHITECTURE.md`
+  already carried the one-attachment version of this as a gotcha learned the hard
+  way; the graph makes it one call instead of three places to forget.
+
+**The graph caught its own author inside an hour.** The first ordering rule said a
+pass that `Keep`s a target depends on everything else that writes it — which, with
+composite, blended and overlay all accumulating onto the swapchain, makes them
+mutually dependent, and the cycle check refused to schedule the frame. The fix is
+the distinction the rule was missing: a `reads` edge is a **data** dependency and
+must order against every writer, while `Keep` is an **accumulation** order and can
+only mean "whoever wrote this before me". A startup panic naming two passes is a
+better outcome than a frame that composites in the wrong order and looks nearly
+right.
+
+#### What shipped in the shader
+
+- **A sky.** One analytic gradient plus a sun, in `common.wgsl`, which is
+  textually prepended to both shader modules because WGSL has no `#include` and
+  the function has two callers that must agree exactly: the sky pass draws it, the
+  water reflects it. Two copies that drifted would present as "the water colour is
+  slightly off", which is a miserable thing to trace.
+- **Refraction**, which displaces what is seen through the surface and tints it by
+  Beer-Lambert absorption over the thickness the depth buffer implies.
+- **Screen-space reflection**, marching the depth buffer and falling back to the
+  sky when a ray misses or leaves the frame.
+- **A second fragment entry point.** `fs_water` samples the scene; `fs_main` does
+  not and cannot — the opaque pipeline *writes* that texture, and a shader that
+  statically references a binding forces it into the layout. The split is what
+  makes the conflict not exist, and it is forced rather than chosen.
+
+#### Three things measured, and two of them were my own bugs
+
+1. **Refraction made the water invisible, and the arithmetic said why before the
+   screen did.** Beer-Lambert alone over lakes measured at ~0.004 world units deep
+   returns about 2% water and 98% "exactly the scene behind" — a surface that
+   composites to the pixel already there. This is *the same trap Slice 14 fell into
+   and wrote up*: a fixed ramp against a quantity that is itself a moving target.
+   The fix is to take whichever is larger of the absorption and the authored
+   wetness alpha, so a deep basin is carried by its depth and a shallow lake by its
+   coverage.
+2. **The sky came out as grey fog, because those constants are linear.** The
+   surface is `Bgra8UnormSrgb`, so the GPU encodes whatever the shader returns and
+   a horizon picked by eye at 0.55 displays at 0.77. Every value in `common.wgsl`
+   is now chosen in linear space and the file says so, because this will be got
+   wrong again otherwise.
+3. **SSR's first version was binary speckle, and it took cranking the term to see
+   it.** At water's real 2% reflectance nothing about the reflection is visible at
+   all — so it was isolated by temporarily raising `f0` to 0.65, which is what made
+   the artifacts legible. Three causes, all real: the march used **fixed world
+   steps** in a scene whose features are 0.004 units across, the crossing was taken
+   at whole-step resolution (which draws banding that grows with the geometric step
+   schedule), and the fully rippled normal sent neighbouring pixels to unrelated
+   parts of the scene where each independently hit or missed. Steps are now a
+   fraction of the *viewing distance* (scale-free, since the engine cannot know how
+   big a consumer's world is), the crossing is bisected six times, and the trace
+   uses a calmer normal than the one that shades the surface.
+
+#### The result, stated at its real strength
+
+*Proof:* `cargo run --example terrain` draws lakes and a dendritic river network
+under a graduated sky, with soft shorelines, per-pixel ripples, depth-tinted water
+and a traced reflection — at **75 fps** on a 128² grid, unchanged from Slice 15
+despite two extra fullscreen passes. Wireframe still draws everything as opaque
+lines. 105 tests, clippy clean, native and wasm both build.
+
+**And the reflection is nearly invisible, which is the honest headline.** Water is
+2% reflective face-on, the demo's camera looks down at it, and 2% of anything is
+not a picture. The trace is correct, the sky fallback is correct, and at this
+camera angle you cannot see either doing much — the artifacts and the payoff both
+only appear when you make the material physically wrong. What genuinely improved
+the water is **refraction and depth absorption**, which read at every angle. That
+asymmetry was predicted before the slice started and is worth having proved rather
+than assumed.
+
+*What it cost elsewhere:* **every demo now has a sky** instead of a flat clear
+colour. Slice 14 was careful to leave other demos pixel-identical and this one is
+not — `scene.rs` and the rest gained a horizon. It looks better and it is a change
+that was not forced by the roadblock, so it is flagged here rather than buried: a
+`Renderer` knob to turn it off is about ten lines if the uniformity is worth more
+than the sky.
+
+*What is still missing.* Refraction reads the opaque scene *behind* the surface,
+so it cannot show anything the opaque pass did not draw — no caustics, and nothing
+refracted through two water surfaces. The reflection cannot show what is off
+screen. Both are the defining limits of screen-space techniques rather than gaps
+in this implementation, and escaping them means cube maps or a real reflection
+pass, neither of which has a demo asking.
+
 ### What stays in the consumer
 
 Recorded because this boundary will be asked about again, and it is the same
@@ -1147,10 +1266,10 @@ only: the overlay pass, the glyph atlas, and the input plumbing beneath the
 ## Beyond (seams, not commitments)
 
 Listed only so we recognize them when a future demo demands them — **not** to be
-built ahead of need: MSAA, and a render graph once there's more than one pass.
-(Transforms, a lighting model, and a minimal material moved out of this list and
-into Slices 8–12 above, because `scene.rs` demands them.) Each of the rest waits
-for a consumer to ask:
+built ahead of need: MSAA. (Transforms, a lighting model, and a minimal material
+moved out of this list and into Slices 8–12 above, because `scene.rs` demands
+them; the render graph and "water that looks wet" left it in Slice 16, because
+terrain did.) Each of the rest waits for a consumer to ask:
 
 - **Consumer-supplied textures.** The overlay already samples a glyph atlas, so
   the shader work is adjacent, but no public API exists to upload an image and
@@ -1168,21 +1287,22 @@ for a consumer to ask:
   author a rig with no importer. Slices 8–12 deliberately stop at rigid objects a
   consumer poses itself each frame; that is animation *by the consumer*, and it is
   as far as we go until a demo proves it insufficient.
-- **Water that looks wet** — animated wave normals, refraction, a Fresnel edge,
-  reflections. Named here so the ceiling is explicit: Slice 7 shipped a *flat blue
-  surface*, Slice 10 made it see-through, and everything past that needs shading
-  the engine does not do. Waves and Fresnel want a normal that varies over time —
-  Slice 9 put per-fragment lighting in the shader, so what is still missing is a
-  time uniform and somewhere to perturb the normal; a reflection wants to render the
-  scene twice into an offscreen target, which is the next entry. CPU-animating the
-  water mesh is possible from the demo today with zero engine help — worth knowing
-  as an escape hatch, but it pays a full mesh upload per frame to fake what a
-  shader would do for free, so it should stay an experiment rather than a slice.
+- ~~**Water that looks wet**~~ and ~~**a render graph**~~ — **both landed**, over
+  Slices 14–16, and the sequence is worth keeping because this entry predicted it
+  almost exactly. It said waves and Fresnel wanted "a time uniform and somewhere to
+  perturb the normal" (Slices 14–15) and that a reflection wanted "an offscreen
+  target, which is the next entry" (Slice 16). It also warned that CPU-animating
+  the water mesh "should stay an experiment rather than a slice" — Slice 14 did it
+  anyway and paid 10 ms a frame, which Slice 15 then reclaimed. The entry was right
+  and was read too late.
 - **An offscreen render target composited into a UI rect**, so the 3D scene is one
   panel among many rather than a fullscreen background with UI floating on top.
-  This is the concrete thing that would turn the two hand-wired passes into a real
-  render graph; it is named in [UI `WISHLIST.md`](slmsttaa-ui/WISHLIST.md) as
-  engine-side work.
+  **Half of this now exists**: Slice 16 renders the scene to an offscreen texture
+  and composites it with a fullscreen triangle, so what remains is letting that
+  composite target an arbitrary rect and letting the UI place it. That is a much
+  smaller ask than it was, and it is still unscheduled — it is named in
+  [UI `WISHLIST.md`](slmsttaa-ui/WISHLIST.md) as engine-side work with a real
+  consumer (The Matchmaker) but no demo blocked on it here.
 
 Painter capabilities the UI crate demands of the overlay are engine seams too —
 but they're sequenced in the [UI roadmap](slmsttaa-ui/ROADMAP.md), since that's

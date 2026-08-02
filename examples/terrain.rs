@@ -247,10 +247,30 @@ const WATER_SHININESS: f32 = 90.0;
 /// Schlick reflectance of water at normal incidence. The real physical value —
 /// water really is only 2% reflective face-on, and almost a mirror edge-on.
 const WATER_FRESNEL_F0: f32 = 0.02;
-/// What a Fresnel edge tends toward, standing in for a sky the engine cannot
-/// reflect. Matched to the horizon so distant water reads as reflecting *this*
-/// scene rather than an unrelated blue.
-const WATER_SKY: [f32; 3] = [0.42, 0.56, 0.72];
+/// Tint applied to what the surface reflects.
+///
+/// This used to be the *whole* reflection — a flat stand-in colour, because the
+/// engine could not reflect anything. Slice 16 gave it a real sky and a
+/// screen-space trace, so the field became a multiplier and this became nearly
+/// white: the reflection is now an image, and tinting it hard would only throw
+/// away the thing that was just built.
+const WATER_REFLECTION_TINT: [f32; 3] = [0.96, 0.98, 1.0];
+/// How far the surface displaces what is seen through it. Small: past about
+/// `0.05` the distortion stops reading as water and starts reading as a broken
+/// image, because a screen-space offset has no idea what it is dragging.
+const WATER_REFRACTION: f32 = 0.018;
+/// Beer-Lambert absorption per world unit of water crossed.
+///
+/// **Sized against the measurement, not the eye.** The lake-depth probe from
+/// Slice 14 says the median lake shallows sixteen-fold between pass 0 and pass
+/// 60, so a coefficient tuned to look right on a deep basin makes a mature lake
+/// invisible. This is set so the *shallow* end still takes on colour, which
+/// leaves the deep end saturating — the safe direction to be wrong in.
+const WATER_ABSORPTION: f32 = 5.5;
+/// How much of the reflection is traced from the scene rather than taken from
+/// the sky. Full strength: where the trace finds a bank, that is what a mirror
+/// would show, and where it does not it has already faded back to sky on its own.
+const WATER_REFLECTION: f32 = 1.0;
 /// The last pass on the time axis — where the scrub slider tops out, and where
 /// the simulation stops advancing.
 ///
@@ -642,21 +662,34 @@ impl TerrainDemo {
             // and the engine sorts the blended run after the opaque terrain and
             // draws it without writing depth.
             // What makes it read as water rather than as blue plastic, and none
-            // of it is water-specific engine code: a tight sun glint off the
-            // ripples, and a Fresnel edge that turns the surface toward the sky
-            // colour and closes it up as the view flattens. `blended()` is the
-            // one that is easy to miss — the per-vertex shore fade is invisible
-            // to the pipeline choice, so without it dragging opacity to 1.0 would
-            // drop the whole surface into the opaque pass and the soft shoreline
-            // would snap back to a hard line.
+            // of it is water-specific engine code — every line is a `Material`
+            // any instance can set:
+            //
+            //   - a tight sun glint off the ripples,
+            //   - a Fresnel edge that turns the surface toward what it reflects
+            //     and closes it up as the view flattens,
+            //   - refraction, which displaces the lake bed seen through the
+            //     surface and lets thickness decide how much of the water's own
+            //     colour the light picked up on the way — the term that reads at
+            //     *every* camera angle, where the reflection is only ~3% at this
+            //     one,
+            //   - and a traced reflection, which is what puts the far bank in
+            //     the lake below it instead of a flat blue.
+            //
+            // `with_refraction` implies `blended()`, which is the one that used
+            // to be easy to miss: the per-vertex shore fade is invisible to the
+            // pipeline choice, so without it dragging opacity to 1.0 would drop
+            // the whole surface into the opaque pass and the soft shoreline would
+            // snap back to a hard line.
             instances.push(
                 Instance::at(water_handle).with_material(
                     Material::OPAQUE
                         .with_alpha(self.water_alpha)
                         .with_specular(self.water_specular, WATER_SHININESS)
-                        .with_fresnel(WATER_FRESNEL_F0, WATER_SKY)
+                        .with_fresnel(WATER_FRESNEL_F0, WATER_REFLECTION_TINT)
                         .with_ripples(self.ripple_strength, self.ripple_scale)
-                        .blended(),
+                        .with_refraction(WATER_REFRACTION, WATER_ABSORPTION)
+                        .with_reflection(WATER_REFLECTION),
                 ),
             );
         }

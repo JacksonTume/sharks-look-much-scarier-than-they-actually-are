@@ -36,11 +36,12 @@ by good intentions. It is re-exported as `slmsttaa::ui`, so consumers still see
 one dependency, and it plans its own work in
 [`slmsttaa-ui/ROADMAP.md`](slmsttaa-ui/ROADMAP.md).
 
-Materials, transforms with an instanced draw-list, and a lighting model with
-view-dependent terms have since been pulled in by demos that demanded them. Still
-to grow into: a render graph with an offscreen target — which is what real water
-reflection and refraction need — and consumer-supplied textures. Each waits for a
-demo that is actually blocked on it.
+Materials, transforms with an instanced draw-list, a lighting model with
+view-dependent terms, and a small frame graph with an offscreen target (which is
+what refraction and screen-space reflection need) have all since been pulled in by
+demos that demanded them. Still to grow into: consumer-supplied textures, MSAA,
+and letting the scene composite into a UI rect rather than the whole window. Each
+waits for a demo that is actually blocked on it.
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for how the pieces fit together and the
 cross-platform gotchas that shaped them, and [`ROADMAP.md`](ROADMAP.md) for where
@@ -63,12 +64,14 @@ it's going and why.
 | `src/lib.rs`             | Crate root, logging setup, the `run(app)` entry point.   |
 | `src/application.rs`     | The `Application` trait a consumer implements (IoC seam).|
 | `src/app.rs`             | winit `ApplicationHandler`: window + event loop.         |
-| `src/renderer/mod.rs`    | wgpu device/surface/pipeline; per-frame render.          |
+| `src/renderer/mod.rs`    | wgpu device/surface/pipelines; per-frame render.          |
+| `src/renderer/graph.rs`  | The frame as declared passes + the textures between them.|
 | `src/renderer/mesh.rs`   | `Mesh` (vertices + indices) the consumer hands over.     |
 | `src/renderer/vertex.rs` | Vertex format (position + normal + RGBA color) + buffer layout. |
 | `src/renderer/primitives.rs` | `Mesh::plane`/`cuboid`/`sphere`/`capsule` builders.  |
 | `src/renderer/instance.rs` | `Transform`, `Material`, `Instance` + the instance buffer. |
-| `src/renderer/shader.wgsl` | WGSL shaders: diffuse + specular + Fresnel + ripples.  |
+| `src/renderer/shader.wgsl` | WGSL shaders: diffuse + specular + Fresnel + ripples + refraction + SSR. |
+| `src/renderer/common.wgsl` | Shared WGSL prelude: camera uniform, sun, sky.        |
 | `src/camera.rs`          | Perspective camera + GPU uniform (view-proj, eye, clock).|
 | `src/renderer/overlay.rs` | Screen-space 2D pass + glyph atlas (`Painter` impl).   |
 | `src/time.rs`            | Frame clock (`Renderer::dt`) + fixed-step `Timeline`.    |

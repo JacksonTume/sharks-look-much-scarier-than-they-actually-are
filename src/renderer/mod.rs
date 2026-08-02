@@ -1,10 +1,15 @@
 //! The wgpu rendering backend.
 //!
-//! [`Renderer`] owns the GPU surface, device/queue, and the render pipeline. It
-//! is deliberately small: enough to clear the screen and draw a
-//! camera-transformed mesh supplied by the consumer, with clear seams where a
-//! real engine would grow (material system, mesh registry, render graph, etc.).
+//! [`Renderer`] owns the GPU surface, device/queue, and the render pipelines. It
+//! is deliberately small: enough to draw a camera-transformed mesh supplied by
+//! the consumer, with clear seams where a real engine would grow (a material
+//! system, textures, an asset pipeline).
+//!
+//! A frame is five passes — sky, opaque, composite, blended, overlay — declared
+//! in [`graph`] rather than hand-sequenced here, because Slice 16 made pass
+//! ordering a correctness property: the water samples what the opaque pass drew.
 
+mod graph;
 mod instance;
 mod mesh;
 mod overlay;
@@ -25,6 +30,7 @@ use winit::window::Window;
 use crate::camera::{Camera, CameraUniform};
 use crate::input::{Input, MouseButton};
 use crate::time::{Clock, Timeline};
+use graph::{Load, Pass, PassKind, RenderGraph, ResourceFormat, ResourceId, SWAPCHAIN};
 use overlay::Overlay;
 use slmsttaa_ui::{Ui, UiInput, UiState};
 
@@ -179,30 +185,128 @@ fn create_instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffe
     })
 }
 
-/// Create a depth texture sized to the surface and return its default view.
+/// The bind group layout for reading the opaque scene: colour, a sampler, and
+/// depth.
 ///
-/// Must be called whenever the surface is (re)configured: the depth attachment
-/// has to match the color target's dimensions exactly or the render pass fails.
-fn create_depth_view(
+/// Only the blended pipeline and the composite pass use it. Depth is bound as a
+/// depth texture (not a float one) because that is what WebGPU permits for a
+/// depth format, and it is read with `textureLoad` rather than through the
+/// sampler — filtering depth averages a near surface with a far one and produces
+/// a distance where no geometry is.
+fn create_scene_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("scene texture bind group layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+/// Bind the graph's current scene colour and depth views.
+///
+/// Rebuilt on every resize, because the views it holds are replaced when the
+/// graph re-allocates its textures. Forgetting that is a use-after-resize that
+/// wgpu catches, but only once the pass actually runs.
+fn create_scene_bind_group(
     device: &wgpu::Device,
-    config: &wgpu::SurfaceConfiguration,
-) -> wgpu::TextureView {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("depth texture"),
-        size: wgpu::Extent3d {
-            width: config.width,
-            height: config.height,
-            depth_or_array_layers: 1,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    color: &wgpu::TextureView,
+    depth: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("scene texture bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(color),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(depth),
+            },
+        ],
+    })
+}
+
+/// Create a fullscreen-triangle pipeline (the sky and the composite).
+///
+/// No vertex buffers and no depth: both entry points generate their own geometry
+/// from `@builtin(vertex_index)` and cover the target completely, so there is
+/// nothing to test against.
+fn create_fullscreen_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+    entry_point: &str,
+    label: &str,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_fullscreen"),
+            buffers: &[],
+            compilation_options: Default::default(),
         },
-        mip_level_count: 1,
-        // Must match the pipeline's 1-sample `MultisampleState`.
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: DEPTH_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        view_formats: &[],
-    });
-    texture.create_view(&wgpu::TextureViewDescriptor::default())
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some(entry_point),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            // The fullscreen triangle's winding depends on the target's Y
+            // convention and is not worth reasoning about; nothing is behind it.
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 /// Create a scene render pipeline for the given primitive `topology`.
@@ -216,7 +320,10 @@ fn create_depth_view(
 ///
 /// `transparent` turning off depth writes is the load-bearing half: a blended
 /// surface that wrote depth would hide the geometry behind it, which is the one
-/// thing a see-through surface must not do.
+/// thing a see-through surface must not do. It also selects the `fs_water`
+/// fragment entry point and, with it, a layout carrying the scene textures —
+/// see the two-entry-point note in `shader.wgsl` for why that split is forced
+/// rather than chosen.
 fn create_scene_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
@@ -239,7 +346,7 @@ fn create_scene_pipeline(
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("fs_main"),
+            entry_point: Some(if transparent { "fs_water" } else { "fs_main" }),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
                 blend: Some(if transparent {
@@ -289,11 +396,17 @@ pub struct Renderer {
 
     pipeline: wgpu::RenderPipeline,
     /// Alpha-blended variant of [`Renderer::pipeline`], with depth writes off.
-    /// Selected for draw-list runs whose material alpha is below `1.0`.
+    /// Selected for draw-list runs whose material alpha is below `1.0`. Unlike
+    /// the other two it samples the opaque scene, so it carries a second bind
+    /// group and a different fragment entry point.
     blend_pipeline: wgpu::RenderPipeline,
     /// Wireframe variant of [`Renderer::pipeline`] (line topology, no culling),
     /// selected when the render mode is [`RenderMode::Wireframe`].
     line_pipeline: wgpu::RenderPipeline,
+    /// Fullscreen analytic sky, drawn behind the scene.
+    sky_pipeline: wgpu::RenderPipeline,
+    /// Fullscreen copy of the offscreen scene colour onto the swapchain.
+    composite_pipeline: wgpu::RenderPipeline,
     /// Whether meshes draw filled or as edges. Defaults to [`RenderMode::Solid`].
     render_mode: RenderMode,
     /// Every mesh uploaded via [`Renderer::upload_mesh`], indexed by
@@ -308,8 +421,21 @@ pub struct Renderer {
     /// Empty until [`Renderer::set_instances`]; the engine just clears the screen
     /// until then.
     draws: Vec<InstanceDraw>,
-    /// Depth attachment for occlusion testing; resized with the surface.
-    depth_view: wgpu::TextureView,
+
+    /// The frame's passes and the textures between them. Owns the depth
+    /// attachment and the offscreen scene colour, and re-allocates both on
+    /// resize.
+    graph: RenderGraph,
+    /// The offscreen colour the opaque half of the scene is drawn into, and
+    /// which the water samples to refract and reflect.
+    scene_color: ResourceId,
+    /// Depth, written by the opaque pass and read two ways by the blended one:
+    /// tested as a read-only attachment, and sampled for the reflection trace.
+    scene_depth: ResourceId,
+    scene_layout: wgpu::BindGroupLayout,
+    scene_sampler: wgpu::Sampler,
+    /// Binds the two above. Rebuilt on resize, when their views are replaced.
+    scene_bind_group: wgpu::BindGroup,
 
     camera: Camera,
     camera_uniform: CameraUniform,
@@ -470,19 +596,49 @@ impl Renderer {
             }],
         });
 
-        // --- Pipeline ------------------------------------------------------
-        let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
+        // --- Shaders -------------------------------------------------------
+        //
+        // `common.wgsl` is textually prepended to both modules rather than
+        // duplicated in each. WGSL has no `#include`, and the sky function has
+        // two callers that must agree exactly — the sky pass draws it, and the
+        // water reflects it. Two copies of a gradient that drift apart is a bug
+        // that presents as "the water colour is slightly off".
+        let common = include_str!("common.wgsl");
+        let scene_src = format!("{common}\n{}", include_str!("shader.wgsl"));
+        let fullscreen_src = format!("{common}\n{}", include_str!("fullscreen.wgsl"));
 
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("scene shader"),
+            source: wgpu::ShaderSource::Wgsl(scene_src.into()),
+        });
+        let fullscreen_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("fullscreen shader"),
+            source: wgpu::ShaderSource::Wgsl(fullscreen_src.into()),
+        });
+
+        // --- Pipelines -----------------------------------------------------
+        let scene_layout = create_scene_layout(&device);
+
+        // Two layouts, and the difference is the whole reason the frame has an
+        // offscreen pass. A pipeline that *writes* the scene colour cannot also
+        // declare it as a sampled input, so the opaque and wireframe pipelines
+        // get a camera-only layout and the blended one gets both groups.
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("slmsttaa pipeline layout"),
             bind_group_layouts: &[Some(&camera_bind_group_layout)],
             immediate_size: 0,
         });
+        let scene_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("slmsttaa scene-sampling pipeline layout"),
+                bind_group_layouts: &[Some(&camera_bind_group_layout), Some(&scene_layout)],
+                immediate_size: 0,
+            });
 
-        // Three pipelines sharing one shader/layout: solid (culled triangles),
-        // blended (the same, over what's behind it, without writing depth), and
-        // wireframe (lines, no culling). Render mode picks the wireframe one; the
-        // material's alpha picks between the other two, per draw-list run.
+        // Three scene pipelines: solid (culled triangles), blended (the same,
+        // over what's behind it, without writing depth, and able to read it),
+        // and wireframe (lines, no culling). Render mode picks the wireframe
+        // one; the material picks between the other two, per draw-list run.
         let pipeline = create_scene_pipeline(
             &device,
             &pipeline_layout,
@@ -494,7 +650,7 @@ impl Renderer {
         );
         let blend_pipeline = create_scene_pipeline(
             &device,
-            &pipeline_layout,
+            &scene_pipeline_layout,
             &shader,
             config.format,
             wgpu::PrimitiveTopology::TriangleList,
@@ -510,8 +666,78 @@ impl Renderer {
             None,
             false,
         );
+        // The sky writes the scene colour, so like the opaque pipeline it must
+        // not be able to sample it: camera-only layout.
+        let sky_pipeline = create_fullscreen_pipeline(
+            &device,
+            &pipeline_layout,
+            &fullscreen_shader,
+            config.format,
+            "fs_sky",
+            "sky pipeline",
+        );
+        let composite_pipeline = create_fullscreen_pipeline(
+            &device,
+            &scene_pipeline_layout,
+            &fullscreen_shader,
+            config.format,
+            "fs_composite",
+            "composite pipeline",
+        );
 
-        let depth_view = create_depth_view(&device, &config);
+        // --- The frame -----------------------------------------------------
+        //
+        // Declared, not sequenced: `build` resolves the order from what each
+        // pass reads and writes. Written in reading order anyway, because a
+        // frame that reads top-to-bottom is easier to follow — the point is
+        // that the order is no longer load-bearing.
+        let mut graph = RenderGraph::new(config.format);
+        let scene_color = graph.resource("scene color", ResourceFormat::Color);
+        let scene_depth = graph.resource("scene depth", ResourceFormat::Depth);
+
+        graph.pass(
+            Pass::new("sky", PassKind::Sky).writes(scene_color, Load::Clear(wgpu::Color::BLACK)),
+        );
+        graph.pass(
+            Pass::new("opaque", PassKind::Opaque)
+                .writes(scene_color, Load::Keep)
+                .depth(scene_depth, Load::ClearDepth, true),
+        );
+        graph.pass(
+            Pass::new("composite", PassKind::Composite)
+                .reads(&[scene_color])
+                .writes(SWAPCHAIN, Load::Clear(wgpu::Color::BLACK)),
+        );
+        graph.pass(
+            Pass::new("blended", PassKind::Blended)
+                // Reads the depth it is also testing against — legal precisely
+                // because it does not write it, which is what `false` declares.
+                .reads(&[scene_color, scene_depth])
+                .writes(SWAPCHAIN, Load::Keep)
+                .depth(scene_depth, Load::Keep, false),
+        );
+        graph.pass(Pass::new("overlay", PassKind::Overlay).writes(SWAPCHAIN, Load::Keep));
+
+        graph.build(&device, config.width, config.height);
+
+        let scene_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("scene sampler"),
+            // Clamped: a refraction offset that runs off the edge should smear
+            // the edge pixel, not wrap the far side of the screen into a lake.
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let scene_bind_group = create_scene_bind_group(
+            &device,
+            &scene_layout,
+            &scene_sampler,
+            graph.view(scene_color),
+            graph.view(scene_depth),
+        );
 
         let instance_buffer = create_instance_buffer(&device, INITIAL_INSTANCE_CAPACITY);
 
@@ -526,13 +752,20 @@ impl Renderer {
             pipeline,
             blend_pipeline,
             line_pipeline,
+            sky_pipeline,
+            composite_pipeline,
             render_mode: RenderMode::default(),
             // No geometry yet — the consumer supplies it in `Application::init`.
             meshes: Vec::new(),
             instance_buffer,
             instance_capacity: INITIAL_INSTANCE_CAPACITY,
             draws: Vec::new(),
-            depth_view,
+            graph,
+            scene_color,
+            scene_depth,
+            scene_layout,
+            scene_sampler,
+            scene_bind_group,
             camera,
             camera_uniform,
             camera_buffer,
@@ -569,8 +802,20 @@ impl Renderer {
         self.config.width = new_size.width;
         self.config.height = new_size.height;
         self.surface.configure(&self.device, &self.config);
-        // The depth buffer must track the surface size or the render pass fails.
-        self.depth_view = create_depth_view(&self.device, &self.config);
+        // Every attachment must track the surface size or the render pass fails.
+        // The graph owns all of them, so this is one call rather than one per
+        // texture — which is half of why it exists, since Slice 16 took the
+        // count from one to three.
+        self.graph
+            .resize(&self.device, new_size.width, new_size.height);
+        // The bind group holds *views*, which the re-allocation above replaced.
+        self.scene_bind_group = create_scene_bind_group(
+            &self.device,
+            &self.scene_layout,
+            &self.scene_sampler,
+            self.graph.view(self.scene_color),
+            self.graph.view(self.scene_depth),
+        );
         self.camera.set_aspect(new_size.width, new_size.height);
         // The overlay maps pixels to NDC using the surface size; keep it synced.
         self.overlay
@@ -852,88 +1097,134 @@ impl Renderer {
                 label: Some("frame encoder"),
             });
 
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("main pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+        // The graph resolved the order; this just records what it hands back.
+        // Adding a pass means declaring what it touches over in `new`, not
+        // finding the right place to slot it into this loop.
+        for target in self.graph.record(&view) {
+            // The overlay records its own pass (it owns its pipeline and
+            // buffers), so it is dispatched before a pass is opened here.
+            if target.kind == PassKind::Overlay {
+                self.overlay
+                    .flush(&self.device, &self.queue, &mut encoder, &view);
+                continue;
+            }
+
+            let color = target
+                .color
+                .map(|(view, load)| wgpu::RenderPassColorAttachment {
+                    view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.02,
-                            g: 0.05,
-                            b: 0.08,
-                            a: 1.0,
-                        }),
+                        load: match load {
+                            Load::Clear(c) => wgpu::LoadOp::Clear(c),
+                            _ => wgpu::LoadOp::Load,
+                        },
                         store: wgpu::StoreOp::Store,
                     },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        // Clear to the far plane each frame before drawing.
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
+                });
+            let depth =
+                target.depth.map(
+                    |(view, load, write)| wgpu::RenderPassDepthStencilAttachment {
+                        view,
+                        // `None` is how wgpu spells a *read-only* depth attachment,
+                        // and it is what makes the blended pass legal: a pass may
+                        // sample the same depth texture it is testing against only
+                        // if it cannot write to it.
+                        depth_ops: write.then_some(wgpu::Operations {
+                            load: match load {
+                                Load::ClearDepth => wgpu::LoadOp::Clear(1.0),
+                                _ => wgpu::LoadOp::Load,
+                            },
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    },
+                );
+
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some(target.label),
+                color_attachments: &[color],
+                depth_stencil_attachment: depth,
                 occlusion_query_set: None,
                 timestamp_writes: None,
                 multiview_mask: None,
             });
 
-            // Draw the consumer's draw-list, one instanced call per mesh in it;
-            // if it's empty the pass above still clears the screen.
-            if !self.draws.is_empty() {
-                let wireframe = self.render_mode == RenderMode::Wireframe;
-                pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                // Which pipeline was bound last, so a run only rebinds when it
-                // has to. `None` until the first run binds one.
-                let mut bound: Option<bool> = None;
-                for draw in &self.draws {
-                    let mesh = &self.meshes[draw.mesh];
-                    let (buffer, count) = if wireframe {
-                        (&mesh.line_index_buffer, mesh.line_index_count)
-                    } else {
-                        (&mesh.index_buffer, mesh.index_count)
-                    };
-                    // An empty mesh is a legal thing to hold a handle to; it just
-                    // has nothing to draw.
-                    if count == 0 {
-                        continue;
-                    }
-                    // Wireframe draws every run as opaque lines: an edge list has
-                    // no interior to see through, so blending it would only make
-                    // the inspection view harder to read.
-                    let blended = draw.transparent && !wireframe;
-                    if bound != Some(blended) {
-                        pass.set_pipeline(match (wireframe, blended) {
-                            (true, _) => &self.line_pipeline,
-                            (false, true) => &self.blend_pipeline,
-                            (false, false) => &self.pipeline,
-                        });
-                        bound = Some(blended);
-                    }
-                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                    // The run's offset rides on the *buffer binding*, and the draw
-                    // always starts at instance 0 — WebGL2 has no non-zero
-                    // `first_instance`, so the obvious `draw_indexed(.., first..last)`
-                    // would work on native and fail in the browser fallback.
-                    pass.set_vertex_buffer(1, self.instance_buffer.slice(draw.byte_offset..));
-                    pass.set_index_buffer(buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..count, 0, 0..draw.count);
+            match target.kind {
+                PassKind::Sky => {
+                    pass.set_pipeline(&self.sky_pipeline);
+                    pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                    // Three vertices, no buffers: the shader builds the triangle.
+                    pass.draw(0..3, 0..1);
                 }
+                PassKind::Composite => {
+                    pass.set_pipeline(&self.composite_pipeline);
+                    pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                    pass.set_bind_group(1, &self.scene_bind_group, &[]);
+                    pass.draw(0..3, 0..1);
+                }
+                PassKind::Opaque | PassKind::Blended => {
+                    self.record_draws(&mut pass, target.kind);
+                }
+                PassKind::Overlay => unreachable!("handled above"),
             }
         }
 
-        // Second pass: composite the 2D overlay (UI/HUD) over the 3D scene. This
-        // records its own render pass that loads (rather than clears) the color
-        // target. It no-ops if the consumer drew no UI this frame.
-        self.overlay
-            .flush(&self.device, &self.queue, &mut encoder, &view);
-
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
+    }
+
+    /// Record the half of the draw-list that belongs to `kind`.
+    ///
+    /// Opaque and blended runs are already contiguous — `set_instances` sorts
+    /// every opaque run ahead of every transparent one — so this is a filter over
+    /// a sorted list rather than two lists.
+    fn record_draws(&self, pass: &mut wgpu::RenderPass<'_>, kind: PassKind) {
+        let wireframe = self.render_mode == RenderMode::Wireframe;
+        // Wireframe draws *everything* as opaque lines in the opaque pass: an
+        // edge list has no interior to see through, so blending it would only
+        // make the inspection view harder to read, and refracting it would be
+        // meaningless. The blended pass therefore has nothing to do.
+        if wireframe && kind == PassKind::Blended {
+            return;
+        }
+
+        pass.set_bind_group(0, &self.camera_bind_group, &[]);
+        if kind == PassKind::Blended {
+            pass.set_bind_group(1, &self.scene_bind_group, &[]);
+            pass.set_pipeline(&self.blend_pipeline);
+        } else if wireframe {
+            pass.set_pipeline(&self.line_pipeline);
+        } else {
+            pass.set_pipeline(&self.pipeline);
+        }
+
+        for draw in &self.draws {
+            // In wireframe every run goes in the opaque pass; otherwise a run is
+            // in exactly one of the two.
+            if !wireframe && draw.transparent != (kind == PassKind::Blended) {
+                continue;
+            }
+            let mesh = &self.meshes[draw.mesh];
+            let (buffer, count) = if wireframe {
+                (&mesh.line_index_buffer, mesh.line_index_count)
+            } else {
+                (&mesh.index_buffer, mesh.index_count)
+            };
+            // An empty mesh is a legal thing to hold a handle to; it just has
+            // nothing to draw.
+            if count == 0 {
+                continue;
+            }
+            pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+            // The run's offset rides on the *buffer binding*, and the draw always
+            // starts at instance 0 — WebGL2 has no non-zero `first_instance`, so
+            // the obvious `draw_indexed(.., first..last)` would work on native and
+            // fail in the browser fallback.
+            pass.set_vertex_buffer(1, self.instance_buffer.slice(draw.byte_offset..));
+            pass.set_index_buffer(buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..count, 0, 0..draw.count);
+        }
     }
 }

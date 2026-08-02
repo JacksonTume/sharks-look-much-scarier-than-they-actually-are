@@ -84,6 +84,15 @@ impl Camera {
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CameraUniform {
     view_proj: [[f32; 4]; 4],
+    /// The inverse of [`view_proj`](Self::view_proj), for going the other way:
+    /// from a point on the screen back out to a direction in the world.
+    ///
+    /// The sky pass is what needs it. A fullscreen triangle has no geometry and
+    /// therefore no world position to shade from — the only thing a sky fragment
+    /// knows is where it is on the screen, so it unprojects that to a ray and
+    /// asks which way it is looking. Inverting a 4x4 once per frame on the CPU is
+    /// free; doing it per fragment would not be.
+    inv_view_proj: [[f32; 4]; 4],
     /// World-space eye position, padded to `vec4` for std140 alignment (`w` is
     /// unused).
     ///
@@ -109,8 +118,10 @@ pub struct CameraUniform {
 impl CameraUniform {
     /// Build the uniform payload from a camera and the frame clock.
     pub fn new(camera: &Camera, time: f32) -> Self {
+        let view_proj = camera.view_projection();
         Self {
-            view_proj: camera.view_projection().to_cols_array_2d(),
+            view_proj: view_proj.to_cols_array_2d(),
+            inv_view_proj: view_proj.inverse().to_cols_array_2d(),
             eye: [camera.eye.x, camera.eye.y, camera.eye.z, 0.0],
             frame: [time, 0.0, 0.0, 0.0],
         }
@@ -121,6 +132,7 @@ impl Default for CameraUniform {
     fn default() -> Self {
         Self {
             view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+            inv_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
             eye: [0.0; 4],
             frame: [0.0; 4],
         }

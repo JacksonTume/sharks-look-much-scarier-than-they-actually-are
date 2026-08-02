@@ -46,10 +46,15 @@ src/
 │                     touches no platform API, so it needed no #[cfg] and is
 │                     unit-tested without a GPU.
 └── renderer/
+    ├── graph.rs      RenderGraph: the frame as declared passes and the textures
+    │                 between them. Resolves pass order from what each one reads
+    │                 and writes, allocates the offscreen targets, and re-creates
+    │                 them on resize. pub(crate) with a closed PassKind — the
+    │                 engine's own fourth pass pulled it in, not a consumer.
     ├── mod.rs        Renderer: wgpu instance/adapter/device/queue/surface, the
-    │                 solid + blended + wireframe render pipelines (RenderMode
-    │                 and per-instance alpha select between them), the depth
-    │                 buffer, the mesh registry + instance draw-list, the overlay,
+    │                 solid + blended + wireframe + sky + composite pipelines
+    │                 (RenderMode and per-instance alpha select between the first
+    │                 three), the mesh registry + instance draw-list, the overlay,
     │                 the UI state + both clocks, and per-frame
     │                 begin_frame()/update()/render().
     │                 Renderer::ui() also translates Input + the surface size ->
@@ -73,10 +78,19 @@ src/
     ├── vertex.rs     Vertex (position + normal + RGBA color) and its buffer
     │                 layout. The alpha is the *shape* of a surface's
     │                 transparency; Material::tint's alpha is its strength.
+    ├── common.wgsl   The shared WGSL prelude: the camera uniform, the light
+    │                 constants, and the analytic sky. Textually prepended to
+    │                 both modules below, because WGSL has no #include and the
+    │                 sky has two callers that must agree exactly (the sky pass
+    │                 draws it; the water reflects it).
     ├── shader.wgsl   3D vertex/fragment shaders (WGSL): one directional light
     │                 with Lambert diffuse, a Blinn-Phong specular term, a
-    │                 Schlick Fresnel edge, and the animated ripple field that
-    │                 perturbs the normal per pixel.
+    │                 Schlick Fresnel edge, the animated ripple field that
+    │                 perturbs the normal per pixel, and — in the second entry
+    │                 point, fs_water — refraction and the screen-space
+    │                 reflection trace.
+    ├── fullscreen.wgsl  The two fullscreen-triangle passes: the sky, and the
+    │                 composite that copies the offscreen scene to the swapchain.
     ├── overlay.rs    Overlay: the screen-space 2D pass (UI/HUD). Owns its own
     │                 pipeline and dynamic 2D buffers, and uploads the *toolkit's*
     │                 glyph atlas; implements ui::Painter. Drawn after the 3D pass
@@ -181,15 +195,28 @@ xtask/                Dev tooling (a separate workspace member, no deps). `cargo
    `Application::update` builds the frame (reading `Renderer::input()`,
    driving the camera via `Renderer::camera_mut`, and building its UI via
    `Renderer::ui()`). Then `Renderer::update()` re-uploads the camera uniform, and
-   `Renderer::render()` records **two** passes into one command encoder: the 3D
-   pass (clear color + depth → one instanced `draw_indexed` per mesh in the
-   draw-list, opaque runs first and blended runs after, using the solid, blended,
-   or wireframe pipeline per the current `RenderMode` and the run's alpha)
-   and then the
-   **overlay pass** (load, not clear → draw the accumulated 2D UI), and
-   presents. Finally `Input::end_frame` clears the per-frame deltas/press-edges.
-   Depth testing and back-face culling are on for the 3D pass; the overlay ignores
-   depth and alpha-blends on top.
+   `Renderer::render()` records **five** passes into one command encoder, in the
+   order [`graph.rs`](#the-frame-graph) resolved rather than the order they are
+   written:
+
+   1. **sky** — a fullscreen triangle into the offscreen `scene color`, so the
+      scene has a horizon and a reflection ray has somewhere to land.
+   2. **opaque** — the opaque half of the draw-list into `scene color` +
+      `scene depth`, one instanced `draw_indexed` per mesh, depth-tested and
+      back-face culled.
+   3. **composite** — a fullscreen copy of `scene color` onto the swapchain.
+      Exists only because a texture cannot be an attachment and a sampled input
+      at once, and the water has to sample the scene it is drawn over.
+   4. **blended** — the transparent half of the draw-list onto the swapchain,
+      sampling `scene color` and `scene depth` for refraction and screen-space
+      reflection, with depth **read-only** so testing and sampling the same
+      texture is legal.
+   5. **overlay** — load, not clear → the accumulated 2D UI, ignoring depth and
+      alpha-blending on top.
+
+   Then it presents, and `Input::end_frame` clears the per-frame
+   deltas/press-edges. In `RenderMode::Wireframe` the opaque pass draws *every*
+   run as lines and the blended pass draws nothing.
 6. `about_to_wait` requests another redraw, so we render continuously
    (`ControlFlow::Poll`).
 
@@ -246,6 +273,56 @@ alternative is a tab that returns to the foreground and teleports — but it mea
 "wall time" measured as a sum of frame deltas is not wall time in a tab that
 wasn't drawing.
 
+## The frame graph
+
+`renderer/graph.rs` holds the frame: resources declared with a format, passes
+declared with what they read and write. It resolves the order, allocates the
+offscreen textures, and re-allocates them on resize. Slice 16 is what demanded
+it — before that a frame was two passes with no data flowing between them, and a
+hand-written sequence was exactly the right amount of machinery.
+
+**Two things stopped scaling at once, and neither is elegance.**
+
+- **Ordering became a correctness property.** With no dependencies, passes ran in
+  the order they were written because that is the order they appeared. "The
+  blended pass must follow the opaque pass because it reads what the opaque pass
+  wrote" is a different kind of statement, and it was previously enforced by
+  nothing.
+- **Three attachments now have to track the surface size.** The one-attachment
+  version of this is already a gotcha below, learned the hard way. Centralizing it
+  turns three places to forget into one call.
+
+**The rule worth knowing before adding a pass** is the difference between the two
+kinds of edge, because getting it wrong does not schedule:
+
+- A **`reads`** edge is a *data* dependency. The pass needs a finished texture, so
+  it must follow every pass that writes that texture.
+- **`Load::Keep`** is an *accumulation* order, and can only mean "whoever wrote
+  this before me" in declaration order. Composite, blended and overlay all
+  accumulate onto the swapchain; treating each as depending on all the others
+  makes them mutually dependent, and the cycle check refuses the frame. That is
+  not hypothetical — it is what the first version of the rule did, and a startup
+  panic naming two passes was a considerably better outcome than a frame that
+  composited in the wrong order and looked nearly right.
+
+**The bug it exists to make impossible** is sampling the texture you are drawing
+to. `RenderGraph::build` rejects a pass that reads and writes the same resource
+outright. This is the obvious mistake when the water wants "the scene behind me"
+and the scene is right there, and it is why the composite pass exists: the opaque
+scene must be copied to the swapchain before the water can draw over it while
+reading it. Depth is the deliberate exception — the blended pass samples the same
+depth texture it tests against, which is legal precisely because it declares that
+it does not *write* it, and gets a read-only attachment as a result.
+
+**It is not a general-purpose render graph.** No transient-memory aliasing, no
+barrier insertion (wgpu does that), and **no way for a consumer to add a pass**:
+the module is `pub(crate)` and `PassKind` is a closed enum. The roadmap's trigger
+for a *public* graph is a second consumer wanting its own pass, and there still
+isn't one — what pulled this in was the engine's own fourth pass. The nearest
+real candidate is the UI wishlist's "3D scene as a panel", which is now half-built
+(the offscreen texture and the fullscreen composite both exist; it needs the
+composite to target an arbitrary rect).
+
 ## Shading the 3D pass
 
 All of it lives in `shader.wgsl` and is driven by `Material`; there are no
@@ -268,6 +345,9 @@ things a material can layer on top:
   last, at a non-integer frequency ratio, with longer waves travelling faster.
   All three of those are load-bearing against banding, which is what a naive sum
   of sines gives you.
+- **Refraction and screen-space reflection** (`refraction`, `absorption`,
+  `reflection`), which are the only terms that read another pass's output and so
+  live in a second fragment entry point — see below.
 
 Two properties of that list matter more than the terms themselves:
 
@@ -284,10 +364,50 @@ Two properties of that list matter more than the terms themselves:
   uniform at all: without a clock in the shader, a consumer whose surface detail
   animates is forced to rebuild and re-upload a mesh every frame to say so.
 
-The honest ceiling: with no offscreen render target there is no reflection and no
-refraction, so the Fresnel term tends toward a **flat colour** rather than toward
-an image of the scene. It is a stand-in, labelled as one in its own docs, and
-closing that gap is the render-graph entry under *Natural next steps*.
+### Two fragment entry points, and why it is forced
+
+`fs_main` shades the opaque pass; `fs_water` shades the blended one and is the
+only one that touches the scene textures. This is not an optimization. The opaque
+pass *renders into* `scene color`, and a pipeline whose shader statically
+references a binding must carry it in its layout — so a shared entry point would
+oblige the opaque pipeline to bind the very texture it is drawing to. Splitting
+the entry point is what makes the conflict not exist. Everything the two share
+(the ripple normal, Lambert, the Fresnel and specular terms) lives in helper
+functions between them, so they cannot drift apart in how they light a surface.
+
+The opaque path still gets a Fresnel edge — it just reflects the **sky** rather
+than the scene, which costs one function call and no texture.
+
+### What screen-space techniques cannot do
+
+Both new terms read the *opaque scene as drawn on screen*, and both inherit
+exactly that limitation:
+
+- **Refraction** can only show what the opaque pass drew behind the surface. No
+  caustics; nothing seen through two water surfaces.
+- **Reflection** can only show what is already on screen. A ray off a near-flat
+  surface travels almost parallel to the view and leaves the frame quickly, so
+  most rays miss — which is why the sky is the *floor* of the term rather than a
+  fallback of last resort. Without it, every miss would read as a black smear and
+  SSR would look worse than no reflection at all.
+
+Three implementation details are load-bearing and were each an artifact first: the
+march steps by a fraction of the **viewing distance** rather than a world constant
+(the engine cannot know how big a consumer's scene is — terrain's lakes are 0.004
+units deep and its map is a few units across), the crossing is **bisected** rather
+than taken at step resolution (which otherwise bands, and the bands grow with the
+geometric step schedule), and the trace uses a **calmer normal** than the one that
+shades the surface (a fully rippled normal sends neighbouring pixels to unrelated
+parts of the scene, where each independently hits or misses — binary speckle
+rather than a reflection).
+
+**And at physically correct parameters most of this is invisible**, which is worth
+knowing before tuning it. Water is 2% reflective face-on; at the terrain demo's
+camera angle the reflection contributes a few percent and neither its quality nor
+its artifacts can be seen. It was developed by temporarily raising `fresnel` to
+0.65 to make the term legible at all. The cue that actually reads at every angle
+is refraction with depth-based absorption. Escaping the screen-space limits means
+cube maps or a real reflection pass, and no demo is asking.
 
 ## The overlay pass and the UI
 
@@ -422,10 +542,22 @@ These are subtle and easy to reintroduce, so they're documented here:
   is actually available, and use `downlevel_webgl2_defaults` limits there so a GL
   adapter can satisfy the device request.
 
-- **The depth buffer must track the surface size.** Depth and color attachments
-  have to share dimensions, so the depth texture is recreated in `resize()`
+- **Colours in a shader are linear, and the surface is sRGB.** `Bgra8UnormSrgb`
+  means the GPU encodes whatever a fragment returns, so a value picked by eye
+  comes out much brighter than intended — 0.55 linear displays at about 0.77. The
+  sky's first constants were chosen this way and the result read as grey fog
+  rather than sky. Anything authored as a *final* colour (a gradient, a clear
+  colour) has to be converted; anything multiplied into existing shading does not
+  care.
+
+- **Every attachment must track the surface size.** Depth and colour attachments
+  have to share dimensions, so the offscreen textures are recreated in `resize()`
   alongside the surface reconfigure — and because the web's async-renderer resync
   funnels through `resize()` too, that path is covered without a special case.
+  This is now `graph.resize()` rather than one call per texture, which is half of
+  why the graph exists. **A bind group holding those views must be rebuilt too**,
+  since re-allocation replaces them; wgpu catches a stale one, but only when the
+  pass runs.
   Forgetting it surfaces as a render-pass validation error after the first resize.
   The depth format is `Depth32Float` (a render-attachment format on every backend,
   including the WebGL2 fallback); both the texture and the pipeline read one
@@ -439,11 +571,14 @@ These are subtle and easy to reintroduce, so they're documented here:
   tint at 10, the packed shading terms at 11, and the Fresnel tint at 12) rather
   than the storage buffer most tutorials reach for —
   `downlevel_webgl2_defaults` does not have those at all. With `Vertex` taking
-  0–2, that is **thirteen of the sixteen vertex attributes WebGL2 guarantees**.
-  Three slots left is one `mat4` short of anything structural, so the next thing
-  wanting per-instance data should expect to **pack into the spare `w` channels**
-  of the vectors already there — which is exactly how the ripple parameters got
-  aboard for free — rather than claim a slot. And when several meshes
+  0–2, and the scene-sampling terms at 13, that is **fourteen of the sixteen
+  vertex attributes WebGL2 guarantees** — and the count has risen in three
+  consecutive slices (eleven, thirteen, fourteen). Slice 15 got in free by
+  **packing into spare `w` channels**; Slice 16 could not, because Slice 15 had
+  spent the padding. Two slots left is the end of the runway: the next thing
+  wanting per-instance data should pack, or move to a storage buffer — which is
+  the real fix and which the WebGL2 fallback does not have at all, so taking it
+  means deciding that fallback is over. And when several meshes
   share one instance buffer, each mesh's run is selected by **offsetting the
   buffer binding** (`set_vertex_buffer(1, buf.slice(byte_offset..))`, then always
   drawing `0..count`), *not* by passing a non-zero start to `draw_indexed`'s
@@ -493,7 +628,16 @@ These are subtle and easy to reintroduce, so they're documented here:
 
 ## Performance posture
 
-- One command encoder per frame, now with two render passes (3D scene + overlay).
+- One command encoder per frame, now with five render passes (sky, opaque,
+  composite, blended, overlay). Two of those are fullscreen triangles rather than
+  quads — a quad has a diagonal seam where its triangles meet, and fragments along
+  it get shaded twice.
+- **The offscreen detour is not free, and it measured as free.** Terrain holds
+  75 fps with two extra fullscreen passes, the same as before Slice 16 — at 128²
+  the frame is bound by the CPU mesh rebuild, not by fill. On a scene that is
+  actually fill-bound, an extra full-screen copy every frame is a real cost, and
+  the composite is the first thing to fold away (by drawing the opaque pass
+  straight to the swapchain when nothing transparent needs to read it).
 - Camera data updated with `Queue::write_buffer` — no per-frame buffer
   allocation. The overlay's 2D buffers are written once per frame and only
   reallocated (to the next power of two) when the UI geometry outgrows them.
@@ -524,14 +668,18 @@ These are subtle and easy to reintroduce, so they're documented here:
 The scaffold leaves obvious seams:
 
 - **MSAA** (`multisample` is currently the 1-sample default).
-- A small **render-graph**, and this is no longer speculative — it is the one
-  entry here with a demo blocked on it. There are two passes (3D + overlay) wired
-  by hand in `render()`; what water needs next is an **offscreen render target**:
-  draw the opaque pass to a texture, then let the blended pass sample it for
-  refraction and a screen-space reflection. That is what turns the Fresnel term
-  from a flat stand-in colour into an image of the scene, and no amount of
-  tuning the current shader substitutes for it. A third pass with a real
-  dependency between passes is what makes the hand-wiring stop scaling.
+- **A composite into an arbitrary rect**, so the 3D scene is one panel among many
+  rather than a fullscreen background with UI over it. This is the nearest thing
+  to a scheduled item here, because Slice 16 built most of it by accident: the
+  scene already renders to an offscreen texture and is already composited by a
+  fullscreen triangle. What remains is letting that triangle target a rect the UI
+  chooses. Its consumer (The Matchmaker, via the [UI
+  wishlist](slmsttaa-ui/WISHLIST.md)) is real but has not hit the wall yet.
+- **A public render graph.** The internal one landed in Slice 16; opening it to
+  consumer-authored passes is a different question and still waits for a consumer
+  that wants one. Doing it means replacing the closed `PassKind` with something
+  that carries its own recording logic, which is the lifetime problem `graph.rs`
+  documents having declined.
 - **Further overlay capabilities the UI crate may ask for**: soft shadows (looked
   at in UI Slice 2 and deliberately declined — a hairline border reads as
   well for a fraction of the fill cost), and textured quads for icons, which
@@ -554,7 +702,9 @@ control** (Slice 12 — `Timeline`, `Application::fixed_update`, and
 `Renderer::time_mut` for pause, scale, single-step and seek), and a
 **view-dependent shading model** — the eye and a wall clock in `CameraUniform`,
 Blinn-Phong specular, a Schlick Fresnel edge, RGBA vertex colors, and per-fragment
-animated ripples (Slices 14–15). On the overlay side specifically: **ordered draw layers** in
+animated ripples (Slices 14–15), and an **offscreen target + the frame graph that
+orders it** — an analytic sky, refraction with depth-based absorption, and a
+screen-space reflection trace (Slice 16). On the overlay side specifically: **ordered draw layers** in
 `Overlay::flush` and a **`scale_factor`-aware surface** (UI Slice 1 — the toolkit
 speaks logical points and the overlay scales on the way to vertices),
 **rounded-rect, border, and clip support** in `overlay.wgsl` (UI Slice 2), and a

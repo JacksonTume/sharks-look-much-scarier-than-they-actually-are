@@ -242,6 +242,36 @@ pub struct Material {
     /// be drawn in the opaque pass and its fade ignored. Terrain's water hits
     /// this the moment its opacity slider is dragged to maximum.
     pub blended: bool,
+
+    /// How far this surface displaces what is seen *through* it, in screen
+    /// widths. `0.0` is a surface you see straight through.
+    ///
+    /// Only the blended pass can do this — it samples the opaque scene rendered
+    /// before it — so an opaque material ignores the field. Typical water is
+    /// around `0.02`; past `0.05` the distortion stops reading as a surface and
+    /// starts reading as a broken image, because a screen-space displacement has
+    /// no idea what it is dragging across.
+    pub refraction: f32,
+
+    /// How quickly the surface takes on its own colour with thickness, as a
+    /// Beer-Lambert coefficient per world unit.
+    ///
+    /// This is what separates a deep basin from a shallow one: at `0.0` the
+    /// surface is uniformly its tint no matter how much of it the light crossed,
+    /// which is exactly the "same blue everywhere" look Slice 14 shipped and
+    /// Slice 16 set out to fix. Needs [`refraction`](Self::refraction) to be
+    /// nonzero, since thickness is only known where the scene behind is sampled.
+    pub absorption: f32,
+
+    /// How much of the reflection is traced from the scene rather than taken
+    /// from the sky. `0.0` reflects sky only; `1.0` uses the traced hit wherever
+    /// the trace finds one.
+    ///
+    /// Kept separate from [`fresnel`](Self::fresnel), which decides *how
+    /// reflective* the surface is, because this decides *what it reflects* —
+    /// and the screen-space trace is the expensive half. A material can want a
+    /// Fresnel edge without paying 28 depth samples a fragment for it.
+    pub reflection: f32,
 }
 
 impl Material {
@@ -255,6 +285,9 @@ impl Material {
         ripple_strength: 0.0,
         ripple_scale: 8.0,
         blended: false,
+        refraction: 0.0,
+        absorption: 0.0,
+        reflection: 0.0,
     };
 
     /// An opaque tint from linear RGB.
@@ -293,6 +326,27 @@ impl Material {
     pub const fn with_ripples(mut self, strength: f32, scale: f32) -> Self {
         self.ripple_strength = strength;
         self.ripple_scale = scale;
+        self
+    }
+
+    /// This material refracting what is behind it by `strength`, taking on its
+    /// own colour at `absorption` per world unit of thickness.
+    ///
+    /// Implies [`blended`](Self::blended): refraction composites the scene behind
+    /// the surface itself, which is only correct in the blended pass — and a
+    /// caller who asked to see *through* a surface has already said which pass
+    /// they meant. See [`refraction`](Self::refraction).
+    pub const fn with_refraction(mut self, strength: f32, absorption: f32) -> Self {
+        self.refraction = strength;
+        self.absorption = absorption;
+        self.blended = true;
+        self
+    }
+
+    /// This material tracing `strength` of its reflection from the scene instead
+    /// of taking all of it from the sky. See [`reflection`](Self::reflection).
+    pub const fn with_reflection(mut self, strength: f32) -> Self {
+        self.reflection = strength;
         self
     }
 
@@ -406,6 +460,14 @@ pub(crate) struct InstanceRaw {
     /// their own — with thirteen of sixteen attributes already spoken for, the
     /// padding was the cheaper place to put them.
     fresnel_tint: [f32; 4],
+    /// `[refraction, absorption, reflection, unused]` — the terms that sample
+    /// the scene texture.
+    ///
+    /// This one *did* have to claim a slot: Slice 15 spent the last two spare
+    /// `w` channels on the ripple parameters, so there was no padding left to
+    /// hide in. Its own `w` is now the only spare per-instance float in the
+    /// buffer, and there are two attribute slots behind it.
+    water: [f32; 4],
 }
 
 impl InstanceRaw {
@@ -424,6 +486,7 @@ impl InstanceRaw {
                 m.fresnel_tint[2],
                 m.ripple_scale,
             ],
+            water: [m.refraction, m.absorption, m.reflection, 0.0],
         }
     }
 
@@ -451,21 +514,27 @@ impl InstanceRaw {
     /// A `mat4x4` costs four attribute slots — WGSL has no matrix vertex
     /// attribute, so the shader reassembles it from four `vec4` columns at
     /// locations 3–6, then the normal matrix from three `vec3` columns at 7–9,
-    /// then the tint at 10, the packed shading terms at 11, and the Fresnel tint
-    /// at 12. Locations 0–2 belong to [`Vertex`](crate::Vertex).
+    /// then the tint at 10, the packed shading terms at 11, the Fresnel tint at
+    /// 12, and the scene-sampling terms at 13. Locations 0–2 belong to
+    /// [`Vertex`](crate::Vertex).
     ///
-    /// **That is thirteen of the sixteen vertex attributes WebGL2 guarantees.**
-    /// Slice 9/10 recorded eleven and called the remaining room "no longer
-    /// generous"; two more went here. Three slots are left, which is one `mat4`
-    /// short of anything structural — the next thing that wants per-instance data
-    /// of any size should expect to pack it into the spare `w` channels above
-    /// rather than claim a slot, or to wait for storage buffers (which the
-    /// WebGL2 fallback does not have at all).
+    /// **That is fourteen of the sixteen vertex attributes WebGL2 guarantees**,
+    /// and the count has now gone up in three consecutive slices: eleven (9/10),
+    /// thirteen (14), fourteen (16). Slice 15 got in for free by packing into
+    /// spare `w` channels, which was the mitigation Slice 14 predicted would be
+    /// necessary; Slice 16 could not, because Slice 15 had spent the padding.
+    ///
+    /// **Two slots left is the end of the runway, and the next thing to want
+    /// per-instance data should not assume it can have one.** The options in
+    /// order of preference: use `water`'s spare `w`; pack several scalars into
+    /// one slot as `shading` already does; or move per-instance data to a
+    /// storage buffer, which is the real fix and which the WebGL2 fallback does
+    /// not support at all — so taking it means deciding that fallback is over.
     #[rustfmt::skip]
-    const ATTRS: [wgpu::VertexAttribute; 10] = wgpu::vertex_attr_array![
+    const ATTRS: [wgpu::VertexAttribute; 11] = wgpu::vertex_attr_array![
         3 => Float32x4, 4 => Float32x4, 5 => Float32x4, 6 => Float32x4,
         7 => Float32x3, 8 => Float32x3, 9 => Float32x3,
-        10 => Float32x4, 11 => Float32x4, 12 => Float32x4,
+        10 => Float32x4, 11 => Float32x4, 12 => Float32x4, 13 => Float32x4,
     ];
 
     /// The instance-step buffer layout matching `shader.wgsl`.
