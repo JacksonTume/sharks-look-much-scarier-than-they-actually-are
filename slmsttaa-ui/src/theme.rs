@@ -116,8 +116,15 @@ pub struct Palette {
     pub surface: Color,
     /// Hairline outlines. Does the job a drop shadow would, for one stroke.
     pub border: Color,
-    /// The focus ring around whatever was last clicked.
+    /// The focus ring around whatever was last clicked, or tabbed onto.
     pub ring: Color,
+    /// The band behind selected text.
+    ///
+    /// Translucent by convention, so the glyphs stay readable through it rather
+    /// than needing a second "text on selection" token to invert to. That is the
+    /// same trade [`Palette::surface`] makes for the pressed scrim, and it is why
+    /// a text field costs the palette one token rather than two.
+    pub selection: Color,
     /// Section headings.
     pub heading: Color,
     /// The highlight: slider fill, checkbox tick, the rule under a title.
@@ -344,6 +351,7 @@ impl Theme {
             surface: [1.0, 1.0, 1.0, 0.14],
             border: [1.0, 1.0, 1.0, 0.10],
             ring: [0.42, 0.72, 1.0, 0.85],
+            selection: [0.26, 0.59, 0.98, 0.40],
             heading: [0.45, 0.66, 0.92, 1.0],
             accent: [0.26, 0.59, 0.98, 1.0],
             accent_hover: [0.42, 0.72, 1.0, 1.0],
@@ -373,6 +381,7 @@ impl Theme {
             surface: [0.05, 0.07, 0.12, 0.12],
             border: [0.05, 0.07, 0.12, 0.18],
             ring: [0.15, 0.45, 0.90, 0.85],
+            selection: [0.15, 0.45, 0.90, 0.30],
             heading: [0.13, 0.35, 0.68, 1.0],
             accent: [0.15, 0.45, 0.90, 1.0],
             accent_hover: [0.25, 0.56, 0.98, 1.0],

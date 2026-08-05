@@ -41,6 +41,81 @@ use slmsttaa_ui::{Ui, UiInput, UiState};
 /// to `Depth24Plus` — both the texture and the pipeline read this one constant.)
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
+/// Restate one engine [`Key`](crate::input::Key) as the toolkit's.
+///
+/// Two enums with the same variants, and no way to share one: the toolkit
+/// depends on nothing, so it cannot import ours, and importing *its* into the
+/// engine's public input API would make the engine's keyboard vocabulary the
+/// UI crate's to define. This `match` is the price, and it is exhaustive — a
+/// variant added to either side stops the build rather than quietly dropping a
+/// key.
+fn ui_key(key: crate::input::Key) -> slmsttaa_ui::Key {
+    use crate::input::Key as E;
+    use slmsttaa_ui::Key as U;
+    match key {
+        E::A => U::A,
+        E::B => U::B,
+        E::C => U::C,
+        E::D => U::D,
+        E::E => U::E,
+        E::F => U::F,
+        E::G => U::G,
+        E::H => U::H,
+        E::I => U::I,
+        E::J => U::J,
+        E::K => U::K,
+        E::L => U::L,
+        E::M => U::M,
+        E::N => U::N,
+        E::O => U::O,
+        E::P => U::P,
+        E::Q => U::Q,
+        E::R => U::R,
+        E::S => U::S,
+        E::T => U::T,
+        E::U => U::U,
+        E::V => U::V,
+        E::W => U::W,
+        E::X => U::X,
+        E::Y => U::Y,
+        E::Z => U::Z,
+        E::Digit0 => U::Digit0,
+        E::Digit1 => U::Digit1,
+        E::Digit2 => U::Digit2,
+        E::Digit3 => U::Digit3,
+        E::Digit4 => U::Digit4,
+        E::Digit5 => U::Digit5,
+        E::Digit6 => U::Digit6,
+        E::Digit7 => U::Digit7,
+        E::Digit8 => U::Digit8,
+        E::Digit9 => U::Digit9,
+        E::Up => U::Up,
+        E::Down => U::Down,
+        E::Left => U::Left,
+        E::Right => U::Right,
+        E::Escape => U::Escape,
+        E::Tab => U::Tab,
+        E::Enter => U::Enter,
+        E::Space => U::Space,
+        E::Backspace => U::Backspace,
+        E::Delete => U::Delete,
+        E::Home => U::Home,
+        E::End => U::End,
+        E::PageUp => U::PageUp,
+        E::PageDown => U::PageDown,
+    }
+}
+
+/// Restate one engine [`Modifiers`](crate::input::Modifiers) as the toolkit's.
+fn ui_modifiers(modifiers: crate::input::Modifiers) -> slmsttaa_ui::Modifiers {
+    slmsttaa_ui::Modifiers {
+        shift: modifiers.shift,
+        ctrl: modifiers.ctrl,
+        alt: modifiers.alt,
+        logo: modifiers.logo,
+    }
+}
+
 /// How the scene's meshes are rasterized.
 ///
 /// Wireframe is drawn with portable line-list topology (a deduplicated edge
@@ -451,10 +526,22 @@ pub struct Renderer {
     /// it via [`Renderer::input`] from `Application::update`.
     input: Input,
 
+    /// Set by [`Renderer::request_exit`], read by the event loop at the end of
+    /// the frame. A flag rather than a direct call because the consumer's `update`
+    /// has no reach into the event loop — which is the whole point of the
+    /// inversion.
+    exit_requested: bool,
+
     /// The screen-space overlay pass (2D UI/HUD), drawn after the 3D scene.
     overlay: Overlay,
     /// Persistent immediate-mode UI state (active widget, panel height).
     ui_state: UiState,
+    /// This frame's keyboard events, translated into the toolkit's vocabulary.
+    ///
+    /// The toolkit cannot see [`crate::input::Event`] — it depends on nothing —
+    /// so [`Renderer::ui`] re-states the log in `slmsttaa_ui` types. The buffer
+    /// lives here and is reused rather than allocated per frame.
+    ui_events: Vec<slmsttaa_ui::Event>,
     /// Frame clock for delta-time and the FPS readout — wall time.
     clock: Clock,
     /// Wall-clock seconds since the first frame, handed to shaders so surface
@@ -813,8 +900,10 @@ impl Renderer {
             camera_buffer,
             camera_bind_group,
             input: Input::default(),
+            exit_requested: false,
             overlay,
             ui_state: UiState::default(),
+            ui_events: Vec::new(),
             clock: Clock::new(),
             elapsed: 0.0,
             timeline: Timeline::new(),
@@ -998,6 +1087,25 @@ impl Renderer {
         &self.input
     }
 
+    /// Ask the engine to close the window and end the run.
+    ///
+    /// The request is honoured at the *end* of the current frame, so the frame
+    /// you ask on is still drawn. Calling it more than once is harmless.
+    ///
+    /// This exists because [`Application::quit_on_escape`] can be turned off: a
+    /// consumer that takes Escape for its own UI would otherwise have no way to
+    /// quit but the window's close button.
+    ///
+    /// [`Application::quit_on_escape`]: crate::Application::quit_on_escape
+    pub fn request_exit(&mut self) {
+        self.exit_requested = true;
+    }
+
+    /// Whether [`Renderer::request_exit`] has been called this frame.
+    pub fn exit_requested(&self) -> bool {
+        self.exit_requested
+    }
+
     /// A world-space [`Ray`] through the pointer, or `None` when the pointer is
     /// not over the window.
     ///
@@ -1078,14 +1186,34 @@ impl Renderer {
     /// This is where the two halves meet. The toolkit lives in its own crate and
     /// cannot see [`Input`] (that would be a dependency cycle — see
     /// `slmsttaa-ui/README.md`), so the engine copies this frame's host state
-    /// into the toolkit's own [`UiInput`] snapshot. Five assignments, in
-    /// exchange for a UI crate that has no dependencies at all.
+    /// into the toolkit's own [`UiInput`] snapshot. Seven assignments and one
+    /// `match`, in exchange for a UI crate that has no dependencies at all.
     pub fn ui(&mut self) -> Ui<'_> {
+        // Restate this frame's keyboard log in the toolkit's vocabulary. The two
+        // `Key` enums are deliberately separate declarations rather than a shared
+        // one — the toolkit imports nothing, including from us — and the `match`
+        // in `ui_key` is exhaustive, so a variant added on one side is a compile
+        // error rather than a key that silently stops working.
+        self.ui_events.clear();
+        for event in self.input.events() {
+            self.ui_events.push(match *event {
+                crate::input::Event::Text(ch) => slmsttaa_ui::Event::Text(ch),
+                crate::input::Event::Key(key) => slmsttaa_ui::Event::Key(slmsttaa_ui::KeyEvent {
+                    key: ui_key(key.key),
+                    pressed: key.pressed,
+                    repeat: key.repeat,
+                    modifiers: ui_modifiers(key.modifiers),
+                }),
+            });
+        }
+
         // The toolkit works in logical points, so the cursor is converted on the
         // way in and the overlay converts back on the way out. Without this the
         // UI is half-size (and mis-hit) on a 2× display.
         let scale = self.scale_factor();
         let input = UiInput {
+            events: &self.ui_events,
+            modifiers: ui_modifiers(self.input.modifiers()),
             cursor: self
                 .input
                 .cursor_position()
@@ -1137,6 +1265,15 @@ impl Renderer {
 
     /// Advance per-frame state (camera animation, etc.).
     pub fn update(&mut self) {
+        // Carry any copy or cut the UI asked for out to the operating system.
+        // The toolkit has no dependencies and so cannot do this itself; it leaves
+        // the text in `UiState` and the engine collects it once a frame. The
+        // inbound direction needs no counterpart — a paste arrives as ordinary
+        // typed characters (see `app::App::window_event`).
+        if let Some(text) = self.ui_state.take_clipboard() {
+            crate::clipboard::set(&text);
+        }
+
         self.camera_uniform = CameraUniform::new(&self.camera, self.elapsed);
         self.queue.write_buffer(
             &self.camera_buffer,

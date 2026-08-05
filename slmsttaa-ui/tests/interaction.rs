@@ -16,7 +16,7 @@ const ROW_H: f32 = 24.0;
 const TEXT_PX: f32 = 19.0;
 
 /// A pointer resting at `(x, y)` with the button up.
-fn hovering(x: f32, y: f32) -> UiInput {
+fn hovering(x: f32, y: f32) -> UiInput<'static> {
     UiInput {
         cursor: Some((x, y)),
         ..Default::default()
@@ -24,7 +24,7 @@ fn hovering(x: f32, y: f32) -> UiInput {
 }
 
 /// A pointer at `(x, y)` on the frame the button goes down.
-fn clicking(x: f32, y: f32) -> UiInput {
+fn clicking(x: f32, y: f32) -> UiInput<'static> {
     UiInput {
         cursor: Some((x, y)),
         primary_held: true,
@@ -34,7 +34,7 @@ fn clicking(x: f32, y: f32) -> UiInput {
 }
 
 /// A pointer at `(x, y)` with the button still held from an earlier frame.
-fn dragging(x: f32, y: f32) -> UiInput {
+fn dragging(x: f32, y: f32) -> UiInput<'static> {
     UiInput {
         cursor: Some((x, y)),
         primary_held: true,

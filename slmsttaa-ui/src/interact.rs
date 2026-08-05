@@ -15,21 +15,178 @@
 //! Three field assignments, and in exchange the toolkit has no dependencies at
 //! all (see README § Dependency direction).
 //!
-//! It is deliberately narrow: one pointer, one button. Right/middle buttons,
-//! typed characters, and modifiers arrive when a demo actually needs them —
-//! never speculatively (root principle 2).
+//! It is deliberately narrow: one pointer, one button. Right and middle buttons
+//! still aren't here, because nothing has needed them.
+//!
+//! # The keyboard, and why it is a *log*
+//!
+//! Everything else in [`UiInput`] is a **level** — what is true at the end of the
+//! frame. A text field needs something a level cannot express: order. Typing
+//! `ab` and then pressing Backspace inside one frame leaves `a`; the other order
+//! leaves `ab`, and a set of flags has already thrown the difference away.
+//!
+//! So keyboard input arrives as an ordered `&[Event]` the host lends for the
+//! frame. Borrowing rather than owning is what keeps [`UiInput`] [`Copy`] and
+//! allocation-free — at the price of a lifetime parameter, which is the only
+//! reason this type has one.
 
 use crate::Rect;
 
-/// One frame of host state, as the UI sees it: where the pointer is, and how
-/// big the window is.
+/// A keyboard key, as the UI sees it.
+///
+/// **Physical** positions rather than layout-dependent labels, matching what a
+/// host reports: [`Key::W`] is whichever key sits where `W` does on a US layout.
+/// Bind shortcuts with this; never build text out of it — that is what
+/// [`Event::Text`] is for, and the difference is every non-US keyboard.
+///
+/// This is declared here rather than imported because the toolkit imports
+/// nothing (see the module docs above). A host with its own key enum writes one
+/// `match` per frame, which is the same trade [`UiInput`] itself makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(missing_docs)] // Fifty single-letter variants; the enum's own docs say it.
+pub enum Key {
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
+    G,
+    H,
+    I,
+    J,
+    K,
+    L,
+    M,
+    N,
+    O,
+    P,
+    Q,
+    R,
+    S,
+    T,
+    U,
+    V,
+    W,
+    X,
+    Y,
+    Z,
+    Digit0,
+    Digit1,
+    Digit2,
+    Digit3,
+    Digit4,
+    Digit5,
+    Digit6,
+    Digit7,
+    Digit8,
+    Digit9,
+    /// The up arrow.
+    Up,
+    /// The down arrow.
+    Down,
+    /// The left arrow.
+    Left,
+    /// The right arrow.
+    Right,
+    /// Escape — cancels, and drops focus.
+    Escape,
+    /// Tab — moves focus to the next widget.
+    Tab,
+    /// Enter / Return — activates a focused control.
+    Enter,
+    /// The space bar — also activates a focused control, and types a space.
+    Space,
+    /// Backspace — deletes backward from the caret.
+    Backspace,
+    /// Delete — deletes forward from the caret.
+    Delete,
+    /// Home.
+    Home,
+    /// End.
+    End,
+    /// Page Up.
+    PageUp,
+    /// Page Down.
+    PageDown,
+}
+
+/// Which modifier keys were down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Modifiers {
+    /// Either Shift. Extends a selection rather than moving the caret.
+    pub shift: bool,
+    /// Either Ctrl.
+    pub ctrl: bool,
+    /// Either Alt (Option on macOS).
+    pub alt: bool,
+    /// The platform "logo" key — Windows, Command, or Super.
+    pub logo: bool,
+}
+
+impl Modifiers {
+    /// Whether the platform's **shortcut** modifier is down: Command on macOS,
+    /// Ctrl everywhere else. Bind `Ctrl+C`-shaped shortcuts through this.
+    pub fn command(&self) -> bool {
+        if cfg!(target_os = "macos") {
+            self.logo
+        } else {
+            self.ctrl
+        }
+    }
+
+    /// Whether no modifier at all is down — the guard an unmodified shortcut
+    /// wants so it doesn't also fire under Ctrl.
+    pub fn none(&self) -> bool {
+        !self.shift && !self.ctrl && !self.alt && !self.logo
+    }
+}
+
+/// One keyboard transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyEvent {
+    /// Which key moved.
+    pub key: Key,
+    /// `true` on the way down, `false` on the way up.
+    pub pressed: bool,
+    /// Whether this is the operating system's auto-repeat rather than a fresh
+    /// press. A text field honors repeats — holding Backspace should keep
+    /// deleting — where a one-shot shortcut ignores them.
+    pub repeat: bool,
+    /// The modifiers that were down at the moment of the transition.
+    pub modifiers: Modifiers,
+}
+
+/// One entry in the host's ordered per-frame keyboard log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Event {
+    /// A key went down or came up.
+    Key(KeyEvent),
+    /// A character was **typed**, with the layout, shift state and any dead-key
+    /// composition already applied by the platform.
+    ///
+    /// Control characters never appear here, so this is always something the
+    /// font can draw. A host that supports pasting delivers the pasted text as a
+    /// run of these, which is why nothing in this crate knows what a clipboard
+    /// is — see [`UiState::take_clipboard`] for the other direction.
+    ///
+    /// **A host must not report a character produced under a shortcut
+    /// modifier.** Ctrl+A is a command, not the letter `a` — and some platforms
+    /// will hand it to you as though it were both. The check belongs on the host
+    /// side because the exception does too: Ctrl+Alt is AltGr on a European
+    /// layout, and it types real characters.
+    Text(char),
+}
+
+/// One frame of host state, as the UI sees it: where the pointer is, what the
+/// keyboard did, and how big the window is.
 ///
 /// The host fills this in each frame. Coordinates are **logical points** with
 /// the origin at the top-left, matching what a [`Painter`](crate::Painter) draws
 /// in — a host on a HiDPI display divides physical cursor coordinates by the
 /// scale factor before filling this in.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct UiInput {
+pub struct UiInput<'a> {
     /// Where the pointer is, or `None` if it hasn't been seen yet (or has left
     /// the window). Hit-testing against `None` never hits.
     pub cursor: Option<(f32, f32)>,
@@ -63,12 +220,45 @@ pub struct UiInput {
     /// animation existed. That is what every test in this crate does, and it is
     /// why they did not have to learn about frames.
     pub dt: f32,
+    /// This frame's keyboard events, **in the order they arrived**.
+    ///
+    /// Borrowed for the frame, which is what keeps this struct [`Copy`]. An
+    /// empty slice is a supported state and is what [`Default`] gives you, so a
+    /// host with no keyboard — or a test that doesn't care — leaves it alone and
+    /// every widget behaves as it did before keys existed.
+    pub events: &'a [Event],
+    /// Which modifiers are down *now*, as opposed to when a given event fired.
+    ///
+    /// Read it for pointer gestures that a modifier changes — shift-clicking a
+    /// row to extend a selection. Key handling should prefer the copy riding on
+    /// [`KeyEvent::modifiers`], which cannot have gone stale.
+    pub modifiers: Modifiers,
 }
 
-impl UiInput {
+impl UiInput<'_> {
     /// Whether the pointer is inside the given rectangle this frame.
     pub(crate) fn hits(&self, rect: Rect) -> bool {
         self.cursor.is_some_and(|p| rect.contains(p))
+    }
+
+    /// Whether `key` went down this frame, **auto-repeat included**.
+    ///
+    /// Repeats count because the things this answers for — moving a caret,
+    /// walking a list, nudging a slider — are all things a held key should keep
+    /// doing. A widget that wants one-shot semantics filters
+    /// [`KeyEvent::repeat`] out of [`UiInput::events`] itself.
+    pub fn key_pressed(&self, key: Key) -> bool {
+        self.events
+            .iter()
+            .any(|event| matches!(event, Event::Key(k) if k.key == key && k.pressed))
+    }
+
+    /// The presses in this frame's log, in order, releases filtered out.
+    pub fn key_presses(&self) -> impl Iterator<Item = KeyEvent> + '_ {
+        self.events.iter().filter_map(|event| match event {
+            Event::Key(k) if k.pressed => Some(*k),
+            _ => None,
+        })
     }
 }
 
@@ -91,14 +281,24 @@ pub struct Response {
     pub hovered: bool,
     /// The pointer is over it *and* the primary button is down.
     pub held: bool,
-    /// The primary button went down on it this frame.
+    /// The primary button went down on it this frame — or, for a focusable
+    /// control, Enter or Space was pressed while it held focus. A keyboard
+    /// activation is a click as far as a caller is concerned, which is what
+    /// makes every existing `if …clicked` call site keyboard-operable for free.
     pub clicked: bool,
-    /// It holds focus — it was the last thing clicked. Widgets draw a focus ring
-    /// from this; keyboard input will route by it once there is any.
+    /// It holds focus — it was the last thing clicked, or Tab walked onto it.
+    /// Widgets draw a focus ring from this, and keyboard input routes by it.
     pub focused: bool,
     /// The widget edited its bound value this frame. Always `false` for widgets
     /// that don't bind one.
     pub changed: bool,
+    /// The user pressed Enter to commit — a search box submitting its query.
+    ///
+    /// Only [`Ui::text_field`](crate::Ui::text_field) ever reports `true`, the
+    /// same way `open` is only ever meaningful for a section. It is distinct
+    /// from `changed`, which fires on every keystroke: a filter box wants
+    /// `changed`, a form field wants this.
+    pub submitted: bool,
     /// Whether this widget's contents are expanded.
     ///
     /// Only [`Ui::section`](crate::Ui::section) — the one collapsible widget —
@@ -119,10 +319,8 @@ pub struct Response {
 /// - **hot** — what the pointer is over *right now*. Recomputed every frame.
 /// - **active** — what has captured the pointer (a slider mid-drag). Survives
 ///   the cursor wandering off the widget, and is what makes dragging work.
-/// - **focused** — what would receive the keyboard. Nothing reads it yet: there
-///   is no key input in [`UiInput`] until a demo needs typing. It is tracked now
-///   because click-to-focus is the half that belongs with this slice, and
-///   bolting it on later would mean revisiting every widget.
+/// - **focused** — what receives the keyboard. Set by a click, moved by Tab, and
+///   read by every keyboard-operable widget.
 #[derive(Debug, Default)]
 pub struct UiState {
     /// The widget the pointer is over this frame.
@@ -132,6 +330,28 @@ pub struct UiState {
     pub(crate) active: Option<u64>,
     /// The widget that would receive keyboard input.
     pub(crate) focused: Option<u64>,
+    /// Every id that called [`Ui::focusable`](crate::Ui::focusable) this frame,
+    /// in declaration order — the ring Tab and Shift-Tab walk.
+    ///
+    /// **This is the one place position is load-bearing**, and it is not the
+    /// order-keyed-id bug returning: ids are still `hash(scope, label)`, so a row
+    /// appearing above a widget cannot change its identity. All that shifts is
+    /// where it sits in the tab ring, which is what a tab ring *is*.
+    ///
+    /// Cleared at the top of each frame, after [`Ui::new`](crate::Ui::new) has
+    /// resolved this frame's Tab against the *previous* frame's ring. Reading
+    /// last frame's order is what lets the newly focused widget draw its ring on
+    /// the same frame the key was pressed, rather than one later.
+    pub(crate) focus_order: Vec<u64>,
+    /// Caret, selection and horizontal scroll per text field id.
+    pub(crate) text: Vec<(u64, TextState)>,
+    /// Text a widget has asked the host to put on the system clipboard.
+    ///
+    /// The toolkit has no clipboard and never will — it has no dependencies to
+    /// have one *with*. This is the outbound half of the seam, drained by the
+    /// host through [`UiState::take_clipboard`]; inbound, a paste simply arrives
+    /// as [`Event::Text`] characters like any other typing.
+    pub(crate) clipboard: Option<String>,
     /// Where each panel ended up last frame, keyed by panel id.
     ///
     /// A bottom-anchored panel is the reason this exists: it has to position its
@@ -167,6 +387,61 @@ pub struct UiState {
     pub(crate) anim: Vec<Animated>,
 }
 
+/// Where a text field's caret is, what it has selected, and how far its contents
+/// have been scrolled sideways.
+///
+/// `caret` and `anchor` are **byte** offsets into the consumer's string, always
+/// on a `char` boundary. Bytes rather than character counts because every
+/// operation on a `String` is byte-indexed, and a name like `Ōsawa` makes the two
+/// disagree — which is the bug where a caret lands mid-codepoint and the next
+/// edit panics.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct TextState {
+    /// Where the caret sits, and the moving end of a selection.
+    pub(crate) caret: usize,
+    /// The fixed end of a selection. Equal to `caret` when nothing is selected.
+    pub(crate) anchor: usize,
+    /// How far the run is shifted left, in points, to keep the caret in view.
+    pub(crate) scroll: f32,
+}
+
+impl TextState {
+    /// The selection as an ordered byte range; empty when there is none.
+    pub(crate) fn selection(&self) -> (usize, usize) {
+        (self.caret.min(self.anchor), self.caret.max(self.anchor))
+    }
+
+    /// Whether anything is selected.
+    pub(crate) fn has_selection(&self) -> bool {
+        self.caret != self.anchor
+    }
+
+    /// Put both ends at `at`, collapsing any selection.
+    pub(crate) fn collapse_to(&mut self, at: usize) {
+        self.caret = at;
+        self.anchor = at;
+    }
+
+    /// Pull the caret and anchor back onto valid `char` boundaries of `text`.
+    ///
+    /// The consumer owns the string and may have replaced it between frames —
+    /// selecting a different object refills the same field — so neither offset
+    /// can be trusted without this.
+    pub(crate) fn clamp_to(&mut self, text: &str) {
+        self.caret = clamp_boundary(text, self.caret);
+        self.anchor = clamp_boundary(text, self.anchor);
+    }
+}
+
+/// The nearest `char` boundary of `text` at or before `index`.
+fn clamp_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
 /// One eased float, and whether anything asked for it this frame.
 #[derive(Debug)]
 pub(crate) struct Animated {
@@ -181,6 +456,75 @@ pub(crate) struct Animated {
 }
 
 impl UiState {
+    /// Take whatever a widget has asked to put on the system clipboard, if
+    /// anything, leaving the slot empty.
+    ///
+    /// Call it from the host once per frame, after the UI has been declared. On
+    /// a host with no clipboard, never calling it is fine — the slot simply holds
+    /// the most recent request and is overwritten by the next.
+    ///
+    /// There is no inbound counterpart on purpose: a paste is just typing, so a
+    /// host delivers it as [`Event::Text`] characters and this crate stays
+    /// unaware that clipboards exist.
+    pub fn take_clipboard(&mut self) -> Option<String> {
+        self.clipboard.take()
+    }
+
+    /// Move focus one step around last frame's tab ring.
+    ///
+    /// `forward` walks declaration order, `!forward` walks it backwards; both
+    /// wrap. Focus that is currently nowhere — or on something no longer
+    /// declared — enters at whichever end the direction implies, so the first Tab
+    /// after a click into empty space lands on the first control rather than on
+    /// nothing.
+    pub(crate) fn step_focus(&mut self, forward: bool) {
+        if self.focus_order.is_empty() {
+            return;
+        }
+        let last = self.focus_order.len() - 1;
+        let current = self
+            .focused
+            .and_then(|id| self.focus_order.iter().position(|&other| other == id));
+        let next = match (current, forward) {
+            (Some(i), true) => {
+                if i == last {
+                    0
+                } else {
+                    i + 1
+                }
+            }
+            (Some(i), false) => {
+                if i == 0 {
+                    last
+                } else {
+                    i - 1
+                }
+            }
+            (None, true) => 0,
+            (None, false) => last,
+        };
+        self.focused = Some(self.focus_order[next]);
+    }
+
+    /// `id`'s caret and selection, clamped to `text`.
+    pub(crate) fn text_state(&self, id: u64, text: &str) -> TextState {
+        let mut state = self
+            .text
+            .iter()
+            .find(|(k, _)| *k == id)
+            .map_or(TextState::default(), |(_, v)| *v);
+        state.clamp_to(text);
+        state
+    }
+
+    /// Remember `id`'s caret and selection.
+    pub(crate) fn set_text_state(&mut self, id: u64, value: TextState) {
+        match self.text.iter_mut().find(|(k, _)| *k == id) {
+            Some((_, v)) => *v = value,
+            None => self.text.push((id, value)),
+        }
+    }
+
     /// Retire animated values nothing asked for last frame, and re-arm the
     /// survivors to be asked for again.
     ///

@@ -1210,7 +1210,7 @@ screen. Both are the defining limits of screen-space techniques rather than gaps
 in this implementation, and escaping them means cube maps or a real reflection
 pass, neither of which has a demo asking.
 
-## The third vertical — a scene you can edit (Slice 17)
+## The third vertical — a scene you can edit (Slices 17–18)
 
 Slices 11, 12 and 13 each ended without evidence for a next one, and Slice 16
 closed with its own list of things nothing had asked for. The roadmap's answer to
@@ -1341,6 +1341,92 @@ browser, and each of those looked at **terrain**, which is dark, textured and
 judged on shape rather than tone. A flat grey ground plane under six pastel
 objects is what made it obvious — which is an argument for a demo whose colours
 are boring on purpose.
+
+### Slice 18 — A keyboard that reaches the consumer ✅ done
+
+*Roadblock:* the engine's `Key` enum had **eight** variants, chosen in Slice 3 to
+fly a camera, and its own doc comment said to add more only when a consumer
+demanded them. One did. The demand did not come from a demo in this repository —
+it came from the same second consumer that already has a UI toolkit wishlist, and
+it is recorded in
+[`slmsttaa-ui/WISHLIST.md` § Input and navigation](slmsttaa-ui/WISHLIST.md#input-and-navigation).
+It could not be built around: there is no way for a consumer to reach a key the
+engine does not report.
+
+Three things were missing and all three are the engine's: **modifiers** (no
+`Ctrl`, no `Shift`, so no shortcut can be bound at all), **typed characters** (a
+`Key` is a position, not a letter, and deriving one from the other is how you ship
+software that only works on a US layout), and **order** — everything `Input`
+carried was a *level*, and a text field cannot be built on levels.
+
+The driving demo is **`examples/editor.rs`**, extended rather than replaced. It
+is the demo that already asked the pointer to reach the world; now it asks the
+same of the keyboard.
+
+**What the engine gained:**
+
+- **`Key` widened to fifty variants** — all the letters and digits so a consumer
+  can bind arbitrary shortcuts, plus the arrows and the editing keys. `COUNT` is
+  derived from the last variant rather than typed out, so adding one in the
+  middle cannot silently under-size the held-key table.
+- **`Modifiers { shift, ctrl, alt, logo }`**, fed from `ModifiersChanged`, with a
+  `command()` helper that is Cmd on macOS and Ctrl elsewhere — because a binary
+  that hard-codes `ctrl` is wrong on one platform, and the check is one line.
+- **An ordered `Event` log** beside the levels, carrying key transitions *and*
+  typed characters, drained by `end_frame` with the other per-frame state. This
+  is the only ordered thing in `Input` and it exists for exactly one reason: `ab`
+  then Backspace and Backspace then `ab` are different, and flags cannot tell
+  them apart.
+- **`is_key_pressed`** — a press edge with auto-repeat excluded, mirroring
+  `is_mouse_pressed`, for one-shot shortcuts. `repeat` still rides on the log,
+  because a text field *wants* repeats.
+- **`MouseButton::Back` / `Forward`.** Two enum arms and two `winit` arms, and
+  the wishlist had named mouse-4 as one of the three ways back was unavailable.
+- **Escape became the consumer's to claim.** `Application::quit_on_escape()`
+  defaults to `true`, so every demo that has not thought about it is untouched;
+  `editor.rs` returns `false` and binds Escape itself, and quits through the new
+  `Renderer::request_exit()` — honoured at the end of the frame, so the frame it
+  was asked on is still drawn. This is the first piece of *consumer
+  configuration* the engine has, and it is deliberately one defaulted trait
+  method rather than a config system.
+- **A clipboard** (`src/clipboard.rs`), which is the one place this slice cost a
+  dependency: `arboard` on native, `navigator.clipboard` on the web. It is
+  engine-internal because the toolkit has no dependencies to reach an operating
+  system with. Inbound needs no seam at all — a paste is pushed into `Input` as
+  ordinary typed characters, so nothing downstream knows a clipboard was
+  involved.
+
+**The bug, and it is the second one in this file that only a real keyboard could
+find.** Pressing `Ctrl+A` in the demo's name field inserted an `a`; `Ctrl+C`
+inserted a `c`. **Windows reports `text: Some("a")` for `Ctrl+A`** — the platform
+hands you a shortcut and a keystroke at once, and the toolkit had no way to tell.
+The filter belongs here, on the engine's text channel: a keystroke under a
+shortcut modifier is not typing. `Ctrl+Alt` is exempt, because that combination
+is AltGr on a European layout and types real characters — which is why this is a
+rule with an exception rather than a blanket ban on modifiers.
+
+*Proof:* `cargo run --example editor` — objects have names typed into a field,
+the scene list filters as you type and walks with the arrows, Escape backs out of
+the field and then the selection, Delete removes it, Tab walks the panel and
+Enter activates, `Ctrl+A`/`C`/`V` round-trip through the system clipboard, and
+the camera stands down whenever the UI is listening. Verified in Chrome under
+`BrowserWebGPU`, where the same keystrokes produce the same picture, Tab stays
+inside the canvas instead of walking the browser's focus ring, and the console is
+clean.
+
+*On the web gap this exposed.* `winit`'s web backend calls `preventDefault()` on
+every keydown, which is what keeps Tab and Space out of the page's hands — and
+also cancels the default action that produces the browser's `paste` event. So web
+paste falls back to the async `navigator.clipboard`, which Chromium gates behind
+a permission and Firefox does not offer to web content at all. Copying *out*
+works everywhere. It is the first place in this project where native and web are
+not equal, it is documented in `ARCHITECTURE.md` rather than papered over, and
+the fix is upstream.
+
+**The UI half of this slice is [UI Slice
+7](slmsttaa-ui/ROADMAP.md#slice-7--keyboard-focus-and-text-entry-done)** — focus
+traversal, keyboard-operable widgets, and the `text_field` that all of the above
+exists to feed.
 
 ### What stays in the consumer
 

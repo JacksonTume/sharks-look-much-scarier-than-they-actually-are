@@ -46,6 +46,40 @@ pub trait Application {
     /// [`Renderer::time_mut`]: Renderer::time_mut
     fn fixed_update(&mut self, _renderer: &mut Renderer, _dt: f32) {}
 
+    /// Whether the engine should quit when Escape is pressed. Defaults to `true`.
+    ///
+    /// Escape is the one key the engine interprets for itself, which is a
+    /// convenience for a demo and a problem for anything with a UI: Escape is
+    /// *the* cancel key, so a consumer with a text field to leave or a dialog to
+    /// close needs it back. Return `false` and Escape arrives in
+    /// [`Renderer::input`] like every other key — at which point
+    /// [`Renderer::request_exit`] is how you quit on whatever you choose instead.
+    ///
+    /// ```
+    /// # use slmsttaa::{Application, Key, Renderer};
+    /// # struct Demo;
+    /// impl Application for Demo {
+    ///     fn init(&mut self, _renderer: &mut Renderer) {}
+    ///
+    ///     // Escape closes the inspector; Q quits.
+    ///     fn quit_on_escape(&self) -> bool {
+    ///         false
+    ///     }
+    ///
+    ///     fn update(&mut self, renderer: &mut Renderer) {
+    ///         if renderer.input().is_key_pressed(Key::Q) {
+    ///             renderer.request_exit();
+    ///         }
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// [`Renderer::input`]: Renderer::input
+    /// [`Renderer::request_exit`]: Renderer::request_exit
+    fn quit_on_escape(&self) -> bool {
+        true
+    }
+
     /// Called every frame, just before the engine draws. Build the draw-list, the
     /// UI, and the camera here. The default does nothing.
     ///

@@ -26,16 +26,33 @@
 //! - **The UI editing the world rather than a parameter.** The inspector writes
 //!   to the selected object's transform, so the panel and the pointer are two
 //!   ways of doing the same thing.
+//! - **The keyboard reaching both.** Objects have *names*, typed into a text
+//!   field; the scene list is filtered by typing and walked with the arrows; and
+//!   Escape, Delete and mouse-4 are bound here rather than by the engine. The
+//!   camera stands down while any of that is happening, which is what
+//!   `Ui::wants_keyboard` is for — a demo with no text to type would never
+//!   discover it was needed.
 //!
 //! Run it:
 //!   native — `cargo run --example editor`
 //!   web    — `cargo xtask serve editor`
 //!
-//! Controls: **left-click** an object to select it, **left-drag** it to move it
-//! across the ground, **left-drag empty space** (or right-drag anywhere) to
-//! orbit, **scroll** to zoom.
+//! Controls:
+//!
+//! - **left-click** an object to select it, **left-drag** to move it across the
+//!   ground, **left-drag empty space** (or right-drag anywhere) to orbit,
+//!   **scroll** to zoom, **arrow keys** to orbit.
+//! - **Tab** walks the panel; **Enter**/**Space** activates what it lands on;
+//!   **arrows** nudge a focused slider and walk the scene list.
+//! - **Escape** backs out — first out of a text field, then out of the selection.
+//!   **Delete** removes the selected object; **mouse-4** deselects.
+//! - **Q** quits, because Escape no longer does (see `quit_on_escape`).
 
-use slmsttaa::ui::{Anchor, Theme, Variant};
+use slmsttaa::ui::{anim, font, Anchor, Theme, Ui, Variant};
+// The toolkit declares its own key enum — it depends on nothing, including on
+// the engine — so a demo that reads both ends up naming both. Aliased rather
+// than hidden, because the duplication is the design and not an accident.
+use slmsttaa::ui::Key as UiKey;
 use slmsttaa::{
     run, Application, Instance, Key, Material, Mesh, MeshHandle, MouseButton, Ray, RenderMode,
     Renderer, Transform,
@@ -114,8 +131,12 @@ impl Meshes {
 /// Note what is *not* here: a mesh, a buffer, or anything the GPU has heard of.
 /// An object is a shape name, a placement, and a colour — which is why spawning
 /// and deleting them costs nothing.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Object {
+    /// What the object is called, and the only string in the demo the *user*
+    /// owns. It is why this type stopped being `Copy`, and it is the thing the
+    /// scene list is filtered by.
+    name: String,
     shape: Shape,
     position: [f32; 3],
     /// Rotation about Y only. Enough to make the box's corners visibly turn, and
@@ -269,6 +290,14 @@ struct EditorDemo {
     /// One frame of lag on that flag is invisible; one frame of lag on the whole
     /// inspector is not.
     ui_pointer: bool,
+    /// Whether the UI took the *keyboard* last frame, for the same reason and
+    /// with the same one-frame lag. When a name is being typed, the camera keys
+    /// and the shortcuts below have to stand down — otherwise typing `wasd` into
+    /// a name flies the camera and typing `delete`… does not bear thinking about.
+    ui_keyboard: bool,
+
+    /// What the scene list is filtered by. Empty shows everything.
+    filter: String,
 
     /// Orbit camera state (azimuth, elevation, range).
     yaw: f32,
@@ -289,6 +318,8 @@ impl Default for EditorDemo {
             grab: Grab::None,
             instances: Vec::new(),
             ui_pointer: false,
+            ui_keyboard: false,
+            filter: String::new(),
             yaw: 0.7,
             pitch: 0.45,
             distance: 11.0,
@@ -316,6 +347,7 @@ fn starting_scene() -> Vec<Object> {
     {
         let angle = i as f32 * std::f32::consts::TAU / 6.0;
         let mut object = Object {
+            name: format!("{} {}", shape.label(), i + 1),
             shape,
             position: [angle.cos() * 2.6, 0.0, angle.sin() * 2.6],
             yaw: angle,
@@ -391,14 +423,14 @@ impl EditorDemo {
             self.grab = match self.pick(&ray) {
                 Some(index) => {
                     self.selected = Some(index);
-                    let object = self.objects[index];
-                    let plane_y = object.position[1];
+                    let position = self.objects[index].position;
+                    let plane_y = position[1];
                     // Where on the object the pointer actually landed. Grabbing a
                     // box by its corner and having it jump so its centre is under
                     // the cursor is the single most obvious way to make direct
                     // manipulation feel wrong.
                     let offset = match Self::ray_on_plane(&ray, plane_y) {
-                        Some(p) => [object.position[0] - p[0], 0.0, object.position[2] - p[2]],
+                        Some(p) => [position[0] - p[0], 0.0, position[2] - p[2]],
                         None => [0.0; 3],
                     };
                     Grab::Move { offset, plane_y }
@@ -454,8 +486,15 @@ impl EditorDemo {
             }
         }
 
-        if let Some(object) = self.selected.and_then(|i| self.objects.get(i)).copied() {
-            self.push_selection_cage(meshes, &object);
+        // Only the placement is copied out, not the object: an `Object` owns a
+        // name now, so cloning one per frame would allocate a string per frame to
+        // draw twelve boxes that never look at it.
+        let cage = self
+            .selected
+            .and_then(|i| self.objects.get(i))
+            .map(|o| (o.position, o.yaw, o.half_extents()));
+        if let Some((position, yaw, half)) = cage {
+            self.push_selection_cage(meshes, position, yaw, half);
         }
     }
 
@@ -475,12 +514,11 @@ impl EditorDemo {
     /// colour alone, and is re-implementable by any consumer from public API —
     /// which is the test the roadmap sets before anything is pushed into the
     /// engine. Twelve extra instances of one mesh cost one draw call.
-    fn push_selection_cage(&mut self, meshes: Meshes, object: &Object) {
+    fn push_selection_cage(&mut self, meshes: Meshes, position: [f32; 3], yaw: f32, h: [f32; 3]) {
         // The object's frame: placed and turned, but *not* scaled — the extents
         // below already carry the scale, and letting it through twice would
         // square it.
-        let frame = Transform::from_position(object.position).with_rotation([0.0, object.yaw, 0.0]);
-        let h = object.half_extents();
+        let frame = Transform::from_position(position).with_rotation([0.0, yaw, 0.0]);
         let margin = CAGE_MARGIN;
         let e = [h[0] + margin, h[1] + margin, h[2] + margin];
         let bar = CAGE_THICKNESS;
@@ -508,8 +546,9 @@ impl EditorDemo {
         }
     }
 
-    /// Declare the UI. Returns whether the pointer is over a widget.
-    fn build_ui(&mut self, renderer: &mut Renderer) -> bool {
+    /// Declare the UI. Returns whether the UI took the pointer, and whether it
+    /// took the keyboard.
+    fn build_ui(&mut self, renderer: &mut Renderer) -> (bool, bool) {
         let theme = self.theme;
         let fps = self.fps;
         let count = self.objects.len();
@@ -522,6 +561,7 @@ impl EditorDemo {
         let mut duplicate = false;
         let mut delete = false;
         let mut clear = false;
+        let mut pick: Option<usize> = None;
 
         let mut ui = renderer.ui();
         ui.set_theme(theme);
@@ -551,6 +591,11 @@ impl EditorDemo {
                 Some(index) => {
                     ui.section("Selected", |ui| {
                         let object = &mut self.objects[index];
+                        // The one field in this demo whose value is a *string*,
+                        // and the reason the engine grew a keyboard at all.
+                        ui.text_field("name", &mut object.name)
+                            .placeholder("unnamed")
+                            .show();
                         let limit = GROUND * 0.5;
                         ui.slider("x", &mut object.position[0], -limit, limit)
                             .decimals(2)
@@ -600,6 +645,10 @@ impl EditorDemo {
             }
 
             ui.section("Scene", |ui| {
+                ui.text_field("filter", &mut self.filter)
+                    .placeholder("filter by name")
+                    .show();
+                pick = object_list(ui, &self.objects, &self.filter, selected);
                 clear = ui
                     .button("clear all")
                     .variant(Variant::Destructive)
@@ -626,19 +675,24 @@ impl EditorDemo {
         });
 
         let wants_pointer = ui.wants_pointer();
+        let wants_keyboard = ui.wants_keyboard();
         drop(ui);
 
         self.theme = if light { Theme::light() } else { Theme::dark() };
 
+        if let Some(index) = pick {
+            self.selected = Some(index);
+        }
         if let Some(shape) = spawn {
             self.spawn(shape);
         }
         if duplicate {
             if let Some(index) = self.selected {
-                let mut copy = self.objects[index];
+                let mut copy = self.objects[index].clone();
                 copy.position[0] += 0.9;
                 copy.position[2] += 0.9;
                 copy.hue = (copy.hue + 0.14).fract();
+                copy.name = format!("{} copy", copy.name);
                 self.objects.push(copy);
                 self.selected = Some(self.objects.len() - 1);
             }
@@ -656,7 +710,7 @@ impl EditorDemo {
             self.selected = None;
         }
 
-        wants_pointer
+        (wants_pointer, wants_keyboard)
     }
 
     /// Add an object of `shape`, placed in front of the camera so it lands where
@@ -664,6 +718,7 @@ impl EditorDemo {
     fn spawn(&mut self, shape: Shape) {
         let (sin, cos) = self.yaw.sin_cos();
         let mut object = Object {
+            name: format!("{} {}", shape.label(), self.objects.len() + 1),
             shape,
             position: [sin * 2.0, 0.0, cos * 2.0],
             yaw: 0.0,
@@ -687,10 +742,14 @@ impl EditorDemo {
         } else {
             input.scroll_delta()
         };
-        let left = input.is_key_held(Key::Left);
-        let right = input.is_key_held(Key::Right);
-        let up = input.is_key_held(Key::Up);
-        let down = input.is_key_held(Key::Down);
+        // The keys are the UI's first. Without this guard, typing a name flies
+        // the camera — and because a camera reads *held* keys rather than press
+        // edges, it would keep flying for as long as the key was down.
+        let keys = !self.ui_keyboard;
+        let left = keys && input.is_key_held(Key::Left);
+        let right = keys && input.is_key_held(Key::Right);
+        let up = keys && input.is_key_held(Key::Up);
+        let down = keys && input.is_key_held(Key::Down);
 
         if orbiting {
             self.yaw -= mdx * 0.005;
@@ -725,6 +784,125 @@ impl EditorDemo {
     }
 }
 
+/// Height of one row in the scene list, in logical points.
+const ROW_H: f32 = 22.0;
+
+/// The scene list: every object that matches `filter`, one clickable row each,
+/// walkable with the arrow keys. Returns the index of a row the user chose.
+///
+/// **This widget is not in the toolkit, and the point is that it does not have to
+/// be.** It is the `log_slider` argument again, one rung up: a row is `next_id` +
+/// `focusable` + `allocate` + `interact` + `painter`, and keyboard navigation is
+/// reading `ui.input()` and calling `ui.set_focus`. The toolkit ships no list, no
+/// table and no tree, and a consumer that wants one is not second-class.
+///
+/// The one thing it cannot do for itself is scroll the focused row into view —
+/// the offset belongs to the `scroll_area` — so the toolkit chases focus on its
+/// behalf. That is the seam earning its keep rather than a special case.
+fn object_list(
+    ui: &mut Ui,
+    objects: &[Object],
+    filter: &str,
+    selected: Option<usize>,
+) -> Option<usize> {
+    let needle = filter.to_lowercase();
+    let matching: Vec<usize> = objects
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| needle.is_empty() || o.name.to_lowercase().contains(&needle))
+        .map(|(i, _)| i)
+        .collect();
+
+    if matching.is_empty() {
+        ui.label_muted(if objects.is_empty() {
+            "empty scene"
+        } else {
+            "no matches"
+        });
+        return None;
+    }
+
+    let mut chosen = None;
+    ui.scroll_area("objects", ROW_H * 6.0, |ui| {
+        let theme = *ui.theme();
+
+        // Ids up front, in one pass, so the walk below can name a row the eye
+        // has not reached yet. `next_id` is called exactly once per row either
+        // way — what changes is that all of them are known before any is drawn.
+        let ids: Vec<u64> = matching
+            .iter()
+            .map(|index| ui.next_id(&format!("object {index}")))
+            .collect();
+
+        // Arrow keys move focus, but only when focus is already *in* the list —
+        // otherwise they belong to the camera. This is the same "who gets the
+        // input" question `wants_pointer` answers for the mouse, decided here by
+        // the consumer because the list is the consumer's.
+        let cursor = ids.iter().position(|id| Some(*id) == ui.focused());
+        if let Some(cursor) = cursor {
+            ui.capture_keyboard();
+            let mut target = cursor;
+            for event in ui.input().key_presses() {
+                match event.key {
+                    UiKey::Up => target = target.saturating_sub(1),
+                    UiKey::Down => target = (target + 1).min(ids.len() - 1),
+                    UiKey::Home => target = 0,
+                    UiKey::End => target = ids.len() - 1,
+                    UiKey::Enter => chosen = Some(matching[cursor]),
+                    _ => {}
+                }
+            }
+            if target != cursor {
+                ui.set_focus(Some(ids[target]));
+            }
+        }
+
+        for (&index, &id) in matching.iter().zip(ids.iter()) {
+            ui.focusable(id);
+            let rect = ui.allocate([0.0, ROW_H]);
+            let response = ui.interact(rect, id);
+            if response.clicked {
+                chosen = Some(index);
+            }
+
+            let is_selected = selected == Some(index);
+            let warmth = ui.animate(id, "row", if response.hovered { 1.0 } else { 0.0 });
+            let painter = ui.painter();
+            if is_selected {
+                painter.fill_rect(rect, theme.radius.sm, theme.color.selection);
+            } else if warmth > 0.0 {
+                painter.fill_rect(
+                    rect,
+                    theme.radius.sm,
+                    anim::fade(theme.color.surface, warmth),
+                );
+            }
+            if response.focused {
+                painter.stroke_rect(rect, theme.radius.sm, theme.control.ring, theme.color.ring);
+            }
+
+            // The name on the left, the index on the right — the label/value row
+            // shape, hand-built because this one has a background behind it.
+            let (px, weight) = theme.text.body.parts();
+            let gap = theme.space.gap;
+            let y = font::centered_top(rect.y, rect.h, px);
+            let name = &objects[index].name;
+            let tag = format!("#{index}");
+            let tag_w = font::text_width(&tag, px, weight);
+            painter.text(rect.x + gap, y, name, px, weight, theme.color.foreground);
+            painter.text(
+                rect.max_x() - tag_w - gap,
+                y,
+                &tag,
+                px,
+                weight,
+                theme.color.muted,
+            );
+        }
+    });
+    chosen
+}
+
 /// How far the selection cage stands off the object's bounds, and how thick its
 /// bars are, in world units.
 const CAGE_MARGIN: f32 = 0.05;
@@ -747,7 +925,44 @@ const EDGES: [(usize, f32, f32); 12] = [
     (2, 1.0, 1.0),
 ];
 
+impl EditorDemo {
+    /// The keyboard and mouse bindings this demo owns, applied only once the UI
+    /// has had its refusal.
+    ///
+    /// Every one of these is something the engine could not express before this
+    /// slice: Escape was swallowed by the event loop, Delete and `Q` were not in
+    /// the `Key` enum at all, and mouse-4 was not in `MouseButton`.
+    fn handle_shortcuts(&mut self, renderer: &mut Renderer) {
+        if self.ui_keyboard {
+            return;
+        }
+        let input = renderer.input();
+
+        // Escape backs out one level: first the UI's focus (which the toolkit
+        // consumed before we ever saw the key), then the selection.
+        if input.is_key_pressed(Key::Escape) || input.is_mouse_pressed(MouseButton::Back) {
+            self.selected = None;
+        }
+        if input.is_key_pressed(Key::Delete) || input.is_key_pressed(Key::Backspace) {
+            if let Some(index) = self.selected {
+                self.objects.remove(index);
+                self.selected = None;
+            }
+        }
+        // And because Escape no longer quits, something has to.
+        if input.is_key_pressed(Key::Q) && input.modifiers().none() {
+            renderer.request_exit();
+        }
+    }
+}
+
 impl Application for EditorDemo {
+    /// Escape belongs to the editor, not to the event loop: it clears the
+    /// inspector's focus, and then the selection. `Q` quits instead.
+    fn quit_on_escape(&self) -> bool {
+        false
+    }
+
     fn init(&mut self, renderer: &mut Renderer) {
         self.meshes = Some(Meshes {
             ground: renderer.upload_mesh(&Mesh::plane([1.0, 1.0])),
@@ -769,7 +984,8 @@ impl Application for EditorDemo {
         // selected *now* rather than the one that was selected a frame ago.
         self.handle_pointer(renderer);
         self.rebuild_instances();
-        self.ui_pointer = self.build_ui(renderer);
+        (self.ui_pointer, self.ui_keyboard) = self.build_ui(renderer);
+        self.handle_shortcuts(renderer);
         self.drive_camera(renderer);
 
         renderer.set_instances(&self.instances);

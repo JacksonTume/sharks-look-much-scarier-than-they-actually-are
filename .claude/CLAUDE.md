@@ -63,14 +63,20 @@ the browser console.
 
 ## Verifying changes
 
-Tests live in the two places that don't need a GPU: `slmsttaa-ui/tests/` (the
-zero-dependency toolkit, via the `RecordingPainter` double) and
-`src/renderer/primitives.rs` (mesh builders are pure CPU geometry). Everything
-else in the engine owns a surface or a device and is verified by building and
-looking at it.
+Tests live in the places that don't need a GPU: `slmsttaa-ui/tests/` (the
+zero-dependency toolkit, via the `RecordingPainter` double),
+`src/renderer/primitives.rs` (mesh builders are pure CPU geometry), and
+`src/input.rs` (the keyboard's press-edge, auto-repeat and event-ordering rules —
+the winit→engine translation is split from the accumulation precisely so the
+accumulation half is reachable without a window). Everything else in the engine
+owns a surface or a device and is verified by building and looking at it.
 
-Tests constrain but do not replace looking at the screen: three separate bugs (UI
-Slices 1, 3 and 5) passed the whole suite and were caught by running the demo.
+Tests constrain but do not replace looking at the screen: four separate bugs (UI
+Slices 1, 3, 5 and 7) passed the whole suite and were caught by running the demo.
+The last one is the sharpest argument for the habit — every test in the toolkit
+passed because the toolkit believed what the host told it, and the *host* was
+wrong (Windows reports `text: Some("a")` for `Ctrl+A`, so "select all" typed an
+`a`).
 The reverse also happens — two primitive bugs (an inverted pole degeneracy, a
 zero-length capsule emitting degenerate triangles) looked *fine* in a still frame
 and were caught by the outward-winding assertion. To confirm a change works:

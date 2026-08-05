@@ -11,7 +11,7 @@ use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::application::Application;
@@ -158,16 +158,7 @@ impl ApplicationHandler<Renderer> for App {
         };
 
         match event {
-            WindowEvent::CloseRequested
-            | WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        state: ElementState::Pressed,
-                        logical_key: Key::Named(NamedKey::Escape),
-                        ..
-                    },
-                ..
-            } => {
+            WindowEvent::CloseRequested => {
                 event_loop.exit();
             }
 
@@ -178,7 +169,46 @@ impl ApplicationHandler<Renderer> for App {
             // Forward input into the engine's per-frame snapshot. The consumer
             // reads it via `renderer.input()` and never sees these winit events.
             WindowEvent::KeyboardInput { event, .. } => {
+                // Escape quits — unless the consumer has claimed it. A UI wants
+                // Escape for "cancel" or "close", so `quit_on_escape` is how a
+                // consumer takes it back; `Renderer::request_exit` is then how it
+                // quits on whatever it likes instead. The default is `true`, so
+                // every demo that hasn't thought about it keeps the old
+                // behaviour, and a claimed Escape reaches `Input` like any other
+                // key rather than being swallowed here.
+                let escaped = matches!(
+                    event,
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        logical_key: Key::Named(NamedKey::Escape),
+                        ..
+                    }
+                );
+                if escaped && self.application.quit_on_escape() {
+                    event_loop.exit();
+                    return;
+                }
+                let pasting = matches!(
+                    event,
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::KeyV),
+                        ..
+                    }
+                ) && renderer.input().modifiers().command();
                 renderer.input_mut().on_keyboard(&event);
+                // A paste is turned into typing right here, so that everything
+                // downstream — the UI seam, the text field — stays unaware that
+                // clipboards exist. It is appended *after* the key event, which
+                // is the order the characters would have arrived in anyway.
+                if pasting {
+                    if let Some(text) = crate::clipboard::get() {
+                        renderer.input_mut().push_pasted(&text);
+                    }
+                }
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                renderer.input_mut().on_modifiers(&modifiers);
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 renderer.input_mut().on_mouse_button(state, button);
@@ -212,8 +242,14 @@ impl ApplicationHandler<Renderer> for App {
                 renderer.update();
                 renderer.render();
                 // The frame consumed this frame's input; clear the per-frame
-                // deltas (held keys/buttons persist).
+                // deltas and the event log (held keys/buttons persist).
                 renderer.input_mut().end_frame();
+                // A consumer that asked to quit during `update` gets its wish at
+                // the end of the frame rather than mid-way through one, so the
+                // frame it asked on is still drawn.
+                if renderer.exit_requested() {
+                    event_loop.exit();
+                }
             }
 
             _ => {}

@@ -8,6 +8,8 @@
 mod button;
 mod slider;
 mod text;
+mod text_field;
 
 pub use button::Button;
 pub use slider::{Slider, SliderLayout};
+pub use text_field::TextField;

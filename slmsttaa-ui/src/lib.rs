@@ -97,11 +97,11 @@ pub mod theme;
 mod widgets;
 
 pub use font::Weight;
-pub use interact::{Response, UiInput, UiState};
+pub use interact::{Event, Key, KeyEvent, Modifiers, Response, UiInput, UiState};
 pub use layout::Rect;
 pub use painter::{Color, DrawCmd, Layer, Painter, RecordingPainter};
 pub use theme::{Motion, Size, Theme, TypeStep, Variant};
-pub use widgets::{Button, Slider, SliderLayout};
+pub use widgets::{Button, Slider, SliderLayout, TextField};
 
 use layout::{Dir, Region};
 
@@ -172,7 +172,7 @@ struct Scope {
 /// [`Ui::wants_pointer`] answer for all of them at once.
 pub struct Ui<'a> {
     painter: &'a mut dyn Painter,
-    input: UiInput,
+    input: UiInput<'a>,
     state: &'a mut UiState,
     /// Every token the widgets style themselves from. Copied by value into each
     /// widget that needs it, which is why it is [`Copy`].
@@ -188,6 +188,16 @@ pub struct Ui<'a> {
     panels: Vec<Rect>,
     /// Whether any value-editing widget changed a bound value this frame.
     changed: bool,
+    /// Whether the UI is eating the keyboard this frame, for
+    /// [`Ui::wants_keyboard`].
+    keyboard: bool,
+    /// Where the focused widget was declared this frame, if it has been yet.
+    focused_rect: Option<Rect>,
+    /// Whether focus moved *without* the pointer this frame — Tab, or a
+    /// consumer's [`Ui::set_focus`]. A scroll area only chases focus when this is
+    /// set: a click already proves the widget was visible, and chasing on every
+    /// frame would drag the view back the instant the wheel moved it.
+    focus_moved: bool,
 }
 
 impl<'a> Ui<'a> {
@@ -207,7 +217,13 @@ impl<'a> Ui<'a> {
     ///
     /// The frame starts on [`Theme::dark`]; a consumer with its own theme calls
     /// [`Ui::set_theme`] next.
-    pub fn new(painter: &'a mut dyn Painter, input: UiInput, state: &'a mut UiState) -> Self {
+    ///
+    /// **Focus moves here, before a single widget is declared.** Tab and Escape
+    /// are resolved against the tab ring *last* frame recorded, which is the same
+    /// trick [`Ui::scroll_area`] uses on the wheel: act on last frame's
+    /// measurement and the result lands on this frame's screen rather than the
+    /// next one. Tabbing onto a button rings it immediately.
+    pub fn new(painter: &'a mut dyn Painter, input: UiInput<'a>, state: &'a mut UiState) -> Self {
         // `hot` is recomputed from scratch every frame; `active` and `focused`
         // deliberately persist.
         state.hot = None;
@@ -215,6 +231,33 @@ impl<'a> Ui<'a> {
         // declared, so the slot list is bounded by what is on screen.
         state.begin_frame();
         painter.set_layer(Layer::Panel);
+
+        let mut keyboard = false;
+        let mut focus_moved = false;
+        for event in input.key_presses() {
+            match event.key {
+                // Shift-Tab walks the ring backwards. Any other modifier is
+                // somebody else's shortcut and is left alone.
+                Key::Tab if !event.modifiers.ctrl && !event.modifiers.alt => {
+                    state.step_focus(!event.modifiers.shift);
+                    keyboard = true;
+                    focus_moved = true;
+                }
+                // Escape gives focus up. Consumed only when there was focus to
+                // give up, so a consumer's own Escape binding still fires when
+                // the UI has nothing to cancel — which is what makes "Escape
+                // leaves the field, Escape again deselects" work without either
+                // side knowing about the other.
+                Key::Escape if state.focused.is_some() => {
+                    state.focused = None;
+                    keyboard = true;
+                }
+                _ => {}
+            }
+        }
+        // Last frame's ring has served its purpose; this frame refills it as
+        // widgets declare themselves focusable.
+        state.focus_order.clear();
 
         let (vw, vh) = input.viewport;
         Self {
@@ -230,6 +273,9 @@ impl<'a> Ui<'a> {
             next_size: None,
             panels: Vec::new(),
             changed: false,
+            keyboard,
+            focused_rect: None,
+            focus_moved,
         }
     }
 
@@ -245,6 +291,76 @@ impl<'a> Ui<'a> {
             return true;
         }
         self.panels.iter().any(|rect| self.input.hits(*rect))
+    }
+
+    /// Whether the UI is consuming the keyboard this frame, so the consumer can
+    /// suppress its own key handling — the counterpart to [`Ui::wants_pointer`],
+    /// and just as coarse.
+    ///
+    /// It is `true` when a widget that binds keys *continuously* holds focus — a
+    /// [`text_field`](Ui::text_field) being typed into, or a
+    /// [`slider`](Ui::slider) the arrows would nudge — and on any frame a widget
+    /// actually acted on a key. A focused button does **not** claim it just by
+    /// being focused, because all it binds is Enter and Space; it claims it on
+    /// the frame one of those arrives.
+    ///
+    /// The distinction is not fussiness. A camera reads *held* keys, so a focused
+    /// text field has to suppress it on every frame, not only the frames a key
+    /// went down — otherwise holding `W` both types `w` and flies the camera.
+    ///
+    /// ```
+    /// # use slmsttaa_ui::{Anchor, RecordingPainter, Theme, Ui, UiInput, UiState};
+    /// # let (mut p, mut s) = (RecordingPainter::default(), UiState::default());
+    /// # let mut ui = Ui::new(&mut p, UiInput::default(), &mut s);
+    /// # let mut name = String::new();
+    /// ui.panel(Anchor::TopLeft, Theme::default().panel_w, |ui| {
+    ///     ui.text_field("name", &mut name).show();
+    /// });
+    /// if !ui.wants_keyboard() {
+    ///     // Drive the camera, delete the selection, quit — whatever the
+    ///     // consumer binds. The UI got first refusal.
+    /// }
+    /// ```
+    pub fn wants_keyboard(&self) -> bool {
+        self.keyboard
+    }
+
+    /// Declare that this widget is consuming the keyboard this frame, so
+    /// [`Ui::wants_keyboard`] reports it.
+    ///
+    /// Part of the unprivileged seam: a consumer's own keyboard-driven widget
+    /// says so the same way the built-in ones do.
+    pub fn capture_keyboard(&mut self) {
+        self.keyboard = true;
+    }
+
+    /// Add `id` to this frame's tab ring, so Tab and Shift-Tab can walk onto it.
+    ///
+    /// Call it before [`Ui::interact`], once per focusable widget, in the order
+    /// they should be visited — which is declaration order, and the only thing in
+    /// this crate that depends on position. Widgets that are not interactive
+    /// (labels, separators) leave it alone; a tab ring that stopped on every
+    /// label would be useless.
+    pub fn focusable(&mut self, id: u64) {
+        self.state.focus_order.push(id);
+    }
+
+    /// Which widget currently holds focus, if any.
+    pub fn focused(&self) -> Option<u64> {
+        self.state.focused
+    }
+
+    /// Move focus, or clear it with `None`.
+    ///
+    /// The toolkit does this on a click and on Tab; a consumer reaches for it to
+    /// focus a search box on open, or to hand focus to a list it is walking with
+    /// the arrow keys.
+    pub fn set_focus(&mut self, id: Option<u64>) {
+        self.state.focused = id;
+        // Counts as a keyboard-driven move, so an enclosing scroll area brings
+        // the newly focused row into view. A consumer setting focus is doing
+        // exactly what Tab does.
+        self.focus_moved = true;
     }
 
     /// Whether any value-editing widget changed a bound value this frame — the
@@ -338,6 +454,11 @@ impl<'a> Ui<'a> {
         if hovered {
             self.state.hot = Some(id);
         }
+        if self.state.focused == Some(id) {
+            // Recorded so an enclosing `scroll_area` can bring it into view when
+            // the keyboard put focus here — see `Ui::focus_moved`.
+            self.focused_rect = Some(rect);
+        }
 
         let clicked = hovered && self.input.primary_pressed;
         if clicked {
@@ -361,6 +482,7 @@ impl<'a> Ui<'a> {
             clicked,
             focused: self.state.focused == Some(id),
             changed: false,
+            submitted: false,
             open: true,
         }
     }
@@ -497,9 +619,10 @@ impl<'a> Ui<'a> {
         self.input.hits(rect)
     }
 
-    /// This frame's pointer state, for a widget that needs the raw cursor —
-    /// a slider mapping the cursor's x onto its track, for instance.
-    pub fn input(&self) -> UiInput {
+    /// This frame's pointer and keyboard state, for a widget that needs the raw
+    /// cursor — a slider mapping the cursor's x onto its track — or the raw key
+    /// log.
+    pub fn input(&self) -> UiInput<'a> {
         self.input
     }
 
@@ -844,6 +967,7 @@ impl<'a> Ui<'a> {
         // narrower region could *grow* the content height, which would toggle the
         // bar on and off forever.
         let gutter = self.theme.control.scrollbar_w + self.theme.space.gap;
+        let focused_before = self.focused_rect.is_some();
         self.painter.push_clip(viewport);
         self.regions.push(Region::vertical(Rect::new(
             line.x,
@@ -858,6 +982,29 @@ impl<'a> Ui<'a> {
             .expect("scroll area pushed a region")
             .consumed_height();
         self.painter.pop_clip();
+
+        // If the keyboard just put focus on a row inside here, chase it. Without
+        // this a tab ring is only usable as far as the first screenful, which
+        // makes "walk a long list from the keyboard" quietly not work — and the
+        // list is exactly what a scroll area is for.
+        if self.focus_moved && !focused_before {
+            if let Some(rect) = self.focused_rect {
+                let scrolled = if rect.y < viewport.y {
+                    Some(target - (viewport.y - rect.y))
+                } else if rect.max_y() > viewport.max_y() {
+                    Some(target + (rect.max_y() - viewport.max_y()))
+                } else {
+                    None
+                };
+                if let Some(scrolled) = scrolled {
+                    // The contents were already placed at the old offset, so this
+                    // lands next frame — and glides there, because what is drawn
+                    // eases toward the stored target rather than snapping to it.
+                    self.state
+                        .set_scroll_offset(id, scrolled.clamp(0.0, max_offset));
+                }
+            }
+        }
 
         // Remember what the contents measured, and leave the cursor just below
         // the viewport so whatever follows isn't overlapped.

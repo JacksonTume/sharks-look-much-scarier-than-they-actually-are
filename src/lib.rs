@@ -11,6 +11,8 @@
 //! - [`renderer`] — the wgpu device/surface/pipeline plumbing.
 //! - [`camera`]  — a minimal perspective camera producing a view-projection matrix.
 //! - [`input`]   — per-frame keyboard/mouse state, decoupled from winit.
+//! - `clipboard` — the system clipboard, engine-internal: the UI toolkit has no
+//!   dependencies to reach one with, so the engine carries the text for it.
 //! - [`time`]    — a cross-platform frame clock (delta time) and the
 //!   fixed-timestep [`Timeline`] that drives `Application::fixed_update`.
 //! - [`ui`]      — the immediate-mode UI toolkit, re-exported from the separate
@@ -23,6 +25,7 @@
 pub mod app;
 pub mod application;
 pub mod camera;
+mod clipboard;
 pub mod input;
 pub mod renderer;
 pub mod time;

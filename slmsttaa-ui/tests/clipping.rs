@@ -16,7 +16,7 @@ const CONTENT_X: f32 = MARGIN + PAD;
 const ROW_H: f32 = 24.0;
 
 /// A pointer parked over the panel, scrolling by `notches`.
-fn wheel(notches: f32) -> UiInput {
+fn wheel(notches: f32) -> UiInput<'static> {
     UiInput {
         cursor: Some((CONTENT_X + 10.0, MARGIN + PAD + 10.0)),
         scroll_delta: notches,

@@ -65,6 +65,7 @@ fn sentinel_theme() -> Theme {
     theme.color.surface = next();
     theme.color.border = next();
     theme.color.ring = next();
+    theme.color.selection = next();
     theme.color.heading = next();
     theme.color.accent = next();
     theme.color.accent_hover = next();
@@ -83,6 +84,7 @@ fn sentinel_theme() -> Theme {
 /// Declare one of everything, so a test sweeps the whole roster.
 fn every_widget(ui: &mut Ui) {
     let (mut flag, mut value) = (true, 0.5_f32);
+    let mut name = String::from("ridge");
     ui.title("Terrain");
     ui.label("plain");
     ui.label_muted("hint");
@@ -92,6 +94,7 @@ fn every_widget(ui: &mut Ui) {
         ui.slider("frequency", &mut value, 0.0, 1.0).show();
     });
     ui.checkbox("wireframe", &mut flag);
+    ui.text_field("name", &mut name).show();
     ui.button("new seed").show();
     ui.button("alps").variant(Variant::Secondary).show();
     ui.button("reset").variant(Variant::Destructive).show();
@@ -109,6 +112,7 @@ fn no_widget_draws_a_color_the_theme_did_not_supply() {
         theme.color.surface,
         theme.color.border,
         theme.color.ring,
+        theme.color.selection,
         theme.color.heading,
         theme.color.accent,
         theme.color.accent_hover,

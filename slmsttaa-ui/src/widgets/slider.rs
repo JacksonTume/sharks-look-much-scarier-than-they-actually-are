@@ -12,7 +12,17 @@
 //! closure, it got [`Slider`] in Slice 3 — a rehearsal for the
 //! [`Button`](crate::Button) builder Slice 4 generalized it into.
 
-use crate::{anim, font, Rect, Response, Ui};
+use crate::{anim, font, Key, Rect, Response, Ui};
+
+/// How much of the range one arrow press moves, and one page press.
+///
+/// The Windows slider contract, which is what a keyboard user expects: arrows
+/// nudge, Page jumps, Home and End go to the ends. Deliberately *not* a modifier
+/// on the arrows — Shift means "finer" in half the software in the world and
+/// "coarser" in the other half, and the page keys are unambiguous.
+const ARROW_STEP: f32 = 0.01;
+/// See [`ARROW_STEP`].
+const PAGE_STEP: f32 = 0.1;
 
 /// How a [`Slider`] arranges its label, value, and track.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -129,6 +139,7 @@ impl<'u, 'a, 'v> Slider<'u, 'a, 'v> {
             None => format!("{value:.decimals$}"),
         };
         let id = ui.next_id(label);
+        ui.focusable(id);
 
         let (track, mut response) = match layout {
             SliderLayout::Stacked => {
@@ -197,6 +208,38 @@ impl<'u, 'a, 'v> Slider<'u, 'a, 'v> {
                     response.changed = true;
                     ui.mark_changed();
                 }
+            }
+        }
+
+        // A focused slider claims the keyboard for as long as it holds focus,
+        // not only on the frames a key arrives. A consumer driving a camera from
+        // held arrow keys has to be suppressed continuously or the two fight.
+        if response.focused {
+            ui.capture_keyboard();
+            let mut moved = *value;
+            for event in ui.input().key_presses() {
+                moved += span
+                    * match event.key {
+                        Key::Left => -ARROW_STEP,
+                        Key::Right => ARROW_STEP,
+                        Key::PageDown => -PAGE_STEP,
+                        Key::PageUp => PAGE_STEP,
+                        Key::Home => {
+                            moved = min;
+                            continue;
+                        }
+                        Key::End => {
+                            moved = max;
+                            continue;
+                        }
+                        _ => continue,
+                    };
+            }
+            let moved = moved.clamp(min, max);
+            if (moved - *value).abs() > f32::EPSILON {
+                *value = moved;
+                response.changed = true;
+                ui.mark_changed();
             }
         }
 

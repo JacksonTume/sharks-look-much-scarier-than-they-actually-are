@@ -619,30 +619,134 @@ bugs were all assumptions (ids are ordered, labels fit, a glyph cell is its cap
 height). Adding is safer than re-deriving, and that says nothing about the next
 slice that re-derives something.
 
+## Slice 7 — Keyboard, focus, and text entry ✅ done
+
+*Roadblock:* the first one this crate has taken from a consumer other than the
+terrain demo, and the first thing that consumer could not build around.
+[`WISHLIST.md` § Input and navigation](WISHLIST.md#input-and-navigation) records
+it: a client with a route stack and three screens where **back has to be a
+button** (no Esc, no Backspace, no mouse-4), **a table cannot be walked** (no
+arrows, no Enter, no Tab) and **nothing can be typed** (no filter over a roster).
+
+The diagnosis is what made it a slice rather than a wish. That consumer had
+written its own table, its own cell alignment, its own truncation and its own
+navigation against the public seam — but *it cannot inject an input the snapshot
+has no field for*. `UiInput` carried `cursor`, `primary_held`, `primary_pressed`,
+`scroll_delta`, `viewport` and `dt`, and all three needs wanted a field that was
+not there. The engine half was on the critical path too: `Key` had eight variants
+chosen to fly a camera, and there were no modifiers, no typed characters and no
+key press edge at all.
+
+*Proof:* `examples/editor.rs` gives its objects **names**, typed into a field;
+its scene list is **filtered by typing** and **walked with the arrows**; Escape
+backs out of the field and then out of the selection; Delete removes the
+selection and mouse-4 deselects; Tab walks the whole panel and Enter activates
+what it lands on. The camera stands down while any of that is happening.
+Verified on native and on web under `BrowserWebGPU`, where the same keystrokes
+produce the same picture and Tab stays inside the canvas rather than walking the
+browser's focus ring.
+
+**What shipped, and what it cost:**
+
+- **The seam grew an ordered event log, and that is the whole design.**
+  Everything `UiInput` carried before is a *level* — what is true at the end of
+  the frame — and a text field cannot be built on levels: typing `ab` then
+  Backspace inside one frame leaves `a`, the other order leaves `ab`, and a set
+  of flags has already thrown the difference away. So `UiInput.events` is a
+  `&[Event]` the host lends for the frame. Borrowing rather than owning keeps the
+  struct `Copy` and allocation-free; the price is the lifetime parameter, which
+  is the only reason `UiInput<'a>` has one and which cost ~15 mechanical edits
+  across the test suite.
+- **Typed characters are a separate channel from `Key`, and must stay one.**
+  `Key` is physical positions, for bindings; `Event::Text` is what the platform
+  *produced*, layout and shift and dead keys already applied. Rebuilding `'A'`
+  from `Key::A` plus a shift flag is the classic way to ship something that only
+  works on a US layout.
+- **Focus became drivable, and Tab is resolved before any widget is declared.**
+  `focusable` / `focused` / `set_focus` are public — a consumer's own list is a
+  first-class member of the tab ring — and `Ui::new` walks the ring *last* frame
+  recorded, so tabbing onto a button rings it on the same frame rather than one
+  later. That is the trick `scroll_area` already used on the wheel.
+- **The tab ring is the one place position is load-bearing**, and it is not the
+  order-keyed-id bug in a hat. Ids are still `hash(scope, label)`, so a row
+  appearing above a widget cannot change its identity; all that shifts is where
+  it sits in the ring, which is what a ring *is*. `tests/keyboard.rs` asserts
+  exactly that.
+- **Every existing widget became keyboard-operable without changing its call
+  sites.** Enter or Space on a focused button or checkbox sets
+  `Response::clicked`, so every `if ui.button("x").show().clicked` in the
+  codebase gained keyboard operation for free. A focused slider takes the
+  Windows contract: arrows nudge 1%, Page jumps 10%, Home and End pin the ends.
+- **`wants_keyboard` is coarse, exactly like `wants_pointer` — and it had to be
+  *state* rather than an event.** A camera reads *held* keys, so a focused text
+  field has to suppress it on every frame, not only the frames a key went down;
+  otherwise holding `W` both types `w` and flies. A button is the other way
+  round: all it binds is Enter and Space, so it claims the keyboard only on the
+  frame it consumes one, and clicking a button does not silently kill WASD.
+- **`text_field` is the first widget that reads the log in order**, and the only
+  place in the crate that would notice it is a log. Caret, click-to-place,
+  drag-select, shift-selection, Home/End, Ctrl+A, and a horizontal scroll that
+  chases the caret. Offsets are **byte** indices moved through `char_indices`,
+  because character counts and byte indices agree right up until a name contains
+  `ō` — which the wishlist had already measured at one generated name in six.
+- **The crate still has no idea what a clipboard is.** Copy and cut leave their
+  text in `UiState` for the host to collect (`take_clipboard`); paste never
+  reaches this crate at all, because a host delivers it as ordinary
+  `Event::Text`. A zero-dependency crate has nothing to talk to an operating
+  system with, and this is what that constraint looks like taken seriously rather
+  than worked around.
+- **One new theme token, `selection`** — translucent by convention, so the glyphs
+  read through it and a second "text on selection" token is not needed. Same
+  trade `surface` already makes for the pressed scrim.
+
+**A scroll area now chases keyboard focus, and that was not in the plan.** The
+demo's list is six rows tall inside a `scroll_area`, so walking past the sixth
+row focused something nobody could see — which makes "walk a long list from the
+keyboard" quietly not work, and a list is exactly what a scroll area is *for*.
+The offset belongs to the container, so the container has to do it: `interact`
+records the focused widget's rect, and a scroll area whose contents claimed focus
+this frame nudges its target to bring it into view. It fires only when focus
+moved *without* the pointer — a click already proves the widget was visible, and
+chasing every frame would drag the view back the instant the wheel moved it.
+
+**What it exposed, and it is the fourth time this pattern has repeated.** Every
+test passed; running the demo found it. Pressing Ctrl+A in the name field
+inserted an `a`, and Ctrl+C a `c`: **Windows reports `text: Some("a")` for
+Ctrl+A**, so the platform hands you a shortcut and a keystroke at once. The fix
+is a filter on the engine's text channel — a keystroke under a shortcut modifier
+is not typing — with `Ctrl+Alt` deliberately exempt, because that is AltGr on a
+European layout and it types real characters. No test in this crate could have
+caught it: the toolkit believed what the host told it, and the host was wrong.
+
 ---
 
 ## Nothing is scheduled
 
-Slice 6 was the last one written down, and it was labeled polish. **That is the
-correct state for this crate to be in**, not a gap to fill: every slice above was
-pulled into existence by something the terrain demo couldn't do, the demo can now
-do all of it, and the list below is what a *future* consumer would have to ask for
-first.
+Slice 7 answered the only roadblock a second consumer has actually hit. **That is
+the correct state for this crate to be in**, not a gap to fill: every slice above
+was pulled into existence by something a demo couldn't do, and the list below is
+what a *future* consumer would have to ask for first.
 
 The next UI work should therefore arrive from a demo, not from this file. The
-likeliest source is engine [Slice 12](../ROADMAP.md#slice-12--fixed-timestep-clock--time-control),
-whose transport controls `scene.rs` will have to drive from somewhere — and even
-that composes from today's `button` and `slider` until it demonstrably can't.
+nearest candidates are recorded in [`WISHLIST.md`](WISHLIST.md) — virtualization,
+the sticky-header gutter, and the painter additions for charts — and none of them
+has a driver yet.
 
 ## Waiting on a roadblock
 
 Recognized but **not** scheduled — listed so they're identified when a demo
 finally demands one, not as a to-build list:
 
-- **Text input / numeric entry** — needs typed characters, modifiers, and
-  Tab/Enter/Esc, none of which the engine's 8-variant `Key` enum carries. The
-  driver would be wanting to type an exact erosion constant instead of dragging
-  for it.
+- ~~**Text input / numeric entry**~~ — **shipped in [Slice
+  7](#slice-7--keyboard-focus-and-text-entry-done)**. The predicted driver
+  (wanting to type an exact erosion constant instead of dragging for it) is *not*
+  what pulled it: a second consumer's route stack did, and the engine's 8-variant
+  `Key` enum was on the critical path exactly as this entry said it would be.
+  Terrain still drags for its constants, and is welcome to.
+- **Numeric entry proper** — a field that parses, clamps, and rejects. `text_field`
+  plus the consumer's own `parse::<f32>()` covers it today; a widget waits until
+  something wants the validation, the increment gestures, and the "what does a
+  half-typed `-` mean" answers as one piece.
 - **Select / dropdown, popover, tooltip, context menu** — unblocked by Slice 1's
   layers, but each still waits for something to actually need it. A terrain
   preset picker is the likely first.

@@ -23,7 +23,7 @@ const FRAME: f32 = 1.0 / 60.0;
 
 /// A pointer resting on the panel's first row, with `dt` seconds since the last
 /// frame.
-fn hovering(dt: f32) -> UiInput {
+fn hovering(dt: f32) -> UiInput<'static> {
     UiInput {
         cursor: Some((100.0, MARGIN + PAD + 8.0)),
         dt,
@@ -32,7 +32,7 @@ fn hovering(dt: f32) -> UiInput {
 }
 
 /// A pointer parked far away from any widget.
-fn away(dt: f32) -> UiInput {
+fn away(dt: f32) -> UiInput<'static> {
     UiInput {
         cursor: Some((900.0, 600.0)),
         dt,
@@ -41,7 +41,7 @@ fn away(dt: f32) -> UiInput {
 }
 
 /// Press the panel's first row.
-fn clicking(dt: f32) -> UiInput {
+fn clicking(dt: f32) -> UiInput<'static> {
     UiInput {
         primary_held: true,
         primary_pressed: true,

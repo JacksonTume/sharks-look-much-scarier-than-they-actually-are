@@ -13,7 +13,20 @@
 //! the trade the slider's builder already refused.
 
 use crate::theme::{Size, Variant};
-use crate::{anim, font, Rect, Response, Ui};
+use crate::{anim, font, Key, Rect, Response, Ui};
+
+/// Whether a focused control should treat this frame as an activation.
+///
+/// Enter and Space both, which is what every desktop toolkit does and what a
+/// keyboard user reaches for without thinking. Auto-repeat is filtered: holding
+/// Enter on a "delete" button should delete once, not sixty times a second.
+/// Modifiers are filtered too, so `Ctrl+Enter` stays available to a consumer.
+fn activated(ui: &Ui, focused: bool) -> bool {
+    focused
+        && ui.input().key_presses().any(|event| {
+            matches!(event.key, Key::Enter | Key::Space) && !event.repeat && event.modifiers.none()
+        })
+}
 
 /// A clickable button, configured then shown.
 ///
@@ -86,15 +99,28 @@ impl<'u, 'a> Button<'u, 'a> {
         let id = ui.next_id(label);
         // The row owns a 4-point trailing gap; the button face is the top of it.
         let face_h = size.face_height(&theme);
+        ui.focusable(id);
         let row = ui.allocate([0.0, face_h + 4.0]);
         let face = Rect::new(row.x, row.y, row.w, face_h);
-        let response = ui.interact(face, id);
+        let mut response = ui.interact(face, id);
+
+        // Enter or Space on a focused button *is* a click, so every existing
+        // `if ui.button("x").show().clicked` call site became keyboard-operable
+        // without being touched.
+        let by_key = activated(ui, response.focused);
+        if by_key {
+            response.clicked = true;
+            ui.capture_keyboard();
+        }
 
         // Three properties easing independently, which is why they are separate
         // slots: a button can be releasing its press while still hovered, and
         // hold its focus ring after the pointer has left entirely.
         let hover = ui.animate(id, "hover", if response.hovered { 1.0 } else { 0.0 });
-        let press = ui.animate(id, "press", if response.held { 1.0 } else { 0.0 });
+        // A keyboard activation has no held state to fade from, so it drives the
+        // press slot directly for its one frame — without which a button
+        // activated from the keyboard looks dead.
+        let press = ui.animate(id, "press", if response.held || by_key { 1.0 } else { 0.0 });
         let ring = ui.animate(id, "ring", if response.focused { 1.0 } else { 0.0 });
 
         let fill = anim::lerp(theme.fill(variant, false), theme.fill(variant, true), hover);
@@ -145,8 +171,13 @@ impl Ui<'_> {
         let (px, weight) = theme.text.body.parts();
 
         let id = self.next_id(label);
+        self.focusable(id);
         let row = self.allocate([0.0, theme.control.row_h]);
         let mut response = self.interact(row, id);
+        if activated(self, response.focused) {
+            response.clicked = true;
+            self.capture_keyboard();
+        }
 
         // The well is a square the height of the label's capitals, sitting on the
         // same cap band — so box and text line up optically instead of the box

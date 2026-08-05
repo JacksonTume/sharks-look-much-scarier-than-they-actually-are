@@ -32,10 +32,16 @@ src/
 │                     fields are there because the *fragment* stage needs them —
 │                     see Shading the 3D pass below.
 ├── input.rs          Input: per-frame keyboard/mouse state, decoupled from
-│                     winit. Exposes engine Key/MouseButton enums (never winit's);
-│                     the event loop feeds it, the consumer reads it via
-│                     Renderer::input(). Also absolute cursor position + mouse
-│                     press-edges, for screen-space UI hit-testing.
+│                     winit. Exposes engine Key/MouseButton/Modifiers types
+│                     (never winit's); the event loop feeds it, the consumer
+│                     reads it via Renderer::input(). Absolute cursor position +
+│                     press-edges for screen-space UI hit-testing, and an
+│                     *ordered* event log carrying typed characters — the one
+│                     thing a text field cannot get from a level.
+├── clipboard.rs      The system clipboard, engine-internal. arboard on native,
+│                     navigator.clipboard on the web. The UI toolkit has no
+│                     dependencies to reach one with, so the engine carries the
+│                     text for it; a paste comes back in as ordinary typing.
 ├── time.rs           Two clocks. Clock: a cross-platform frame clock
 │                     (delta-time). Native Instant; web performance.now()
 │                     (Instant panics on wasm). Surfaced as Renderer::dt().
@@ -150,17 +156,19 @@ slmsttaa-ui/          The UI toolkit, as its own zero-dependency workspace membe
 │   ├── painter.rs    Painter (the drawing seam), Layer (the four ordered draw
 │   │                 buckets), + RecordingPainter, the headless test double that
 │   │                 makes layout assertable without a GPU.
-│   ├── interact.rs   UiInput (this frame's pointer, viewport size, and dt,
-│   │                 filled in by the host), UiState (hot/active/focused,
-│   │                 collapsed sections, scroll offsets, panel rects, and the
-│   │                 eased per-widget floats), and the Response every widget
-│   │                 returns.
+│   ├── interact.rs   UiInput (this frame's pointer, keyboard log, viewport size
+│   │                 and dt, filled in by the host), the toolkit's own Key /
+│   │                 Modifiers / Event, UiState (hot/active/focused, the tab
+│   │                 ring, collapsed sections, scroll offsets, panel rects,
+│   │                 caret state, and the eased per-widget floats), and the
+│   │                 Response every widget returns.
 │   ├── layout.rs     Rect + the stack of layout regions widgets are placed in.
 │   ├── theme.rs      Theme: semantic color tokens plus the radius/spacing/type/
 │   │                 control scales, with Variant and Size. Public, so a widget
 │   │                 written by a consumer can match the built-in ones — and no
 │   │                 widget anywhere names a literal color.
-│   └── widgets/      One file per widget: text.rs, button.rs, slider.rs.
+│   └── widgets/      One file per widget: text.rs, button.rs, slider.rs,
+│                     text_field.rs.
 └── tests/            The project's only tests — layout + ids + hit-testing +
                       theming, driven against RecordingPainter. No GPU, no window,
                       no async.
@@ -226,18 +234,52 @@ The engine owns the event loop, so a consumer never touches `winit` (roadmap
 principle 1). Input is funneled instead:
 
 1. `App::window_event` maps each keyboard/mouse `WindowEvent` onto the renderer's
-   `Input` via `pub(crate)` methods (`on_keyboard`, `on_mouse_button`,
-   `on_cursor_moved`, `on_scroll`). These do the winit→engine translation, so the
-   winit types stop at the engine boundary.
-2. `Input` keeps two kinds of state: **held** keys/buttons that persist across
-   frames, and **per-frame deltas** (mouse motion, scroll) that accumulate within
-   a frame. Its public getters speak only in engine `Key`/`MouseButton` enums.
+   `Input` via `pub(crate)` methods (`on_keyboard`, `on_modifiers`,
+   `on_mouse_button`, `on_cursor_moved`, `on_scroll`). These do the winit→engine
+   translation, so the winit types stop at the engine boundary.
+2. `Input` keeps three kinds of state: **held** keys/buttons that persist across
+   frames, **per-frame deltas** (mouse motion, scroll) and **press edges** that
+   accumulate within a frame, and an ordered **event log**. Its public getters
+   speak only in engine `Key`/`MouseButton`/`Modifiers` types.
 3. The consumer reads it in `update` via `Renderer::input()` and moves the camera
    through `Renderer::camera_mut()`. The *control scheme lives in the consumer*
    (e.g. `grid.rs`'s orbit math); the engine only exposes the input and the camera.
-4. After the frame is drawn, `Input::end_frame` zeroes the per-frame deltas and
-   press-edges (held state survives), so the next `update` sees only that frame's
-   motion.
+4. After the frame is drawn, `Input::end_frame` zeroes the per-frame deltas, the
+   press-edges and the event log (held state and modifiers survive), so the next
+   `update` sees only that frame's motion.
+
+**The keyboard needed a fourth kind of state, and it is the only ordered one.**
+Everything above is a *level* — what is true at the end of the frame — and a text
+field cannot be built on levels. Typing `ab` and then pressing Backspace inside
+one frame leaves `a`; the other order leaves `ab`, and a set of flags has already
+thrown the difference away. So `Input::events()` is an ordered `Vec<Event>`,
+carrying key transitions *and* typed characters, drained each frame alongside the
+deltas. `UiInput.events` is a borrowed slice of the same log, which is what keeps
+that struct `Copy` and allocation-free.
+
+**Typed characters are a separate channel from `Key`, and must stay that way.**
+`Key` is physical positions, for bindings; `Event::Text` is what the keystroke
+*produced*, with the layout, shift state and any dead-key composition already
+applied by the platform. Rebuilding `'A'` from `Key::A` plus a shift flag is the
+classic way to ship software that only works on a US layout. Two filters sit on
+that channel, both found by running the demo rather than by reasoning:
+
+- **Control characters are dropped.** `winit` reports `"\r"` for Enter and `"\t"`
+  for Tab in the same `text` field it reports real characters in, on *both*
+  targets.
+- **A keystroke under a shortcut modifier is not typing.** Windows reports
+  `text: Some("a")` for `Ctrl+A`, so pressing "select all" in a text field
+  inserted an `a`. `Ctrl+Alt` is deliberately exempt — that combination is AltGr
+  on a European layout and types real characters.
+
+**Escape is the one key the engine interprets, and a consumer can take it back.**
+`Application::quit_on_escape()` defaults to `true`, which is why every demo that
+has not thought about it still closes on Escape. A consumer with a UI returns
+`false`, gets Escape delivered like any other key, and quits through
+`Renderer::request_exit()` instead — a flag the loop honours at the *end* of the
+frame, so the frame it was asked on is still drawn. `examples/editor.rs` is the
+consumer that needed this: Escape there leaves a text field, and then clears the
+selection.
 
 **Input also goes the other way, from a pixel back into the world.**
 `Renderer::pointer_ray()` unprojects the cursor into a world-space `Ray`
@@ -483,8 +525,24 @@ render graph will eventually grow. The design holds two boundaries at once:
   snapshot and `Renderer::ui()` fills one in each frame from this frame's `Input`,
   the surface size (so a panel can anchor to a window edge without the toolkit
   ever learning what a window is), and `Renderer::dt` (so its hover fades and
-  collapse transitions run on our clock without it owning one). Five field
-  assignments buys a UI crate with no dependencies at all.
+  collapse transitions run on our clock without it owning one). Seven field
+  assignments and one `match` buys a UI crate with no dependencies at all.
+
+  The `match` is the keyboard. `slmsttaa_ui` declares its **own** `Key`,
+  `Modifiers` and `Event`, and `Renderer::ui()` restates this frame's log in them
+  into a buffer it reuses. Two identical enums is the visible cost of the rule
+  that the toolkit imports nothing, and the alternative — declaring `Key` in the
+  leaf crate and re-exporting it from the engine — would make the UI toolkit the
+  owner of the engine's keyboard vocabulary. The `match` is exhaustive, so a
+  variant added to either side is a compile error rather than a key that quietly
+  stops working.
+
+  **The clipboard crosses the same seam, in both directions, and neither is a
+  `Painter` method.** Outbound, a copy leaves its text in `UiState` and
+  `Renderer::update` collects it once a frame (`src/clipboard.rs`). Inbound there
+  is no seam at all: `App::window_event` sees `Ctrl+V`, reads the clipboard, and
+  pushes the characters into `Input` as if they had been typed — so nothing
+  downstream of the event loop knows what a clipboard is.
 
   What lives on *this* side of the seam is the part that touches the GPU: the
   overlay pipeline, the glyph atlas, the 2D vertex format, and draw ordering. So
@@ -558,6 +616,28 @@ These are subtle and easy to reintroduce, so they're documented here:
   size when the async renderer arrives** — the `Resized` event usually fires
   before GPU init finishes, so it'd otherwise be missed. Symptom if wrong: a
   single stretched pixel (a flat color filling the page).
+
+- **The browser's clipboard `paste` event is unreachable, and that is `winit`'s
+  doing.** The reliable way to receive a paste on the web is the document's own
+  `paste` event — but the web backend calls `event.prevent_default()` on *every*
+  keydown (`platform_impl/web/web_sys/canvas.rs`), which cancels the default
+  action that would have produced it. Turning that off is not an option either:
+  it is what stops Tab from walking the page's focus ring and Space from
+  scrolling it, both of which the UI binds. So `src/clipboard.rs` uses the async
+  `navigator.clipboard` API instead, and the result is honestly asymmetric —
+  **copying out works everywhere** (`writeText` needs no permission inside a user
+  gesture), **pasting in is best-effort** (`readText` is permission-gated on
+  Chromium and unavailable to web content in Firefox, and its answer is a promise
+  that cannot arrive on the frame the key was pressed). The web path therefore
+  answers from a cache and refreshes it in the background: pasting text this page
+  copied always works, and pasting from outside the page works on the second
+  attempt where the browser allows it at all. Native has none of this — `arboard`
+  is synchronous and complete.
+
+- **Keyboard events need the canvas to have focus.** winit sets `tabindex="0"` on
+  it and focuses it on pointer-down, so a click anywhere in the page is enough —
+  but a freshly loaded page that has never been clicked may not receive keys.
+  Worth knowing before concluding that key handling is broken on the web.
 
 - **Backend selection differs.** `Backends::PRIMARY` excludes GL, so on the web
   it's WebGPU-only. We request `BROWSER_WEBGPU | GL` on wasm so a WebGL2 fallback
