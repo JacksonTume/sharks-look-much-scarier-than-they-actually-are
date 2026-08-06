@@ -89,8 +89,10 @@ src/
     │                 perturbs the normal per pixel, and — in the second entry
     │                 point, fs_water — refraction and the screen-space
     │                 reflection trace.
-    ├── fullscreen.wgsl  The two fullscreen-triangle passes: the sky, and the
-    │                 composite that copies the offscreen scene to the swapchain.
+    ├── fullscreen.wgsl  The fullscreen-triangle passes: the sky, and the
+    │                 composite — used twice, once to move the opaque scene off
+    │                 the texture the water samples, and again to blit the
+    │                 finished scene onto the swapchain under a viewport.
     ├── overlay.rs    Overlay: the screen-space 2D pass (UI/HUD). Owns its own
     │                 pipeline and dynamic 2D buffers, and uploads the *toolkit's*
     │                 glyph atlas; implements ui::Painter. Drawn after the 3D pass
@@ -169,6 +171,10 @@ xtask/                Dev tooling (a separate workspace member, no deps). `cargo
 └── src/main.rs       xtask serve [example]` builds the example natively and for
                       wasm, runs wasm-bindgen into web/pkg/ as app.js, and serves
                       web/ from a built-in static server. No Python required.
+                      `cargo xtask shoot [example]` starts its own Xvfb, runs the
+                      example against it, and photographs the window at exact
+                      frame numbers — optionally clicking things in between.
+                      See ROADMAP.md, "The harness".
 ```
 
 ## Frame lifecycle
@@ -204,15 +210,21 @@ xtask/                Dev tooling (a separate workspace member, no deps). `cargo
    2. **opaque** — the opaque half of the draw-list into `scene color` +
       `scene depth`, one instanced `draw_indexed` per mesh, depth-tested and
       back-face culled.
-   3. **composite** — a fullscreen copy of `scene color` onto the swapchain.
+   3. **composite** — a fullscreen copy of `scene color` into `scene blend`.
       Exists only because a texture cannot be an attachment and a sampled input
       at once, and the water has to sample the scene it is drawn over.
-   4. **blended** — the transparent half of the draw-list onto the swapchain,
+   4. **blended** — the transparent half of the draw-list onto `scene blend`,
       sampling `scene color` and `scene depth` for refraction and screen-space
       reflection, with depth **read-only** so testing and sampling the same
       texture is legal.
-   5. **overlay** — load, not clear → the accumulated 2D UI, ignoring depth and
-      alpha-blending on top.
+   5. **present** — a fullscreen blit of `scene blend` onto the swapchain, under
+      a viewport. The only pass that knows *where on the window* the scene goes,
+      and the only one that touches the swapchain before the UI. Its load-op
+      clear is what fills the window around an inset scene. See
+      `Renderer::set_scene_rect`.
+   6. **overlay** — load, not clear → the accumulated 2D UI, ignoring depth and
+      alpha-blending on top. Always the whole window, never inset: the UI frames
+      the scene rather than living inside it.
 
    Then it presents, and `Input::end_frame` clears the per-frame
    deltas/press-edges. In `RenderMode::Wireframe` the opaque pass draws *every*
@@ -310,9 +322,11 @@ hand-written sequence was exactly the right amount of machinery.
   blended pass must follow the opaque pass because it reads what the opaque pass
   wrote" is a different kind of statement, and it was previously enforced by
   nothing.
-- **Three attachments now have to track the surface size.** The one-attachment
-  version of this is already a gotcha below, learned the hard way. Centralizing it
-  turns three places to forget into one call.
+- **Four attachments now have to track the scene's rectangle.** The
+  one-attachment version of this is already a gotcha below, learned the hard way.
+  Centralizing it turns four places to forget into one call — and Slice 18 then
+  changed the *number* they track from the surface size to the scene rect without
+  touching any of them, which is the graph earning its keep.
 
 **The rule worth knowing before adding a pass** is the difference between the two
 kinds of edge, because getting it wrong does not schedule:
@@ -331,19 +345,64 @@ kinds of edge, because getting it wrong does not schedule:
 to. `RenderGraph::build` rejects a pass that reads and writes the same resource
 outright. This is the obvious mistake when the water wants "the scene behind me"
 and the scene is right there, and it is why the composite pass exists: the opaque
-scene must be copied to the swapchain before the water can draw over it while
-reading it. Depth is the deliberate exception — the blended pass samples the same
-depth texture it tests against, which is legal precisely because it declares that
-it does not *write* it, and gets a read-only attachment as a result.
+scene must be copied to a second offscreen target before the water can draw over
+it while reading it. Depth is the deliberate exception — the blended pass samples
+the same depth texture it tests against, which is legal precisely because it
+declares that it does not *write* it, and gets a read-only attachment as a result.
+
+### Where the scene goes (Slice 18)
+
+`Renderer::set_scene_rect` inserts a rectangle between the frame and the window,
+and the reason it costs so little is one invariant, worth stating because
+breaking it is silent:
+
+> **The offscreen targets' extent *is* the camera's NDC frame.** A UV of `[0,1]`
+> means both "the whole texture" and "the whole picture", and those must stay the
+> same sentence.
+
+`shader.wgsl` leans on it in five places, not one — `project()` returns a UV from
+NDC, `depth_at()` indexes a texture with that UV, `world_from_depth()` reads a UV
+back as NDC, `edge_fade()` calls UV 0 and 1 "the edge of frame", and `fs_water`
+derives its screen UV from the fragment's pixel position. Size the targets to the
+rect and all five stay literally true, which is why the slice edited no shader at
+all. Size them to the *surface* and rasterize into a sub-rect instead — the
+obvious cheaper move — and they split into two disagreeing coordinate spaces: the
+refraction samples an offset texel and the reflection marches across the wrong
+part of the depth buffer, both of which look plausible and neither of which is
+right.
+
+Two consequences fall out of that choice:
+
+- The blended pass had to leave the swapchain. Its depth attachment is now
+  rect-sized while the swapchain is window-sized, and wgpu requires every
+  attachment in a pass to share dimensions (`AttachmentsDimensionMismatch`). So it
+  writes `scene blend`, and a sixth pass blits that to the swapchain.
+- `set_scene_rect` takes **logical points**, not pixels, because the caller gets
+  the rect from a UI layout and `scale_factor()` is private on purpose. The
+  points→pixels conversion rounds the rect's *edges* rather than its origin and
+  size — rounding those independently lets the right edge drift a pixel as the
+  rect moves, which is a seam between a panel and the scene beside it. It is
+  resolved once into a stored `[u32; 4]` that the texture size, the viewport call,
+  the camera aspect and `pointer_ray` all read, so they cannot disagree by half a
+  pixel. Integers also sidestep the WebGPU spec's licence to round a fractional
+  viewport "to some uniform precision" however an implementation likes.
+
+**`scene_rect()` is an output; do not lay out against it.** Feeding it back in is
+a loop that shrinks the pane every frame until it hits the one-pixel clamp — which
+is exactly what the first run of `examples/workspace.rs` did, on screen, with a
+green test suite. `window_size()` is the input: the window in points, which does
+not move when the scene is inset.
 
 **It is not a general-purpose render graph.** No transient-memory aliasing, no
 barrier insertion (wgpu does that), and **no way for a consumer to add a pass**:
 the module is `pub(crate)` and `PassKind` is a closed enum. The roadmap's trigger
 for a *public* graph is a second consumer wanting its own pass, and there still
-isn't one — what pulled this in was the engine's own fourth pass. The nearest
-real candidate is the UI wishlist's "3D scene as a panel", which is now half-built
-(the offscreen texture and the fullscreen composite both exist; it needs the
-composite to target an arbitrary rect).
+isn't one — what pulled this in was the engine's own fourth pass. The candidate
+that used to be named here, the UI wishlist's "3D scene as a panel", **landed in
+Slice 18** and needed no such thing: it cost one resource, one `PassKind`, and one
+`set_viewport` call, all above a graph that did not move. A demand absorbed by
+declaring a pass rather than by opening the module is the best evidence so far
+that the seam is drawn in the right place.
 
 ## Shading the 3D pass
 
@@ -602,10 +661,14 @@ These are subtle and easy to reintroduce, so they're documented here:
   colour) has to be converted; anything multiplied into existing shading does not
   care.
 
-- **Every attachment must track the surface size.** Depth and colour attachments
-  have to share dimensions, so the offscreen textures are recreated in `resize()`
-  alongside the surface reconfigure — and because the web's async-renderer resync
-  funnels through `resize()` too, that path is covered without a special case.
+- **Every attachment must track the scene's rectangle.** Depth and colour
+  attachments have to share dimensions, so the offscreen textures are recreated
+  in `resize()` alongside the surface reconfigure — and because the web's
+  async-renderer resync funnels through `resize()` too, that path is covered
+  without a special case. Since Slice 18 that rectangle is the scene's, not the
+  window's, and both `resize()` and `set_scene_rect()` route through one private
+  `sync_scene_rect()` so they cannot disagree; it re-allocates only when the
+  *size* changed, so a pane that merely moves is free.
   This is now `graph.resize()` rather than one call per texture, which is half of
   why the graph exists. **A bind group holding those views must be rebuilt too**,
   since re-allocation replaces them; wgpu catches a stale one, but only when the
@@ -680,8 +743,8 @@ These are subtle and easy to reintroduce, so they're documented here:
 
 ## Performance posture
 
-- One command encoder per frame, now with five render passes (sky, opaque,
-  composite, blended, overlay). Two of those are fullscreen triangles rather than
+- One command encoder per frame, now with six render passes (sky, opaque,
+  composite, blended, present, overlay). Three of those are fullscreen triangles rather than
   quads — a quad has a diagonal seam where its triangles meet, and fragments along
   it get shaded twice.
 - **The offscreen detour is not free, and it measured as free.** Terrain holds
@@ -720,13 +783,14 @@ These are subtle and easy to reintroduce, so they're documented here:
 The scaffold leaves obvious seams:
 
 - **MSAA** (`multisample` is currently the 1-sample default).
-- **A composite into an arbitrary rect**, so the 3D scene is one panel among many
-  rather than a fullscreen background with UI over it. This is the nearest thing
-  to a scheduled item here, because Slice 16 built most of it by accident: the
-  scene already renders to an offscreen texture and is already composited by a
-  fullscreen triangle. What remains is letting that triangle target a rect the UI
-  chooses. Its consumer (The Matchmaker, via the [UI
-  wishlist](slmsttaa-ui/WISHLIST.md)) is real but has not hit the wall yet.
+- ~~**A composite into an arbitrary rect**~~ — **landed as Slice 18**, driven by
+  `examples/workspace.rs`. Worth keeping the entry for what it got wrong: it said
+  "what remains is letting that triangle target a rect the UI chooses", which is
+  true and is about a fifth of the work. It did not see that the offscreen targets
+  would have to shrink to the rect (because the water's screen-space math assumes
+  the texture's extent *is* the camera's frame), that shrinking them would evict
+  the blended pass from the swapchain, or that `pointer_ray` had been unprojecting
+  through the wrong rectangle since Slice 17.
 - **A public render graph.** The internal one landed in Slice 16; opening it to
   consumer-authored passes is a different question and still waits for a consumer
   that wants one. Doing it means replacing the closed `PassKind` with something

@@ -705,7 +705,44 @@ finally demands one, not as a to-build list:
   frozen. It stays on this list. What would actually move it is the thing already
   named above — markers along the track — and terrain has a natural candidate
   (where the lakes finish draining) that it has not asked for.
-- **Draggable / resizable / dockable panels** — no.
+- **Golden-file layout snapshots.** `RecordingPainter` already records every
+  primitive a frame draws, with the clip in force — which is a serialisable
+  description of a screen, and `WISHLIST.md` already advertises exactly this to a
+  consumer whose engineering culture is golden files. Writing one to disk and
+  diffing it would catch a layout regression with no GPU, no window and no image,
+  and would say *which widget* moved rather than which pixels did. The engine
+  grew image capture in `cargo xtask shoot`
+  ([engine *The harness*](../ROADMAP.md#the-harness)); this is the half of the
+  same idea that belongs up here, and is plausibly the higher-value half per line
+  written. Nothing has demanded it: the existing tests assert against the
+  recorder directly, and until a screen is too big to assert by hand that is
+  enough.
+- **A `RecordingPainter` that a capture script can reach.** The harness drives the
+  toolkit only through the pointer, so a widget with no visible effect on a
+  screenshot is invisible to it. Nothing has needed more yet, and the honest note
+  is that three of the four bugs this crate found by running the demo *were*
+  visible ones.
+- **A content region — `Ui::remaining()`** — the space a layout has left after its
+  panels. **Asked for once, declined once, and the reason is that the demo's own
+  arithmetic is better.** Engine [Slice
+  18](../ROADMAP.md#slice-18--the-scene-as-a-panel-among-panels-done) let a
+  consumer put the 3D scene in a rectangle, and `examples/workspace.rs` needs to
+  know which rectangle. It computes one from `Theme::space.margin` and its own two
+  panel widths — four lines, exact, no lag. A generic version would be worse in
+  three specific ways: panels here are corner-anchored floaters that reserve
+  nothing, so "what is left" is only a bounding-box guess; it could only answer
+  after every panel had closed; and a bottom-anchored panel's height carries the
+  one-frame measurement lag documented under `Anchor`, which for a *scene* rect
+  means a texture re-allocation on the settling frame. A second consumer wanting
+  it — one whose panel set is dynamic enough that the arithmetic stops being
+  writable — is what would move this.
+- **Draggable / resizable / dockable panels** — still no, and Slice 18 is the
+  closest anything has come to arguing otherwise. A workspace demo makes splitter
+  handles look like the obvious next thing, and `set_scene_rect` takes a new
+  rectangle every frame for free, so the engine half is already there. The
+  toolkit half is not, and this stays a "no" until a consumer is blocked rather
+  than tempted. Recorded because the temptation is now concrete instead of
+  theoretical.
 - **A retained-mode widget tree** — explicitly not the destination (root
   principle 2). The toolkit stays immediate-mode with minimal persistent state.
 
@@ -716,6 +753,14 @@ than a parameter panel over a 3D scene, and the terrain demo will never surface
 those walls. They are catalogued in [`WISHLIST.md`](WISHLIST.md) — recognized, not
 scheduled. Items graduate from there into the slices above only when a consumer
 names the roadblock.
+
+One item from that file has since **landed on the engine side**: a scene rendered
+into a UI rectangle, as [engine Slice
+18](../ROADMAP.md#slice-18--the-scene-as-a-panel-among-panels-done). It cost this
+crate nothing at all — no `Painter` method, no `UiInput` field, no widget — and
+nothing in the slices above moves. What it did surface is one new entry on
+*Waiting on a roadblock*, `Ui::remaining()`, filed there as declined with its
+reason rather than as a gap.
 
 That consumer has since asked for a **renderer** as well as a UI, and the engine
 half of the answer is now sequenced: [engine Slices

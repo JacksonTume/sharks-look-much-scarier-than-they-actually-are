@@ -7,6 +7,12 @@
 # Reference papers / PDFs consulted while building (not redistributable)
 /reference
 
+# Screenshots from `cargo xtask shoot`. The scripts that produce them are
+# tracked; the images are not, because nothing yet compares a run against a
+# committed reference — see ROADMAP.md, "The harness".
+/capture/*
+!/capture/*.script
+
 # Editor / OS noise
 *.swp
 *.swo

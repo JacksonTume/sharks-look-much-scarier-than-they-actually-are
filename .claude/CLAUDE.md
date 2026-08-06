@@ -32,6 +32,7 @@ UI-shaped — and see the placement rule under *Conventions*.
 ```sh
 # Native
 cargo run --example terrain            # the capstone: layered Perlin + stream-power erosion
+cargo run --example workspace          # the scene inset in a UI pane (set_scene_rect)
 cargo run --example editor             # click/drag to pick and move objects (pointer_ray)
 cargo run --example scene              # articulated figures (instancing, material, primitives)
 cargo run --example triangle           # the smallest consumer (Esc / close to quit)
@@ -49,6 +50,13 @@ cargo xtask serve cube                 # a specific example; also --release / --
 # `cargo xtask serve` wraps: build the example for wasm, run wasm-bindgen into
 # web/pkg/ as app.js, and serve web/ from a built-in static server (xtask/).
 
+# Photograph a demo, deterministically — the mechanical half of "run it and look
+# at it". Needs Xvfb + ImageMagick + xdotool (the session-start hook installs
+# them). Output lands in capture/ and is gitignored.
+cargo xtask shoot workspace                    # one PNG at frame 120
+cargo xtask shoot terrain --frames 400 --size 1280x720
+cargo xtask shoot workspace --script capture/workspace.script   # clicks between shots
+
 # Type-check the wasm target without packaging
 cargo build --target wasm32-unknown-unknown --lib
 
@@ -63,10 +71,12 @@ the browser console.
 
 ## Verifying changes
 
-Tests live in the two places that don't need a GPU: `slmsttaa-ui/tests/` (the
-zero-dependency toolkit, via the `RecordingPainter` double) and
-`src/renderer/primitives.rs` (mesh builders are pure CPU geometry). Everything
-else in the engine owns a surface or a device and is verified by building and
+Tests live in the places that don't need a GPU: `slmsttaa-ui/tests/` (the
+zero-dependency toolkit, via the `RecordingPainter` double), and inside the
+engine wherever the logic is pure — `src/renderer/primitives.rs` (mesh builders
+are CPU geometry), `src/renderer/graph.rs` (pass ordering), `src/camera.rs` and
+`src/renderer/mod.rs` (the cursor→NDC mapping picking rests on), `src/time.rs`.
+Everything else owns a surface or a device and is verified by building and
 looking at it.
 
 Tests constrain but do not replace looking at the screen: three separate bugs (UI
@@ -84,6 +94,15 @@ and were caught by the outward-winding assertion. To confirm a change works:
 - For visual changes, run the native example (`cargo run --example triangle`)
   and/or rebuild the wasm package and hard-refresh the browser. The dev server
   serves `web/` live; no restart needed after a rebuild.
+- **`cargo xtask shoot <example>` when you cannot see a screen**, or when you want
+  a before/after you can diff. It pins the frame clock, so two runs of the same
+  commit are pixel-identical and `compare -metric AE a.png b.png` is a real
+  answer rather than noise — `terrain` differed by 0.6% between hand-taken
+  screenshots and by zero through the harness. A `--script` adds clicks at exact
+  frames; `capture/workspace.script` is Slice 18's picking check written down.
+  It does **not** replace looking: it proves pixels did not move, which is a
+  different claim from "this is right", and every bug in the list above was found
+  by a person noticing something was wrong rather than merely different.
 
 ## Conventions
 
@@ -117,6 +136,12 @@ and were caught by the outward-winding assertion. To confirm a change works:
 - Anything the engine ships as a widget must be re-implementable by a demo from
   public API alone. A widget with no demo roadblock behind it is polish; label it
   as such rather than filing it as infrastructure.
+
+- Web pixels cannot be checked in a cloud session: headless Chrome captures a
+  blank canvas from a WebGPU surface (verified with unmodified code as a
+  control). The web half of the Definition of Done is therefore a *build and
+  boot* check there — say so in the roadmap rather than implying a picture was
+  looked at.
 
 ## Gotchas (quick reference)
 
