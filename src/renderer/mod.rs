@@ -508,6 +508,11 @@ pub struct Renderer {
     /// Keeps the window alive for as long as the surface borrows it, and is read
     /// for its scale factor so the UI can be laid out in logical points.
     window: Arc<Window>,
+
+    /// Frame-level capture control, `Some` only when the environment asked for
+    /// it. See [`crate::capture`].
+    #[cfg(not(target_arch = "wasm32"))]
+    capture: Option<crate::capture::Capture>,
 }
 
 impl Renderer {
@@ -850,6 +855,21 @@ impl Renderer {
 
         let overlay = Overlay::new(&device, &queue, render_format, width, height);
 
+        // Read once, here, so the rest of the engine only ever sees a `Clock`
+        // that reports deltas — pinned or measured, it cannot tell.
+        #[cfg(not(target_arch = "wasm32"))]
+        let capture = crate::capture::Capture::from_env();
+        #[cfg(not(target_arch = "wasm32"))]
+        let clock = {
+            let mut clock = Clock::new();
+            if let Some(dt) = capture.as_ref().and_then(|c| c.dt()) {
+                clock.pin(dt);
+            }
+            clock
+        };
+        #[cfg(target_arch = "wasm32")]
+        let clock = Clock::new();
+
         Self {
             surface,
             device,
@@ -887,10 +907,32 @@ impl Renderer {
             input: Input::default(),
             overlay,
             ui_state: UiState::default(),
-            clock: Clock::new(),
+            clock,
             elapsed: 0.0,
             timeline: Timeline::new(),
             window,
+            #[cfg(not(target_arch = "wasm32"))]
+            capture,
+        }
+    }
+
+    /// What this redraw should do, per the screenshot harness.
+    ///
+    /// Always [`Step::Running`] unless capture mode was asked for. See
+    /// [`crate::capture`] for what a frozen frame skips and why.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn capture_step(&mut self) -> crate::capture::Step {
+        self.capture
+            .as_mut()
+            .map_or(crate::capture::Step::Running, |c| c.step())
+    }
+
+    /// Tell the capture controller a frame finished, so it can count and, if this
+    /// was a checkpoint, freeze.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn capture_end_frame(&mut self) {
+        if let Some(capture) = self.capture.as_mut() {
+            capture.end_frame();
         }
     }
 

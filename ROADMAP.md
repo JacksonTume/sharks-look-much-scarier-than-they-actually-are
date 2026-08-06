@@ -92,10 +92,110 @@ A slice is not finished until:
   (`cargo build --target wasm32-unknown-unknown --lib`) — the targets diverge via
   `#[cfg]`, so both must pass.
 - `cargo clippy --all-targets` is clean and `cargo fmt` has been run.
-- The driving demo runs and shows the new capability on screen.
+- The driving demo runs and shows the new capability on screen. `cargo xtask
+  shoot <example>` is the mechanical way to do that (see *The harness* below);
+  looking at it yourself still counts, and still catches things the harness
+  cannot.
 - Any new public API has rustdoc; `ARCHITECTURE.md` is updated if the
   init/render flow changed.
 - The engine still contains **zero** consumer-specific content.
+
+
+## The harness
+
+The line above — "runs and shows the new capability on screen" — is the one this
+file leans on hardest and the one that was, until Slice 18, entirely manual. The
+record justifies the emphasis: **six bugs are on file that passed the whole test
+suite and were caught by a human looking at a window** (UI Slices 1, 3 and 5;
+Slice 18's collapsed pane and its frame-stale click gate). It is also the step
+that costs the most in a cloud container, where there is no GPU, no display and
+no screenshot tool until something installs them.
+
+`cargo xtask shoot` makes it executable. What it is *not* is a replacement for
+looking: it photographs what the engine draws, and a picture nobody looks at
+proves only that the pixels did not change.
+
+### What it does
+
+```sh
+cargo xtask shoot triangle --frames 120          # one PNG, at exactly frame 120
+cargo xtask shoot terrain  --frames 400 --size 1280x720
+cargo xtask shoot workspace --script capture/workspace.script
+```
+
+It starts its own `Xvfb`, runs the example against it (lavapipe answers as a
+software Vulkan adapter), and photographs the window with ImageMagick's `import`
+at frame numbers the engine announces. A script adds `move`/`click`/`key` steps
+keyed to those same frames.
+
+### The two things that made this worth building
+
+**A run is now reproducible.** `SLMSTTAA_CAPTURE_DT` pins the frame delta, so
+`elapsed` — and with it the ripple field, the `Timeline`'s step payout and every
+UI animation — depends on how many frames have run rather than how fast the
+machine ran them. The measurement that justifies it: capturing `terrain` twice by
+hand differed by **0.6% RMSE**, all of it in the water, which is more than enough
+to hide a real regression. Through the harness the same two captures differ by
+**zero pixels**. `triangle` does too, but `triangle` was never the hard case.
+
+**A run now has an observable moment.** `SLMSTTAA_CAPTURE_FRAMES` makes the
+engine print `slmsttaa: capture <n>` and *freeze* — re-presenting the same
+picture, simulating nothing — until a line arrives on stdin. Before this, a
+harness could only `sleep` and hope, which is both slow and a lie about what
+frame it caught.
+
+Both live in `src/capture.rs`, are native-only, and are driven **entirely by
+environment variables**, so capture mode adds nothing to the API a consumer can
+see. That was a constraint, not a convenience: `examples/triangle.rs` exists to
+prove the public surface is sufficient, and a `Renderer::set_capture` that only
+tests use would have quietly widened the thing that example measures.
+
+### What fell out for free, and is the nicest part
+
+A frozen frame skips `Input::end_frame`, which is what clears press edges. So a
+click delivered *while the engine is parked* still has its edge set on the frame
+that follows. **The freeze is an input window**, which is what lets a script
+click a specific object on a specific frame rather than at a specific moment.
+`capture/workspace.script` is Slice 18's picking check written down: pause the
+ring, click the sphere, confirm the cage appears, then click a panel and confirm
+it does *not* reach the scene.
+
+One wrinkle had to be paid for: motion accumulates across a freeze too, so the
+cursor warping to a click target arrives as one enormous `mouse_delta` and snaps
+any camera that orbits on it. Resume therefore discards motion while keeping
+press edges (`Input::discard_motion`).
+
+### Waiting on a roadblock
+
+Recognized, **not** scheduled — the same rule the rest of this file runs on. The
+failure mode here is well understood and is the one `slmsttaa-ui/README.md` was
+written to prevent: the tooling becoming the project.
+
+- **Committed golden images, and `shoot --check`.** Everything needed is here —
+  captures are exact now — but a golden is only worth its review cost if
+  something runs it unprompted, and this repo has no CI. The `.gitignore` keeps
+  `capture/*.script` and drops the PNGs, so the shape is ready when the answer
+  changes.
+- **Engine-side readback** (`copy_texture_to_buffer` plus an image writer), so a
+  capture needs no X server at all and grabs the surface rather than a window.
+  That would also make a capture callable from a `#[test]`, which is the real
+  prize. It is a bigger job than it sounds: `Renderer::new` takes an
+  `Arc<Window>` and owns a `Surface`, so headless means a second construction
+  path.
+- **A synthetic input queue.** Feeding events straight into `Input` instead of
+  through `xdotool` would drop the X dependency for interaction and land a click
+  on an exactly known frame. There is a concrete reason to expect this to be
+  needed: with no window manager under Xvfb nothing holds keyboard focus, so
+  `xdotool key` may not arrive at all. Pointer input via XTEST is proven; keys
+  are not, and the script grammar accepts `key` on trust.
+- **Web capture.** Headless Chrome here photographs a blank canvas from a WebGPU
+  surface — verified against *unmodified* code as a control, so it is
+  environmental rather than a defect. Until it moves, the web half of the
+  Definition of Done stays a build-and-boot check, and slices should say so
+  rather than implying a picture was looked at.
+- **Perf capture** from the same run. Slice 14 spent 10 ms a frame CPU-animating
+  water and it was noticed as a feeling before it was measured; frame timings
+  alongside the frames would have made it a number.
 
 ## The slices
 

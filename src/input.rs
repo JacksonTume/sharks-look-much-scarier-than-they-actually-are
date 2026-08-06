@@ -200,4 +200,19 @@ impl Input {
         self.scroll_delta = 0.0;
         self.pressed = [false; MouseButton::COUNT];
     }
+
+    /// Throw away accumulated motion, keeping button state and press edges.
+    ///
+    /// For the screenshot harness, which parks the engine on a frame and then
+    /// warps the cursor somewhere to click. All of that motion arrives as one
+    /// enormous `mouse_delta` on the next real frame, and a consumer that orbits
+    /// a camera by the delta would snap round before the click was even read.
+    ///
+    /// The press edges deliberately survive: the whole point of holding a frame
+    /// is that a click delivered during it should land on the frame that follows.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn discard_motion(&mut self) {
+        self.mouse_delta = (0.0, 0.0);
+        self.scroll_delta = 0.0;
+    }
 }

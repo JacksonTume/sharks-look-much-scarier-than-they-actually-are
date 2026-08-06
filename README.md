@@ -132,6 +132,25 @@ runs `wasm-bindgen` into `web/pkg/` (as `app.js`, so `web/index.html` is stable
 across examples), and hosts `web/` from a tiny built-in static server. See
 `xtask/src/main.rs`.
 
+## Photograph it (headless)
+
+```sh
+cargo xtask shoot workspace                                    # one PNG at frame 120
+cargo xtask shoot terrain --frames 400 --size 1280x720
+cargo xtask shoot workspace --script capture/workspace.script  # clicks between shots
+```
+
+`shoot` starts its own `Xvfb`, runs the example against it, and photographs the
+window at **exact frame numbers** rather than after a guessed delay. The engine
+pins its frame clock while capturing, so two runs of the same commit are
+pixel-identical and `compare -metric AE a.png b.png` is a meaningful answer — the
+point being that a screenshot becomes a regression test rather than a souvenir.
+A `--script` drives clicks and keys at chosen frames, which is how an interaction
+like picking gets verified without a person in the loop.
+
+Needs `Xvfb`, ImageMagick's `import`, and `xdotool`. See `ROADMAP.md`,
+"The harness".
+
 ## Write your own
 
 Implement `Application` and hand it to `run`:

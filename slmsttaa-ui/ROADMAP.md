@@ -705,6 +705,23 @@ finally demands one, not as a to-build list:
   frozen. It stays on this list. What would actually move it is the thing already
   named above — markers along the track — and terrain has a natural candidate
   (where the lakes finish draining) that it has not asked for.
+- **Golden-file layout snapshots.** `RecordingPainter` already records every
+  primitive a frame draws, with the clip in force — which is a serialisable
+  description of a screen, and `WISHLIST.md` already advertises exactly this to a
+  consumer whose engineering culture is golden files. Writing one to disk and
+  diffing it would catch a layout regression with no GPU, no window and no image,
+  and would say *which widget* moved rather than which pixels did. The engine
+  grew image capture in `cargo xtask shoot`
+  ([engine *The harness*](../ROADMAP.md#the-harness)); this is the half of the
+  same idea that belongs up here, and is plausibly the higher-value half per line
+  written. Nothing has demanded it: the existing tests assert against the
+  recorder directly, and until a screen is too big to assert by hand that is
+  enough.
+- **A `RecordingPainter` that a capture script can reach.** The harness drives the
+  toolkit only through the pointer, so a widget with no visible effect on a
+  screenshot is invisible to it. Nothing has needed more yet, and the honest note
+  is that three of the four bugs this crate found by running the demo *were*
+  visible ones.
 - **A content region — `Ui::remaining()`** — the space a layout has left after its
   panels. **Asked for once, declined once, and the reason is that the demo's own
   arithmetic is better.** Engine [Slice

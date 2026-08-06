@@ -171,6 +171,10 @@ xtask/                Dev tooling (a separate workspace member, no deps). `cargo
 └── src/main.rs       xtask serve [example]` builds the example natively and for
                       wasm, runs wasm-bindgen into web/pkg/ as app.js, and serves
                       web/ from a built-in static server. No Python required.
+                      `cargo xtask shoot [example]` starts its own Xvfb, runs the
+                      example against it, and photographs the window at exact
+                      frame numbers — optionally clicking things in between.
+                      See ROADMAP.md, "The harness".
 ```
 
 ## Frame lifecycle
