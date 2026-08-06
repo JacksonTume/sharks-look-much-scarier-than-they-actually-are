@@ -1,0 +1,4 @@
+# Everything in here is emitted by `wasm-bindgen` via `cargo xtask serve`.
+# Never edit or commit it; only this file is tracked.
+*
+!.gitignore

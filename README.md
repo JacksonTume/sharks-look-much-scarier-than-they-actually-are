@@ -80,6 +80,8 @@ it's going and why.
 | `examples/scene.rs`      | Articulated figures from engine primitives: transforms, materials, joints. |
 | `examples/gallery.rs`    | Scene switcher: web buttons swap demos; native cycles.   |
 | `examples/grid.rs`       | Orbitable terrain grid: the input + camera seam.         |
+| `examples/editor.rs`     | Pick and move objects with the pointer: `pointer_ray` + an inspector. |
+| `examples/workspace.rs`  | Application layout: the scene as one pane beside UI panels (`set_scene_rect`). |
 | `examples/terrain.rs`    | **Capstone**: Perlin + stream-power erosion as a scrubbable time axis, contoured water, live panel. |
 | `slmsttaa-ui/src/`       | The UI toolkit crate (zero deps): `Painter`, `Theme`, widgets. |
 | `slmsttaa-ui/tests/`     | Layout, hit-testing, theming, typography + animation tests (headless recording painter). |
@@ -90,6 +92,8 @@ it's going and why.
 
 ```sh
 cargo run --example terrain             # the capstone: layered Perlin + stream-power erosion
+cargo run --example workspace           # the scene as one pane beside UI panels
+cargo run --example editor              # click to pick, drag to move (pointer_ray)
 cargo run --example triangle            # the smallest consumer
 cargo run --example cube                # spinning solid cube (depth + culling)
 cargo run --example scene               # articulated figures from engine primitives

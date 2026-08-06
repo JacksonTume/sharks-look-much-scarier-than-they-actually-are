@@ -154,13 +154,25 @@ design in near Slice 1 than to retrofit once widgets assume a frame is free.
 
 ### Engine-side, not this crate
 
-One item that belongs in [`../ROADMAP.md`](../ROADMAP.md), noted here because the
+One item that belonged in [`../ROADMAP.md`](../ROADMAP.md), noted here because the
 same consumer pulls it: **an offscreen render target composited into a UI rect**,
 so a 3D/2D scene is a *panel among panels* rather than a fullscreen background
-with UI floating over it. The engine roadmap already lists a render graph as a
-seam awaiting demand; this is what would demand it. It is now named explicitly in
-[engine *Beyond*](../ROADMAP.md#beyond-seams-not-commitments) — still a seam, still
-unscheduled.
+with UI floating over it.
+
+**It landed, as engine Slice 18** — `Renderer::set_scene_rect` takes a rectangle
+in the same logical points this toolkit lays out in, and the scene renders into
+it. Two things about how it arrived are worth recording here, because both bear
+on the rest of this file:
+
+- **It cost this crate nothing.** No `Painter` method, no `UiInput` field, no
+  widget. The engine reads a rectangle the consumer computed and the toolkit
+  never learns that a scene exists. That is the fifth demand in a row absorbed
+  without the seam moving.
+- **It was not driven by this consumer.** The engine wrote its own demo
+  (`examples/workspace.rs`) and let that hit the wall, exactly as the stopping
+  rule says. The wishlist entry did not cause the work; it was sitting under the
+  demo when the demo arrived, and it turned out to have badly underestimated the
+  job. Recognitions are not estimates.
 
 Since this file was written, the same consumer has asked the engine for a
 **renderer** for its simulation, which produced [engine Slices

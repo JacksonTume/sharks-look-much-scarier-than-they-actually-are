@@ -5,9 +5,12 @@
 //! the consumer, with clear seams where a real engine would grow (a material
 //! system, textures, an asset pipeline).
 //!
-//! A frame is five passes — sky, opaque, composite, blended, overlay — declared
-//! in [`graph`] rather than hand-sequenced here, because Slice 16 made pass
-//! ordering a correctness property: the water samples what the opaque pass drew.
+//! A frame is six passes — sky, opaque, composite, blended, present, overlay —
+//! declared in [`graph`] rather than hand-sequenced here, because Slice 16 made
+//! pass ordering a correctness property: the water samples what the opaque pass
+//! drew. All but the last two render into offscreen targets sized to the scene's
+//! rectangle ([`Renderer::set_scene_rect`]); `present` is what decides where on
+//! the window that rectangle lands, and the only pass that knows.
 
 mod graph;
 mod instance;
@@ -173,6 +176,25 @@ fn edge_indices(tris: &[u32]) -> Vec<u32> {
         }
     }
     edges
+}
+
+/// A cursor in physical pixels → normalized device coordinates within `rect`.
+///
+/// Top-left origin and +y down on the way in; centre origin and +y up on the way
+/// out. `None` only for a degenerate rect, never for a cursor outside it: a
+/// point beyond the rect projects to NDC beyond `[-1, 1]`, which is meaningful
+/// and is what keeps a drag continuous when the pointer strays onto a panel.
+///
+/// Free-standing so it can be tested. It is four lines of arithmetic that a
+/// screenshot cannot check: a flipped Y or a forgotten origin produces a ray
+/// that looks entirely plausible and selects the wrong object.
+fn ndc_in_rect(cursor: (f32, f32), rect: [u32; 4]) -> Option<[f32; 2]> {
+    let [rx, ry, rw, rh] = rect;
+    if rw == 0 || rh == 0 {
+        return None;
+    }
+    let (u, v) = (cursor.0 - rx as f32, cursor.1 - ry as f32);
+    Some([2.0 * u / rw as f32 - 1.0, 1.0 - 2.0 * v / rh as f32])
 }
 
 /// Create an instance buffer with room for `capacity` instances.
@@ -437,10 +459,27 @@ pub struct Renderer {
     /// Depth, written by the opaque pass and read two ways by the blended one:
     /// tested as a read-only attachment, and sampled for the reflection trace.
     scene_depth: ResourceId,
+    /// The finished scene: the opaque colour copied here, then the water drawn
+    /// on top. What the present pass blits onto the swapchain.
+    scene_blend: ResourceId,
     scene_layout: wgpu::BindGroupLayout,
     scene_sampler: wgpu::Sampler,
-    /// Binds the two above. Rebuilt on resize, when their views are replaced.
+    /// Binds colour + depth of the *opaque* scene, for the water to sample.
+    /// Rebuilt whenever the graph re-allocates, which replaces their views.
     scene_bind_group: wgpu::BindGroup,
+    /// The same, over the finished scene, for the present blit.
+    present_bind_group: wgpu::BindGroup,
+    /// Where the 3D scene draws, in logical points, or `None` for the whole
+    /// window. See [`Renderer::set_scene_rect`].
+    scene_rect: Option<[f32; 4]>,
+    /// [`Renderer::scene_rect`] resolved to physical pixels: `[x, y, w, h]`.
+    ///
+    /// Stored rather than recomputed because four things read it — the offscreen
+    /// textures' size, the present pass's viewport, the camera's aspect ratio and
+    /// [`Renderer::pointer_ray`] — and rounding it independently at each is how
+    /// picking ends up half a pixel away from the picture on a fractional-scale
+    /// display.
+    scene_rect_px: [u32; 4],
 
     camera: Camera,
     camera_uniform: CameraUniform,
@@ -735,6 +774,7 @@ impl Renderer {
         let mut graph = RenderGraph::new(render_format);
         let scene_color = graph.resource("scene color", ResourceFormat::Color);
         let scene_depth = graph.resource("scene depth", ResourceFormat::Depth);
+        let scene_blend = graph.resource("scene blend", ResourceFormat::Color);
 
         graph.pass(
             Pass::new("sky", PassKind::Sky).writes(scene_color, Load::Clear(wgpu::Color::BLACK)),
@@ -747,18 +787,33 @@ impl Renderer {
         graph.pass(
             Pass::new("composite", PassKind::Composite)
                 .reads(&[scene_color])
-                .writes(SWAPCHAIN, Load::Clear(wgpu::Color::BLACK)),
+                .writes(scene_blend, Load::Clear(wgpu::Color::BLACK)),
         );
         graph.pass(
             Pass::new("blended", PassKind::Blended)
                 // Reads the depth it is also testing against — legal precisely
                 // because it does not write it, which is what `false` declares.
                 .reads(&[scene_color, scene_depth])
-                .writes(SWAPCHAIN, Load::Keep)
+                .writes(scene_blend, Load::Keep)
                 .depth(scene_depth, Load::Keep, false),
+        );
+        // The only pass that touches the swapchain before the UI does, and the
+        // only one that knows where the scene sits on screen. `Clear` is what
+        // fills the window around an inset pane, so no clear-colour knob is
+        // needed for the surround.
+        //
+        // It declares `scene_depth` as a read because it genuinely binds it: the
+        // scene bind-group layout carries a depth entry that `fs_composite`
+        // ignores, and declaring what is bound rather than what is sampled is
+        // what keeps the graph's usage derivation from disagreeing with reality.
+        graph.pass(
+            Pass::new("present", PassKind::Present)
+                .reads(&[scene_blend, scene_depth])
+                .writes(SWAPCHAIN, Load::Clear(wgpu::Color::BLACK)),
         );
         graph.pass(Pass::new("overlay", PassKind::Overlay).writes(SWAPCHAIN, Load::Keep));
 
+        // Sized to the scene's rectangle, which starts out as the whole window.
         graph.build(&device, config.width, config.height);
 
         let scene_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -777,6 +832,17 @@ impl Renderer {
             &scene_layout,
             &scene_sampler,
             graph.view(scene_color),
+            graph.view(scene_depth),
+        );
+        // The same layout over the finished scene instead of the opaque one, so
+        // the present pass can reuse `composite_pipeline` verbatim. The depth
+        // entry is bound because the layout has one, and ignored because
+        // `fs_composite` does not mention it.
+        let present_bind_group = create_scene_bind_group(
+            &device,
+            &scene_layout,
+            &scene_sampler,
+            graph.view(scene_blend),
             graph.view(scene_depth),
         );
 
@@ -805,9 +871,15 @@ impl Renderer {
             graph,
             scene_color,
             scene_depth,
+            scene_blend,
             scene_layout,
             scene_sampler,
             scene_bind_group,
+            present_bind_group,
+            // Fullscreen until a consumer says otherwise, which is what every
+            // demo before Slice 18 assumed without being able to say so.
+            scene_rect: None,
+            scene_rect_px: [0, 0, width.max(1), height.max(1)],
             camera,
             camera_uniform,
             camera_buffer,
@@ -835,6 +907,138 @@ impl Renderer {
         self.size
     }
 
+    /// Resolve [`Renderer::scene_rect`] to physical pixels, clamped to the
+    /// surface.
+    ///
+    /// Rounds the rect's **edges** rather than its origin and size. Rounding the
+    /// two independently lets the right edge drift a pixel as the rect moves,
+    /// which is exactly the seam (or overlap) a consumer sees between a panel and
+    /// the scene beside it. Integers also sidestep the WebGPU spec's licence to
+    /// round a fractional viewport "to some uniform precision" however it likes —
+    /// the one place this slice could have diverged native from web.
+    fn resolve_scene_rect(&self) -> [u32; 4] {
+        let (sw, sh) = (self.size.width.max(1), self.size.height.max(1));
+        let Some([x, y, w, h]) = self.scene_rect else {
+            return [0, 0, sw, sh];
+        };
+        let s = self.scale_factor();
+        let (fw, fh) = (sw as f32, sh as f32);
+        // Clamped because neither wgpu nor the browser will: a viewport hanging
+        // off the surface is not an error, it silently draws nothing. A consumer
+        // computing its rect from last frame's layout can overshoot for a frame
+        // during a resize, and a blank window is a terrible way to find out.
+        let x0 = (x * s).round().clamp(0.0, fw - 1.0);
+        let y0 = (y * s).round().clamp(0.0, fh - 1.0);
+        let x1 = ((x + w) * s).round().clamp(x0 + 1.0, fw);
+        let y1 = ((y + h) * s).round().clamp(y0 + 1.0, fh);
+        [x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32]
+    }
+
+    /// Re-resolve the scene rect and bring everything that depends on it in line.
+    ///
+    /// Called from both places the rect can change — [`Renderer::resize`] and
+    /// [`Renderer::set_scene_rect`] — because the two disagreeing is not a subtle
+    /// bug: a stale aspect makes spheres oval, and stale textures make the water
+    /// sample the wrong pixels.
+    ///
+    /// Re-allocates only when the *size* changed. A rect that moves without
+    /// resizing is free, which is what stops a consumer that recomputes its
+    /// layout every frame from recreating three textures every frame.
+    fn sync_scene_rect(&mut self) {
+        let next = self.resolve_scene_rect();
+        let resized = next[2..] != self.scene_rect_px[2..];
+        self.scene_rect_px = next;
+        self.camera.set_aspect(next[2], next[3]);
+        if !resized {
+            return;
+        }
+        self.graph.resize(&self.device, next[2], next[3]);
+        // Both bind groups hold *views*, which the re-allocation above replaced.
+        self.scene_bind_group = create_scene_bind_group(
+            &self.device,
+            &self.scene_layout,
+            &self.scene_sampler,
+            self.graph.view(self.scene_color),
+            self.graph.view(self.scene_depth),
+        );
+        self.present_bind_group = create_scene_bind_group(
+            &self.device,
+            &self.scene_layout,
+            &self.scene_sampler,
+            self.graph.view(self.scene_blend),
+            self.graph.view(self.scene_depth),
+        );
+    }
+
+    /// Draw the 3D scene into a rectangle of the window instead of all of it.
+    ///
+    /// `[x, y, w, h]` in **logical points**, top-left origin — the same units and
+    /// the same orientation the UI toolkit lays out in, because that is where the
+    /// rect comes from. `None` restores the default, which is the whole window.
+    ///
+    /// This is what makes the scene *a panel among panels* rather than a
+    /// background with UI floating over it. The engine takes over three things
+    /// the rect implies and a consumer should not have to redo: the size of every
+    /// offscreen target the frame renders through, the camera's aspect ratio, and
+    /// the mapping [`Renderer::pointer_ray`] unprojects through.
+    ///
+    /// The window around the pane is cleared to black. The UI draws over the
+    /// whole window afterwards, so a consumer that wants a themed surround paints
+    /// the regions outside this rect — which is arithmetic it already did to
+    /// arrive at the rect.
+    ///
+    /// Note it is *points*, not pixels: the scale factor is the engine's business
+    /// (see [`Renderer::ui`], which converts in the same direction), and a rect in
+    /// points survives a move between displays.
+    ///
+    /// ```no_run
+    /// # use slmsttaa::Renderer;
+    /// # fn demo(renderer: &mut Renderer) {
+    /// # let (panel_w, margin) = (240.0, 12.0);
+    /// let [_, _, w, h] = renderer.scene_rect();
+    /// // A pane filling everything to the right of a left-hand panel.
+    /// let x = margin + panel_w + margin;
+    /// renderer.set_scene_rect(Some([x, margin, w - x - margin, h - 2.0 * margin]));
+    /// # }
+    /// ```
+    pub fn set_scene_rect(&mut self, rect: Option<[f32; 4]>) {
+        self.scene_rect = rect;
+        self.sync_scene_rect();
+    }
+
+    /// The rectangle the scene currently draws into, in logical points.
+    ///
+    /// Always concrete: with no rect set this is the whole window. It is the
+    /// *resolved* rect, so it reflects the clamping and pixel rounding
+    /// [`Renderer::set_scene_rect`] applied — read it back to find out where the
+    /// scene actually is, rather than assuming the rect you passed survived.
+    ///
+    /// Do **not** compute the next rect from this one. It is an output, and
+    /// feeding it back in is a loop that shrinks the pane a little every frame
+    /// until it hits the one-pixel clamp — which is exactly what the first run of
+    /// `examples/workspace.rs` did. Lay out against [`Renderer::window_size`].
+    pub fn scene_rect(&self) -> [f32; 4] {
+        let s = self.scale_factor();
+        let [x, y, w, h] = self.scene_rect_px;
+        [x as f32 / s, y as f32 / s, w as f32 / s, h as f32 / s]
+    }
+
+    /// The window's size in **logical points**, which is what to lay out against.
+    ///
+    /// The counterpart to [`Renderer::size`], which reports physical pixels. A
+    /// consumer positioning panels and a scene pane needs points, because that is
+    /// what the UI toolkit measures in and what a theme's margins are stated in —
+    /// and converting between the two needs the display's scale factor, which the
+    /// engine deliberately keeps to itself.
+    ///
+    /// This is the same rectangle the toolkit receives as `UiInput::viewport`.
+    /// Unlike [`Renderer::scene_rect`] it does not move when the scene is inset,
+    /// so it is safe to derive a layout from every frame.
+    pub fn window_size(&self) -> [f32; 2] {
+        let s = self.scale_factor();
+        [self.size.width as f32 / s, self.size.height as f32 / s]
+    }
+
     /// Reconfigure the surface after a window resize.
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width == 0 || new_size.height == 0 {
@@ -844,21 +1048,17 @@ impl Renderer {
         self.config.width = new_size.width;
         self.config.height = new_size.height;
         self.surface.configure(&self.device, &self.config);
-        // Every attachment must track the surface size or the render pass fails.
-        // The graph owns all of them, so this is one call rather than one per
-        // texture — which is half of why it exists, since Slice 16 took the
-        // count from one to three.
-        self.graph
-            .resize(&self.device, new_size.width, new_size.height);
-        // The bind group holds *views*, which the re-allocation above replaced.
-        self.scene_bind_group = create_scene_bind_group(
-            &self.device,
-            &self.scene_layout,
-            &self.scene_sampler,
-            self.graph.view(self.scene_color),
-            self.graph.view(self.scene_depth),
-        );
-        self.camera.set_aspect(new_size.width, new_size.height);
+        // Every attachment must track the size of the scene's rectangle or the
+        // render pass fails. The graph owns all of them, so this is one call
+        // rather than one per texture — which is half of why it exists, since
+        // Slice 16 took the count from one to three.
+        //
+        // Routed through the same method `set_scene_rect` uses, rather than
+        // resizing to `new_size` here: the scene rect is the window only until a
+        // consumer says otherwise, and two callers computing it separately is how
+        // they come to disagree. A rect stated in points survives a resize
+        // unchanged; one derived from the window is restated next frame.
+        self.sync_scene_rect();
         // The overlay maps pixels to NDC using the surface size; keep it synced.
         self.overlay
             .resize(&self.queue, new_size.width, new_size.height);
@@ -1003,11 +1203,25 @@ impl Renderer {
     ///
     /// The engine's whole contribution to picking. Turning a cursor into a ray
     /// needs three things a consumer cannot reach: the camera's inverse
-    /// view-projection, the size of the render target in pixels, and the display
-    /// scale factor relating the two. Everything *after* the ray — what counts as
-    /// a hit, which hit wins, what a click then means — is the consumer's, in the
-    /// same way the erosion solver is the terrain demo's. The engine does not know
-    /// what is in the scene, and this is the seam that lets it keep not knowing.
+    /// view-projection, the rectangle the scene occupies in pixels, and the
+    /// display scale factor relating the two. Everything *after* the ray — what
+    /// counts as a hit, which hit wins, what a click then means — is the
+    /// consumer's, in the same way the erosion solver is the terrain demo's. The
+    /// engine does not know what is in the scene, and this is the seam that lets
+    /// it keep not knowing.
+    ///
+    /// It is cast through [`Renderer::scene_rect`], so an inset scene picks
+    /// correctly; before Slice 18 this unprojected through the whole window,
+    /// which was indistinguishable from correct while the two were the same
+    /// rectangle.
+    ///
+    /// A cursor **outside** that rect still gets a ray, and deliberately so. The
+    /// projection is perfectly well defined out there, and it is what keeps a
+    /// drag continuous when the pointer strays over a panel — the same courtesy
+    /// the toolkit extends to a slider dragged off itself. Whether a click that
+    /// far out should count is a policy question, and policy is the consumer's
+    /// here for the same reason the bounding box is: ask `Ui::wants_pointer`, or
+    /// test the cursor against `scene_rect` yourself.
     ///
     /// It reads the camera as it stands *now*, so a consumer that moves the camera
     /// and then picks in the same frame gets the moved one.
@@ -1023,17 +1237,44 @@ impl Renderer {
     /// # }
     /// ```
     pub fn pointer_ray(&self) -> Option<Ray> {
-        let (x, y) = self.input.cursor_position()?;
-        let (w, h) = (self.size.width as f32, self.size.height as f32);
-        if w <= 0.0 || h <= 0.0 {
-            return None;
-        }
-        // Physical pixels, top-left origin → NDC, centre origin, +y up. The
-        // cursor is already in physical pixels (unlike the toolkit's, which
-        // `Renderer::ui` converts to points), so it shares the surface's units
-        // and no scale factor appears here.
-        let ndc = [2.0 * x / w - 1.0, 1.0 - 2.0 * y / h];
+        let cursor = self.input.cursor_position()?;
+        let ndc = ndc_in_rect(cursor, self.scene_rect_px)?;
         Some(self.camera.ray_through_ndc(ndc))
+    }
+
+    /// Whether the pointer is over the rectangle the scene draws into.
+    ///
+    /// The companion to [`Renderer::pointer_ray`], and the reason that one does
+    /// not decide for you: "is this click meant for the scene?" is a policy
+    /// question, but *answering* it needs two things a consumer cannot reach —
+    /// the cursor in physical pixels and the resolved rect in the same units, one
+    /// scale factor apart from the points [`Renderer::scene_rect`] reports. So the
+    /// engine supplies the fact and the consumer keeps the decision.
+    ///
+    /// False when the pointer has left the window entirely.
+    ///
+    /// ```no_run
+    /// # use slmsttaa::Renderer;
+    /// # fn demo(renderer: &Renderer, ui_wants_pointer: bool) {
+    /// if renderer.pointer_in_scene() && !ui_wants_pointer {
+    ///     if let Some(ray) = renderer.pointer_ray() {
+    ///         // ...pick with it.
+    ///         let _ = ray;
+    ///     }
+    /// }
+    /// # }
+    /// ```
+    pub fn pointer_in_scene(&self) -> bool {
+        let Some(ndc) = self
+            .input
+            .cursor_position()
+            .and_then(|c| ndc_in_rect(c, self.scene_rect_px))
+        else {
+            return false;
+        };
+        // Inside the rect *is* inside NDC, which saves converting the cursor into
+        // points and comparing against a rect that was rounded to pixels.
+        (-1.0..=1.0).contains(&ndc[0]) && (-1.0..=1.0).contains(&ndc[1])
     }
 
     /// Seconds of **wall time** elapsed since the previous frame. Updated once
@@ -1181,6 +1422,10 @@ impl Renderer {
                 label: Some("frame encoder"),
             });
 
+        // Read once, before the graph is borrowed. The offscreen targets are
+        // already this size — this is only where on the swapchain they land.
+        let [rx, ry, rw, rh] = self.scene_rect_px;
+
         // The graph resolved the order; this just records what it hands back.
         // Adding a pass means declaring what it touches over in `new`, not
         // finding the right place to slot it into this loop.
@@ -1248,6 +1493,20 @@ impl Renderer {
                     pass.set_bind_group(1, &self.scene_bind_group, &[]);
                     pass.draw(0..3, 0..1);
                 }
+                PassKind::Present => {
+                    // The frame's one viewport call, and the whole of "the scene
+                    // is a panel". Everything upstream rendered into targets
+                    // whose extent *is* the camera's frame; this decides where
+                    // that frame lands on the swapchain. Clipping confines the
+                    // oversized fullscreen triangle to the rect, so no scissor is
+                    // needed — and the load-op clear that fills the surround
+                    // happened before this pass, unaffected by either.
+                    pass.set_viewport(rx as f32, ry as f32, rw as f32, rh as f32, 0.0, 1.0);
+                    pass.set_pipeline(&self.composite_pipeline);
+                    pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                    pass.set_bind_group(1, &self.present_bind_group, &[]);
+                    pass.draw(0..3, 0..1);
+                }
                 PassKind::Opaque | PassKind::Blended => {
                     self.record_draws(&mut pass, target.kind);
                 }
@@ -1310,5 +1569,56 @@ impl Renderer {
             pass.set_index_buffer(buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..count, 0, 0..draw.count);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The mapping the whole of picking rests on, checked at the corners where
+    /// an off-by-a-rectangle shows and the centre where it does not.
+    #[test]
+    fn a_fullscreen_rect_maps_the_window_to_ndc() {
+        let rect = [0, 0, 800, 600];
+        assert_eq!(ndc_in_rect((400.0, 300.0), rect), Some([0.0, 0.0]));
+        // Top-left of the window is NDC (-1, +1): y flips.
+        assert_eq!(ndc_in_rect((0.0, 0.0), rect), Some([-1.0, 1.0]));
+        assert_eq!(ndc_in_rect((800.0, 600.0), rect), Some([1.0, -1.0]));
+    }
+
+    /// The Slice 18 bug, stated as a test: with the scene inset, the *rect's*
+    /// centre is NDC zero and the *window's* centre is not.
+    ///
+    /// Before this slice `pointer_ray` divided by the surface, so the second
+    /// assertion below would have been `[0.0, 0.0]` — a ray through the middle
+    /// of the picture pointing somewhere else entirely.
+    #[test]
+    fn an_inset_rect_is_measured_from_its_own_corner() {
+        // A 400×300 pane sitting at (200, 100) in an 800×600 window.
+        let rect = [200, 100, 400, 300];
+        assert_eq!(ndc_in_rect((400.0, 250.0), rect), Some([0.0, 0.0]));
+        assert_eq!(ndc_in_rect((200.0, 100.0), rect), Some([-1.0, 1.0]));
+        assert_eq!(ndc_in_rect((600.0, 400.0), rect), Some([1.0, -1.0]));
+        // The window's centre is *not* the pane's centre, and this is the whole
+        // difference between the old mapping and the new one.
+        assert_ne!(ndc_in_rect((400.0, 300.0), rect), Some([0.0, 0.0]));
+    }
+
+    /// A cursor outside the pane still projects, because a drag that wanders
+    /// over a panel should keep tracking rather than freeze.
+    #[test]
+    fn a_cursor_outside_the_rect_still_projects() {
+        let rect = [200, 100, 400, 300];
+        let ndc = ndc_in_rect((0.0, 250.0), rect).expect("outside is not degenerate");
+        assert!(ndc[0] < -1.0, "left of the pane is left of NDC: {ndc:?}");
+        assert_eq!(ndc[1], 0.0, "and vertically unchanged");
+    }
+
+    /// A collapsed pane has no sensible centre, so there is no ray to give.
+    #[test]
+    fn a_degenerate_rect_has_no_ray() {
+        assert_eq!(ndc_in_rect((10.0, 10.0), [0, 0, 0, 600]), None);
+        assert_eq!(ndc_in_rect((10.0, 10.0), [0, 0, 800, 0]), None);
     }
 }

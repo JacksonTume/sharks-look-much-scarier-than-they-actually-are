@@ -1342,6 +1342,163 @@ judged on shape rather than tone. A flat grey ground plane under six pastel
 objects is what made it obvious — which is an argument for a demo whose colours
 are boring on purpose.
 
+
+## The fourth vertical — an application layout (Slice 18)
+
+Slice 17 was found by picking a demo rather than by reading this file, and it
+worked, so it is the method again. The demo this time is the one shape the
+project has never drawn: **a workspace, where the 3D view is one pane beside
+other panes** rather than a fullscreen backdrop with UI floating over it.
+
+Terrain, scene, editor, gallery and grid are all the same layout. An application
+is the inversion, and it is the shape the project's named second consumer (The
+Matchmaker, catalogued in [UI `WISHLIST.md`](slmsttaa-ui/WISHLIST.md)) actually
+needs. Choosing it also meant choosing the one *Beyond* entry with a real
+consumer attached — which is a coincidence worth noticing rather than a
+vindication of the list: the demo picked itself, and the entry happened to be
+sitting under it.
+
+### Slice 18 — The scene as a panel among panels ✅ done
+
+*Roadblock:* there was no way to say **where** the scene goes. `Renderer` had
+`size()` and `resize()` and an unstated assumption underneath everything else
+that the picture filled the window.
+
+The driving demo is **`examples/workspace.rs`** — two panels and the scene in the
+space between them. Content-free in the same way `scene.rs` and `editor.rs` are:
+a ring of primitives on a ground plane, deliberately boring, because the point is
+the layout and boring pastels are what made Slice 17's sRGB bug visible.
+
+**What the engine gained.** Three methods, and the middle one is the slice.
+
+- **`Renderer::set_scene_rect(Option<[f32; 4]>)`** and **`scene_rect()`** —
+  `[x, y, w, h]` in **logical points**, `None` for the whole window. Points
+  because the caller gets the rect from a UI layout, and because `scale_factor()`
+  is private on purpose; a pixel API would have forced it public and handed the
+  conversion to every consumer.
+- **`Renderer::window_size()`** — the window in points. Added because the demo
+  needed something to lay out *against*, and `size()` is pixels. See the bug
+  below; this method exists because of it.
+- **`Renderer::pointer_in_scene()`** — whether the cursor is over that rectangle.
+  The companion to `pointer_ray`, and the split is the same one Slice 17 made:
+  "should this click count?" is policy and stays with the consumer, but
+  *answering* it needs the cursor in pixels and the resolved rect in the same
+  units, which only the engine has.
+
+**The invariant that decided the design, and it is not the obvious one.**
+
+The cheap implementation is to leave the offscreen targets at surface size and
+just rasterize the scene into a sub-rect with `set_viewport`. It compiles, it
+draws, and it quietly breaks the water. `shader.wgsl` rests on a single
+assumption in five separate places — `project`, `depth_at`, `world_from_depth`,
+`edge_fade`, and `fs_water`'s screen UV — and the assumption is:
+
+> **the scene textures' extent *is* the camera's NDC frame.** A UV of `[0,1]`
+> means the whole texture and the whole picture, and those are one sentence.
+
+Rasterize into a sub-rect of a full-size target and that sentence splits in two.
+Refraction samples an offset texel; the reflection marches across the wrong part
+of the depth buffer. Both look plausible. Neither is right. So the targets shrink
+to the rect instead, all five statements stay literally true, and **not one line
+of shader changed**. That is the argument that this restructure is the right one
+rather than merely a working one.
+
+**It cost one more pass, and the reason is a wgpu rule rather than a choice.**
+With `scene_depth` sized to the rect, the blended pass could no longer write the
+window-sized swapchain — every attachment in a pass must share dimensions. So
+blended moved onto a new `scene blend` target and a sixth pass, `present`, blits
+that to the swapchain under the frame's one and only `set_viewport` call. The
+frame is now sky → opaque → composite → blended → present → overlay. `present`'s
+load-op clear is what fills the window around an inset scene, so no clear-colour
+knob was needed; a consumer wanting a themed surround paints the regions outside
+the rect, which is arithmetic it already did to compute the rect.
+
+**The latent bug it existed to find.** `Renderer::pointer_ray` unprojected the
+cursor through the **whole window**. That has been wrong since Slice 17 and was
+undetectable, because the window and the scene were the same rectangle — the four
+unit tests that slice wrote to catch a flipped Y could not see it, since a
+rectangle that is the identity hides a wrong rectangle perfectly. Now it maps
+through `scene_rect`, and the arithmetic moved into a free `ndc_in_rect` function
+with four tests of its own, one of which is just the old behaviour stated as a
+failure.
+
+A cursor **outside** the rect still gets a ray, deliberately. The projection is
+well defined out there and it is what keeps a drag continuous when the pointer
+strays onto a panel — the same courtesy the toolkit already extends to a slider
+dragged off itself. Returning `None` was tried first and is the more obviously
+"safe" answer; it is also the one that freezes a drag mid-gesture.
+
+**The graph tests, which should have existed two slices ago.** `src/renderer/`
+had no tests at all, and this slice rearranged the frame. `resolve_order` is pure
+— no device — so `build` was split into `validate` + `resolve_order` + `allocate`
+and four tests now assert the frame schedules in the one correct order, that
+`present` follows everything that writes the scene, and that a pass reading what
+it writes still panics. They duplicate the pass declarations, which is the cost
+of testing them without a GPU and the thing to watch: a pass added in `mod.rs`
+and not there stops describing the frame.
+
+**The bug, and it is the third slice running where running it found what the
+tests could not.** The first run drew two panels and *nothing between them* — the
+readout said the scene rect was `1 × 1`. The demo laid out against
+`renderer.scene_rect()`, which is already the pane, so each frame computed a rect
+slightly inside the last one until it hit the one-pixel clamp. Every test passed;
+the screenshot was two panels and a black hole.
+
+The fix is `window_size()`, and the interesting part is that the trap was in the
+*documentation*: `scene_rect`'s first doc comment said it was "the sane thing to
+measure a first layout against", which is true exactly once and wrong every frame
+after. An API whose output is nearly the input it wants is one a consumer will
+feed back into itself, so both methods now say which is which.
+
+*A second, smaller one, also found by clicking.* The demo gated picking on
+`ui.wants_pointer()`, copied from `editor.rs`. That value is last frame's — it is
+only knowable once the panels have been declared, which happens after picking.
+In a fullscreen demo the staleness is invisible, because the cursor sits over the
+UI for many frames before a click lands. In a workspace the panels and the scene
+are disjoint, so the first click after every panel interaction was swallowed.
+`pointer_in_scene()` is the fresh question and the right one here; `wants_pointer`
+stays for scroll, where "a widget is active" matters and a frame of lag does not.
+
+*Proof:* `cargo run --example workspace` opens a `810 × 664`-point pane at
+`(256, 12)` between two panels, aspect `1.22`, with the window around it cleared
+to black. The spheres are round in that pane and round again at aspect `1.78`
+when "fill window" is ticked, which is the aspect check. Clicking the cyan sphere
+selects `#0` and cages it; clicking the far cube selects `#4`; clicking the
+"light" checkbox on the panel changes the theme and leaves the selection alone.
+Toggling "fill window" runs the `None` ↔ `Some` transition and the texture
+re-allocation behind it, live, with no log output and no dropped frame.
+
+*Regression, and this is the claim worth checking rather than asserting.*
+`examples/triangle.rs` renders **pixel-identical** to the commit before this one —
+zero differing pixels — which covers sky, opaque, composite and present. Terrain
+run to its settled state (pass 150/150) differs by 0.6% RMSE, and a difference map
+shows that difference confined **exactly to the water bodies** and the fps digits:
+the ripple field is driven by wall-clock elapsed time, so two runs are never in
+phase. Terrain is the only demo with water and therefore the only exercise of the
+blended pass; that its silhouette, absorption and refraction land in the same
+pixels is the evidence the restructure did not move it. `editor.rs` still picks
+correctly, unmodified.
+
+*On the parity risk, stated plainly rather than implied.* The wasm target builds,
+`cargo xtask serve workspace` packages and serves it, the page loads under Chrome,
+the WebGPU adapter is acquired and the surface configures through the sRGB re-view
+with no console errors over twenty seconds. **The rendered pixels were not
+checked**, because this environment's headless Chrome captures a blank canvas —
+and the control is that *unmodified* `terrain` captures the same blank canvas from
+the commit before this slice. So the web check is a build-and-boot check this
+time, not a picture. The pane is deliberately asymmetric top-to-bottom for
+whoever does look at it: a vertically centred rect hides a flipped Y completely,
+and the GL path blits through an offscreen framebuffer. WebGL2 remains
+unexercised, now for the fifth slice running.
+
+*What it exposed.* One thing, and it is a UI question rather than an engine one.
+The demo computes its pane by arithmetic over the theme's margin and its own two
+panel widths, because `Ui::panel` anchors floaters and reserves nothing. That is
+the correct answer under principle 3 and it is four exact lines — but it is also
+the first time a consumer has had to ask "what is left over?", and a second one
+asking is what would promote a `Ui::remaining()`. Recorded in the UI roadmap as
+declined-with-a-reason, not scheduled.
+
 ### What stays in the consumer
 
 Recorded because this boundary will be asked about again, and it is the same
@@ -1432,14 +1589,16 @@ terrain did.) Each of the rest waits for a consumer to ask:
   the water mesh "should stay an experiment rather than a slice" — Slice 14 did it
   anyway and paid 10 ms a frame, which Slice 15 then reclaimed. The entry was right
   and was read too late.
-- **An offscreen render target composited into a UI rect**, so the 3D scene is one
-  panel among many rather than a fullscreen background with UI floating on top.
-  **Half of this now exists**: Slice 16 renders the scene to an offscreen texture
-  and composites it with a fullscreen triangle, so what remains is letting that
-  composite target an arbitrary rect and letting the UI place it. That is a much
-  smaller ask than it was, and it is still unscheduled — it is named in
-  [UI `WISHLIST.md`](slmsttaa-ui/WISHLIST.md) as engine-side work with a real
-  consumer (The Matchmaker) but no demo blocked on it here.
+- ~~**An offscreen render target composited into a UI rect**~~ — **landed as
+  Slice 18.** This entry is worth keeping for how wrong it was about the size of
+  the job. It said "what remains is letting that composite target an arbitrary
+  rect", which is true and is about a fifth of it. It did not see that the
+  offscreen targets would have to shrink to the rect (the water's screen-space
+  math assumes the texture's extent *is* the camera's frame), that shrinking them
+  would evict the blended pass from the swapchain and cost a sixth pass, or that
+  `pointer_ray` had been unprojecting through the wrong rectangle since Slice 17.
+  The lesson is the one Slice 17 already recorded: an entry on this list is a
+  recognition, not an estimate, and the demo is what finds the actual work.
 
 Painter capabilities the UI crate demands of the overlay are engine seams too —
 but they're sequenced in the [UI roadmap](slmsttaa-ui/ROADMAP.md), since that's

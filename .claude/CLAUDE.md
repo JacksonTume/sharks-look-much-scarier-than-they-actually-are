@@ -32,6 +32,7 @@ UI-shaped — and see the placement rule under *Conventions*.
 ```sh
 # Native
 cargo run --example terrain            # the capstone: layered Perlin + stream-power erosion
+cargo run --example workspace          # the scene inset in a UI pane (set_scene_rect)
 cargo run --example editor             # click/drag to pick and move objects (pointer_ray)
 cargo run --example scene              # articulated figures (instancing, material, primitives)
 cargo run --example triangle           # the smallest consumer (Esc / close to quit)
@@ -63,10 +64,12 @@ the browser console.
 
 ## Verifying changes
 
-Tests live in the two places that don't need a GPU: `slmsttaa-ui/tests/` (the
-zero-dependency toolkit, via the `RecordingPainter` double) and
-`src/renderer/primitives.rs` (mesh builders are pure CPU geometry). Everything
-else in the engine owns a surface or a device and is verified by building and
+Tests live in the places that don't need a GPU: `slmsttaa-ui/tests/` (the
+zero-dependency toolkit, via the `RecordingPainter` double), and inside the
+engine wherever the logic is pure — `src/renderer/primitives.rs` (mesh builders
+are CPU geometry), `src/renderer/graph.rs` (pass ordering), `src/camera.rs` and
+`src/renderer/mod.rs` (the cursor→NDC mapping picking rests on), `src/time.rs`.
+Everything else owns a surface or a device and is verified by building and
 looking at it.
 
 Tests constrain but do not replace looking at the screen: three separate bugs (UI
