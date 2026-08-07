@@ -829,7 +829,7 @@ finally demands one, not as a to-build list:
 - **A content region — `Ui::remaining()`** — the space a layout has left after its
   panels. **Asked for once, declined once, and the reason is that the demo's own
   arithmetic is better.** Engine [Slice
-  18](../ROADMAP.md#slice-18--the-scene-as-a-panel-among-panels-done) let a
+  19](../ROADMAP.md#slice-19--the-scene-as-a-panel-among-panels--done) let a
   consumer put the 3D scene in a rectangle, and `examples/workspace.rs` needs to
   know which rectangle. It computes one from `Theme::space.margin` and its own two
   panel widths — four lines, exact, no lag. A generic version would be worse in
@@ -860,7 +860,7 @@ names the roadblock.
 
 One item from that file has since **landed on the engine side**: a scene rendered
 into a UI rectangle, as [engine Slice
-18](../ROADMAP.md#slice-18--the-scene-as-a-panel-among-panels-done). It cost this
+19](../ROADMAP.md#slice-19--the-scene-as-a-panel-among-panels--done). It cost this
 crate nothing at all — no `Painter` method, no `UiInput` field, no widget — and
 nothing in the slices above moves. What it did surface is one new entry on
 *Waiting on a roadblock*, `Ui::remaining()`, filed there as declined with its
