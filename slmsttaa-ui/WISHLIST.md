@@ -60,6 +60,21 @@ Each names the screen that would pull it into existence.
 
 ### Tables — the keystone
 
+> **Mostly answered, and not the way this entry assumed.** The consumer built
+> the table **in the consumer**, from `allocate` / `interact` / `painter` /
+> `theme` / `next_id` plus `font::text_width` — proportional column widths,
+> per-column alignment, ellipsis truncation measured with the same function that
+> lays the glyphs out, row hover, and row clicks driving navigation. **Neither
+> this crate nor the engine was modified.** Three screens now reuse that table,
+> which is the evidence it generalised rather than being shaped around the first
+> one.
+>
+> So the grid is content, by the same argument this file already applies to cell
+> renderers and charts, and the "keystone" framing below overstates what the
+> toolkit owes. What it does owe is the gutter fix directly beneath this entry.
+> Sorting and selection remain unbuilt, and look consumer-shaped for the same
+> reason.
+
 Nothing in the current roadmap approaches this, and it is the single
 highest-value widget for a data-dense consumer. Not a styled grid of labels: a
 real table with columns, sorting, and selection.
@@ -76,6 +91,36 @@ vertical cursor produces neither the layout nor the interaction.
   sparkline, an icon. This is where the unprivileged-widget rule earns out: if
   `allocate` / `interact` / `painter` are public, a consumer writes its own cell
   renderers and the toolkit only supplies the grid.
+
+### A sticky header has to shed the scrollbar gutter by hand
+
+Found by building the above, and the one piece of it that is squarely this
+crate's.
+
+A header row drawn *outside* a `scroll_area` spans the region's full width; the
+body inside it is inset by `scrollbar_w + gap`. Nothing warns you, so every
+column sits a few points out of line with its own heading — invisible in a
+screenshot, obvious on a real screen, and wrong in a way that reads as sloppiness
+rather than as a bug.
+
+The consumer can correct it, because both numbers are public on the theme, and
+does. But **every consumer that writes a table will rediscover it**, which is the
+usual sign that the toolkit should own it — either a scroll area that can report
+its own gutter, or a way to lay a header out in the same region as the body.
+
+### `columns` is not a grid primitive, and that is worth saying out loud
+
+Not a defect — `columns` is documented as the button-row primitive and does that
+job. But it is the first thing a consumer reaches for when building a table, and
+it cannot work: it splits the width **equally**, so a rank column and a name
+column come out the same size, and it lays out **column-major**, which means a
+*row* is not a thing and row hover and row selection are inexpressible through
+it.
+
+The consumer hit this twice — once building the rankings table, and again on a
+bout screen's stat comparison, where equal thirds put each number some 300 points
+from its own label. Worth one line in the docs so the next author does not spend
+the same afternoon.
 
 ### Virtualization
 
@@ -104,13 +149,112 @@ parameter panel never will:
   so names contain `ł ñ ö ç ø š å`. ASCII-only is a visible correctness bug, not
   a polish issue. Cost is atlas size in a `const [u8]` — worth measuring before
   committing to a glyph range.
+
+  **Now measured, and larger than "a few diacritics":** of 1,377 generated
+  fighters, **218 — one name in six — contain a character `fontbake` does not
+  bake**, across **47 distinct codepoints** in four blocks: Latin-1 Supplement
+  (`é ñ ç ö ã ü`), Latin Extended-A (`ō ū š ć ż ğ ę ř`), Latin Extended-B
+  (`Ș ț`, Romanian comma-below) and Latin Extended Additional (`ḥ`, dot-below
+  from Arabic transliteration). The macrons matter most — Japanese romanisation
+  puts `ō` and `ū` through a large share of one nation's roster, so this is not
+  a long tail. They render as tofu boxes today.
+
+  Two things make it cheap: an unbaked character draws a visible `□` rather than
+  vanishing, so it self-reports on the first frame, and `fontbake` runs by hand
+  with committed output, so widening the range costs a rebake and some atlas
+  bytes.
+
+  **Done — and the cost is the number this entry asked for.** `fontbake` gained
+  `LATIN_EXTENDED`, **134 codepoints** taken as the exact closure over that
+  consumer's 150,502 name-pool entries rather than as the four whole blocks they
+  come from (512 codepoints, most of which nothing can draw). The atlas went
+  **370 KiB → 918 KiB** at 512×1836 and `metrics.rs` 40 KiB → 64 KiB, for 240
+  glyphs × 2 weights at 90% packing. That is the measurement this entry said to
+  take before committing to a range, and it is why the range was not taken: full
+  blocks would have roughly doubled the growth again for glyphs no data reaches.
+  Inter 4.1 covers all 134, so the bake's own missing-glyph assert passed
+  untouched.
+
+  The closure is a property of the *consumer's data*, which this crate cannot
+  see — so the guard lives over there: its suite walks every pool entry and
+  fails if one carries a codepoint the atlas lacks. That is the seam working
+  as intended; nothing here has to learn what a name pool is.
+
+### Combining marks cannot render, and the data that needs them is correct
+
+Found by doing the above, and it is the one part of it a re-bake cannot fix.
+
+Four codepoints in that consumer's pools are combining marks — `U+0300`,
+`U+0301`, `U+030B`, `U+0361` — appearing in six entries where **Unicode has no
+precomposed form**: Yoruba `ọ́` (`U+1ECD` + `U+0301`), Thai stacked tone marks,
+and an ALA-LC tie bar in a Russian transliteration. NFC cannot compose them
+because there is nothing to compose them *to*; the strings are already normal
+form.
+
+A bake is one glyph per codepoint at a positive advance, and `text_width` is a
+plain sum of those advances. So a combining mark cannot render *as* a mark here:
+it lands beside its base letter instead of over it. Baking these would replace a
+visible tofu with a plausible-looking wrong word, which is strictly worse — so
+they are deliberately left out and still draw `□`.
+
+The correct fix is **mark-to-base positioning**: zero-advance glyphs plus an
+anchor per base glyph, which is a `GPOS`-shaped feature the bake has no concept
+of today. That is real work for six entries in 150,502, so it is recorded rather
+than scheduled — but recorded *here* rather than solved in the consumer, because
+the alternative was for the consumer to strip the marks from its own data, and
+that is a renderer's limit rewriting a world's content. A name is not the
+renderer's to correct.
 - Two weights (regular + semibold) so a header can differ from a body row without
   a color change carrying all the emphasis.
 - Ellipsis/truncation with measurement, for names that overflow a column.
 
 ### Input and navigation
 
-Text input is [already on the waiting list](ROADMAP.md#waiting-on-a-roadblock)
+> **The roadblock has arrived.** The Matchmaker's client now has a route stack
+> and three screens — a division table, a fighter dossier, and a scrubbable past
+> bout — and navigation is where mouse-only stops being survivable. Concretely,
+> today: **back has to be a button**, because there is no Esc, no Backspace and
+> no mouse-4; **a table cannot be walked**, because there are no arrows, no Enter
+> and no Tab; and **nothing can be typed**, so there is no filter over a roster.
+>
+> This is the first thing that consumer has been unable to build around. It built
+> its own table, its own cell alignment, its own truncation and its own
+> navigation from the public API — but it cannot inject an input the snapshot has
+> no field for. `UiInput` carries `cursor`, `primary_held`, `primary_pressed`,
+> `scroll_delta`, `viewport` and `dt`, and every one of the three needs above
+> wants a field that is not there.
+>
+> Per this file's own rule, that promotes it: it is no longer a recognized demand
+> but a named roadblock, and it belongs in [`ROADMAP.md`](ROADMAP.md) as a slice.
+> Note the engine half — the 8-variant `Key` enum, typed characters and modifiers
+> — is on the critical path for it and is not this crate's to widen alone.
+>
+> **Built, and this entry is closed.** [UI Slice
+> 7](ROADMAP.md#slice-7--keyboard-focus-and-text-entry-done) and [engine Slice
+> 18](../ROADMAP.md#slice-18--a-keyboard-that-reaches-the-consumer-done) landed
+> together: an ordered key/text event log on `UiInput`, Tab and Shift-Tab focus
+> traversal with `focusable`/`set_focus` public, Enter and Space activating every
+> existing button and checkbox, arrows nudging a focused slider, `wants_keyboard`
+> so a camera and a text field can coexist, and a `text_field` with a caret,
+> selection and clipboard. The engine half widened `Key` to fifty variants, added
+> `Modifiers` and `MouseButton::Back`/`Forward`, and made Escape the consumer's to
+> claim.
+>
+> **The prediction in the last paragraph held exactly.** The engine half *was* on
+> the critical path, and it was the larger half — and the thing that actually bit
+> was in it: Windows reports `text: Some("a")` for `Ctrl+A`, so "select all"
+> typed an `a` until the engine learned to tell a shortcut from a keystroke.
+>
+> Two of the three needs below are answered outright. **Text selection and
+> clipboard copy** — the third bullet, filed as "small, and consistently
+> forgotten" — shipped with the field rather than waiting, because a selection is
+> most of what a caret is for. What did *not* ship is anything table-shaped: the
+> demo's walkable, filterable list was written **in the demo** from
+> `next_id`/`focusable`/`allocate`/`interact`/`painter`, which is the same result
+> this file's *Tables* entry already recorded, arrived at independently a second
+> time.
+
+Text input was [already on the waiting list](ROADMAP.md#waiting-on-a-roadblock)
 with no driver. This consumer supplies one, plus two more:
 
 - **Text input** — a search/filter box over a roster. Same underlying need the
@@ -162,6 +306,22 @@ seam awaiting demand; this is what would demand it. It is now named explicitly i
 [engine *Beyond*](../ROADMAP.md#beyond-seams-not-commitments) — still a seam, still
 unscheduled.
 
+Two more the same consumer has now hit, both small and both squarely the
+engine's:
+
+- **A consumer cannot name its own window.** `run(app)` takes no configuration,
+  so a shipped game's window says "SLMSTTAA". Trivial, and it will be noticed by
+  every player of anything built on this.
+- **A per-frame failure is logged every frame.** A surface that fails validation
+  logs one line per attempt: the consumer's first run of its table screen
+  produced **170,897 lines and 512 KiB in about eighteen minutes** and never
+  presented a frame. The volume is the trivial cost; the real one is that it made
+  the failure *harder* to spot, because half a megabyte of one repeated line
+  reads as noise to skim past. An error that shouts continuously communicates
+  less than one that speaks twice — edge-trigger it, with a count. Relatedly,
+  `Renderer` exposes no surface-health signal, so a consumer cannot detect or
+  assert the state either.
+
 Since this file was written, the same consumer has asked the engine for a
 **renderer** for its simulation, which produced [engine Slices
 8–12](../ROADMAP.md#the-second-vertical--a-scene-demo-slices-812). Two knock-on
@@ -191,7 +351,9 @@ consequence being that the consumer composes it themselves or goes elsewhere.
 - **A retained-mode tree stays out**, and should. Virtualized tables and keyboard
   focus are both achievable in immediate mode (egui is the existence proof); none
   of the above requires reversing that decision. Noted so the table entry isn't
-  read as an argument for one.
+  read as an argument for one. **Half of this is now settled rather than
+  asserted:** keyboard focus shipped in Slice 7 and cost `UiState` one `Vec<u64>`
+  of declaration order per frame. Virtualization is still the open half.
 - **Zero dependencies vs. real text.** The offline-baked SDF atlas satisfies
   both, which is why Slice 5 already prefers it. Latin-Extended plus two weights
   plus tabular digits grows the baked constant — measure before committing.
@@ -210,3 +372,34 @@ The mitigation is the rule already written down. Build Slices 1–3, let the
 consumer build **one real screen**, and let that screen name its own roadblocks.
 A roster table that hurts to build is worth more information than any amount of
 planning in this file.
+
+> **The consumer did that, and the estimate above was too pessimistic — for a
+> specific and reusable reason.** The table did not hurt, because it turned out
+> not to be toolkit work at all: it was written in the consumer against the
+> public seam, and the toolkit grew nothing. The largest item on the list moved
+> rather than getting built.
+>
+> What is left is genuinely smaller and better shaped: **keyboard and text
+> input** (now a named roadblock, and the only thing that has actually blocked
+> the consumer), **virtualization** (still real, still needs designing *into* the
+> scroll region), the **gutter fix** above, and the **painter additions** for
+> charts. That is a slice or three, not a second project.
+>
+> The general lesson is the one this file was built to test, and it held: the
+> unprivileged-widget rule is the scope control. It was a claim with no second
+> consumer to check it; it now has one, and it paid for itself the first time
+> something asked for a widget this crate never shipped.
+
+> **Keyboard and text input is now built, and the estimate was wrong in the other
+> direction.** It was named above as one of four remaining items, roughly a
+> quarter of "a slice or three". It came to one slice on each side of the seam —
+> and the *engine's* half was the larger one, which nothing in this file
+> predicted. The toolkit's share was an ordered field on `UiInput`, a `Vec<u64>`
+> of focus order, four widgets learning to read a key, and one new widget.
+>
+> What is left is **virtualization**, the **gutter fix**, the **painter
+> additions** for charts, and table **sorting and selection** — and the last of
+> those still looks consumer-shaped, because the demo built its walkable filtered
+> list without the toolkit growing a list. That is the third time the
+> unprivileged-widget rule has answered a question this file expected to cost a
+> widget.

@@ -70,6 +70,49 @@ const ATLAS_W: usize = 512;
 /// visible, so a missing glyph is a bug you can see rather than a silent gap.
 const EXTRAS: &[char] = &['…', '°', '±', '×', '·', '→', '←', '✓', '▶', '■', '□'];
 
+/// The Latin letters a consumer's *content* needs, as opposed to its chrome.
+///
+/// ASCII plus [`EXTRAS`] is enough to label a parameter panel, and stops being
+/// enough the moment a consumer renders names it did not author. The second
+/// consumer (The Matchmaker, a management sim over a procedurally generated
+/// world) draws from name pools where **one name in six** carries something
+/// outside ASCII — so this is a visible correctness bug for it, not polish.
+///
+/// **This list is a measurement, not a guess.** It is the exact set of
+/// non-ASCII codepoints reachable across that consumer's 150,502 pool entries,
+/// which is why it is a sparse list rather than the four whole Unicode blocks
+/// it is drawn from: those blocks are 512 codepoints and this is 134 of them,
+/// and every glyph is atlas bytes shipped in every wasm bundle. A consumer whose
+/// data grows past this list is the one positioned to notice — its own suite
+/// asserts over its whole pool, because this crate cannot know what a pool is.
+///
+/// Four codepoints its data reaches are deliberately **not** here: the combining
+/// marks `U+0300`, `U+0301`, `U+030B` and `U+0361`, which appear where Unicode
+/// has no precomposed form (Yoruba `ọ́`, Thai stacked tones, an ALA-LC tie bar).
+/// A bake is one glyph per codepoint at a positive advance, so a combining mark
+/// cannot render *as* a mark here — it would sit beside its base letter instead
+/// of over it. Baking them would replace a visible tofu with a plausible-looking
+/// wrong word, which is worse. They stay unbaked and are recorded as a real gap
+/// in `slmsttaa-ui/WISHLIST.md`.
+#[rustfmt::skip]
+const LATIN_EXTENDED: &[char] = &[
+    // Latin-1 Supplement — 40
+    'À', 'Á', 'Â', 'Ä', 'Å', 'Ç', 'È', 'É', 'Í', 'Ñ', 'Ó', 'Õ', 'Ö', 'Ú',
+    'Ü', 'à', 'á', 'â', 'ã', 'ä', 'å', 'ç', 'è', 'é', 'ê', 'ë', 'ì', 'í',
+    'î', 'ï', 'ñ', 'ò', 'ó', 'ô', 'õ', 'ö', 'ù', 'ú', 'ü', 'ý',
+    // Latin Extended-A — 53
+    'Ā', 'ā', 'ă', 'ą', 'Ć', 'ć', 'Č', 'č', 'Ď', 'ď', 'Ē', 'ē', 'ė', 'ę',
+    'ě', 'Ğ', 'ğ', 'Ģ', 'ģ', 'ī', 'İ', 'Ķ', 'ķ', 'ĺ', 'ļ', 'Ľ', 'ľ', 'ń',
+    'ņ', 'ň', 'Ō', 'ō', 'ő', 'Ř', 'ř', 'Ś', 'ś', 'Ş', 'ş', 'Š', 'š', 'ť',
+    'ũ', 'Ū', 'ū', 'ŭ', 'ů', 'ű', 'ź', 'Ż', 'ż', 'Ž', 'ž',
+    // Latin Extended-B — 11
+    'ơ', 'ư', 'ǎ', 'ǐ', 'ǒ', 'ǔ', 'ǭ', 'Ș', 'ș', 'Ț', 'ț',
+    // Latin Extended Additional — 30
+    'ḍ', 'Ḣ', 'Ḥ', 'ḥ', 'ṭ', 'ạ', 'ả', 'ấ', 'ầ', 'ẩ', 'ậ', 'ắ', 'ế', 'ề',
+    'ễ', 'ệ', 'ị', 'ọ', 'ố', 'ồ', 'ổ', 'ớ', 'ờ', 'ợ', 'ụ', 'Ứ', 'ứ', 'ử',
+    'ữ', 'ỳ',
+];
+
 /// The character substituted for anything not in the charset.
 const TOFU: char = '□';
 
@@ -194,6 +237,7 @@ fn main() {
 fn charset() -> Vec<char> {
     let mut chars: Vec<char> = (0x20u8..=0x7E).map(|b| b as char).collect();
     chars.extend_from_slice(EXTRAS);
+    chars.extend_from_slice(LATIN_EXTENDED);
     chars.sort_unstable();
     chars.dedup();
     chars

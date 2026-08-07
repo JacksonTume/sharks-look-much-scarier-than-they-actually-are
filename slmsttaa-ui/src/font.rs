@@ -117,8 +117,13 @@ fn table(weight: Weight) -> &'static [Glyph] {
 ///
 /// Deliberately infallible: an unbaked character draws a visible `□` rather than
 /// silently vanishing, so a missing glyph is a bug you can see. The charset is
-/// printable ASCII plus a named handful (`…`, `°`, `±`, `×`, `·`, `→`, `←`, `✓`,
-/// `▶`, `■`, `□`) — see `fontbake/src/main.rs` to add to it.
+/// printable ASCII, a named handful of symbols (`…`, `°`, `±`, `×`, `·`, `→`,
+/// `←`, `✓`, `▶`, `■`, `□`), and 134 Latin-Extended letters for consumers that
+/// render names they did not author — see `fontbake/src/main.rs` to add to it.
+///
+/// Combining marks are **not** baked and cannot usefully be: a glyph here has a
+/// positive advance and no anchor, so a mark would sit beside its base letter
+/// rather than over it. See `WISHLIST.md`.
 pub fn glyph(ch: char, weight: Weight) -> &'static Glyph {
     let table = table(weight);
     match metrics::CHARS.binary_search(&ch) {
