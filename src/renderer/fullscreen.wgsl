@@ -50,6 +50,14 @@ fn fs_sky(in: FullscreenOut) -> @location(0) vec4<f32> {
 // same time. The water needs to *read* the opaque scene to refract it, so the
 // opaque scene cannot already be on the surface we are drawing the water onto.
 // The cost is one fullscreen copy a frame; the alternative is no refraction.
+//
+// It is also what puts the scene on screen at all, and it is used twice: once to
+// move the opaque scene off `scene_color` so the water can sample it, and again
+// at the end of the frame to blit the finished scene onto the swapchain. The
+// second one runs under a viewport, which is how the scene ends up inside a UI
+// pane — `in.uv` spans the whole source texture either way, and the source
+// texture is exactly the pane, so the mapping is 1:1 without this shader
+// knowing that a pane exists.
 @fragment
 fn fs_composite(in: FullscreenOut) -> @location(0) vec4<f32> {
     return textureSample(scene_color, scene_sampler, in.uv);

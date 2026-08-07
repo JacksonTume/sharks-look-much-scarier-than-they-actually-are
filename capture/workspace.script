@@ -1,0 +1,37 @@
+# Slice 19's verification, as a file instead of as a memory.
+#
+# Picking into an inset pane was the latent bug that slice existed to find, and
+# it was checked by hand: screenshot, read a sphere's coordinates off the image,
+# click there, screenshot again, compare by eye. This is that check, repeatable.
+#
+# Run it:  cargo xtask shoot workspace --script capture/workspace.script
+#
+# Frame numbers, not seconds. The engine holds on each one, so a click lands on a
+# known frame and the ring is in a known position — which is what makes the
+# coordinates below stable rather than a guess about timing.
+
+# Frame 150: the scene inset between two panels. The reference shot.
+150  shot  inset
+
+# Stop the ring, so the props stay where the shot above found them. The "turning"
+# checkbox is in the left panel, and panel geometry comes from the theme's own
+# metrics, so this coordinate is as stable as the layout is.
+200  move  76 175
+200  click
+
+# Frame 260: paused, and the props are parked. This is what the click below aims
+# at, and the pair (parked, selected) is what a diff should show a cage between.
+260  shot  parked
+
+# Click the cyan sphere. If `pointer_ray` ever goes back to unprojecting through
+# the whole window instead of the scene rect, this misses it — which is exactly
+# the regression worth catching, and exactly the one no compile check can.
+300  move  414 368
+300  click
+340  shot  selected
+
+# And a click on the left panel, which must NOT reach the scene. It toggles the
+# theme instead; the selection above has to survive it.
+400  move  128 250
+400  click
+440  shot  panel-click

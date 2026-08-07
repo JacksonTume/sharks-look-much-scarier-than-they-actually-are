@@ -30,6 +30,14 @@ pub mod input;
 pub mod renderer;
 pub mod time;
 
+/// Frame-level capture control for the screenshot harness (`cargo xtask shoot`).
+///
+/// Private and native-only, and driven entirely by environment variables, so it
+/// adds nothing to the API a consumer can see. See the module docs for why that
+/// matters.
+#[cfg(not(target_arch = "wasm32"))]
+mod capture;
+
 /// The immediate-mode UI toolkit.
 ///
 /// This is the [`slmsttaa-ui`](slmsttaa_ui) crate, re-exported so consumers see

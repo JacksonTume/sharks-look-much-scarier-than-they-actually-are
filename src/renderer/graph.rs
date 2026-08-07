@@ -15,10 +15,13 @@
 //!   the order they appeared. With one, "the blended pass must run after the
 //!   opaque pass because it reads what the opaque pass wrote" is a fact about the
 //!   frame that was previously enforced by nothing at all.
-//! - **Every offscreen target must track the surface size.** `ARCHITECTURE.md`
-//!   already records the depth buffer version of this as a gotcha learned the
-//!   hard way. Slice 16 adds two more textures with the same requirement, and
-//!   three hand-resized attachments is where someone eventually forgets one.
+//! - **Every offscreen target must track the size of the scene's rectangle.**
+//!   `ARCHITECTURE.md` already records the depth buffer version of this as a
+//!   gotcha learned the hard way. Slice 16 adds two more textures with the same
+//!   requirement, and three hand-resized attachments is where someone eventually
+//!   forgets one. (Through Slice 17 that rectangle was always the whole surface.
+//!   Slice 19 let a consumer inset it, which changed the number these textures
+//!   are sized to but not the rule.)
 //!
 //! So resources are *declared* with a format, passes are *declared* with what
 //! they read and write, and this module resolves the order, allocates the
@@ -41,9 +44,9 @@
 //! reading the surface you are drawing to is undefined, and it is the obvious
 //! mistake when the water pass wants "the scene behind the water" and the scene
 //! is right there. [`RenderGraph::build`] rejects it outright. That is why the
-//! opaque pass renders to an offscreen texture and a separate composite pass
-//! copies it to the swapchain, rather than the blended pass simply drawing over
-//! what is already on screen.
+//! opaque pass renders to one offscreen texture and a separate composite pass
+//! copies it to a second one for the water to draw onto, rather than the blended
+//! pass simply drawing over what is already on screen.
 
 use std::collections::HashSet;
 
@@ -69,7 +72,7 @@ pub(crate) struct ResourceId(usize);
 /// first and always exists; [`RenderGraph::record`] takes it as an argument.
 pub(crate) const SWAPCHAIN: ResourceId = ResourceId(0);
 
-/// A texture the graph owns, sized to the surface.
+/// A texture the graph owns, sized to the scene's rectangle.
 #[derive(Debug)]
 struct Resource {
     label: &'static str,
@@ -97,9 +100,18 @@ pub(crate) enum PassKind {
     Sky,
     /// The opaque half of the draw-list, plus depth.
     Opaque,
-    /// Copies the offscreen scene colour to the swapchain. Exists only because
-    /// the blended pass cannot sample the target it is drawing to.
+    /// Copies the offscreen scene colour to a second offscreen target, which the
+    /// blended pass then draws the water onto. Exists only because the blended
+    /// pass cannot sample the target it is drawing to.
     Composite,
+    /// Blits the finished offscreen scene onto the swapchain, under a viewport.
+    ///
+    /// The one pass that knows where on screen the scene goes, and the reason
+    /// every other pass gets to not know: they all render into targets whose
+    /// extent *is* the camera's frame, and this one decides where that frame
+    /// lands. Separate from [`PassKind::Composite`] because the two now differ in
+    /// both destination and scale.
+    Present,
     /// The transparent half of the draw-list, sampling the opaque scene colour
     /// and depth for refraction and screen-space reflection.
     Blended,
@@ -213,7 +225,7 @@ impl RenderGraph {
         }
     }
 
-    /// Declare a graph-owned texture, sized to the surface.
+    /// Declare a graph-owned texture, sized to the scene's rectangle.
     pub(crate) fn resource(&mut self, label: &'static str, format: ResourceFormat) -> ResourceId {
         self.resources.push(Resource {
             label,
@@ -246,6 +258,20 @@ impl RenderGraph {
     /// swapchain. [`Load::Keep`] is how the later ones say so, and it is also
     /// what orders them.
     pub(crate) fn build(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        self.validate();
+        self.order = self.resolve_order();
+        self.allocate(device, width, height);
+    }
+
+    /// Everything [`build`](Self::build) checks and derives before it needs a
+    /// GPU: the read/write conflict, the sampled-usage flags, and the swapchain
+    /// rule.
+    ///
+    /// Split out from `build` so it can be tested. The declarations are the part
+    /// worth checking and the only part that does not need a device — a slice
+    /// that rearranges the frame (as Slice 19 did) otherwise has no automated
+    /// check at all.
+    fn validate(&mut self) {
         for pass in &self.passes {
             let written: Vec<ResourceId> = pass
                 .color
@@ -277,9 +303,6 @@ impl RenderGraph {
             !self.resources[SWAPCHAIN.0].sampled,
             "the swapchain image cannot be sampled",
         );
-
-        self.order = self.resolve_order();
-        self.allocate(device, width, height);
     }
 
     /// Topologically sort passes: a pass that reads a resource runs after every
@@ -373,8 +396,13 @@ impl RenderGraph {
     /// Centralizing it is half the reason this module exists: the depth
     /// attachment used to be resized by hand next to the surface reconfigure, and
     /// Slice 16 would have added two more places to forget.
+    ///
+    /// The size is the scene's rectangle, not the window's. Every pass but the
+    /// final blit runs entirely inside these textures, which is what keeps
+    /// `shader.wgsl`'s screen-space math honest: a UV of `[0,1]` is the camera's
+    /// whole frame *and* the whole texture, and those stay the same statement.
     fn allocate(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        // A zero-sized surface is a minimized window; wgpu rejects the texture.
+        // A zero-sized target is a minimized window; wgpu rejects the texture.
         let width = width.max(1);
         let height = height.max(1);
         for res in &mut self.resources[1..] {
@@ -404,7 +432,7 @@ impl RenderGraph {
         }
     }
 
-    /// Re-allocate every graph-owned texture for a new surface size.
+    /// Re-allocate every graph-owned texture for a new scene rectangle.
     pub(crate) fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.allocate(device, width, height);
     }
@@ -445,5 +473,119 @@ impl RenderGraph {
                 }
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Declare the engine's frame exactly as `Renderer::new` does, minus the
+    /// device.
+    ///
+    /// Duplicating the declarations is the cost of testing them at all: `build`
+    /// allocates textures and so needs a GPU, while `resolve_order` is pure. The
+    /// duplication is the point of failure to watch — if a pass is added in
+    /// `mod.rs` and not here, this stops describing the frame. It is still worth
+    /// it, because pass ordering is the one correctness property in the renderer
+    /// that can be checked without a screen, and Slice 19 rearranged it.
+    fn frame() -> (RenderGraph, Vec<&'static str>) {
+        let mut graph = RenderGraph::new(wgpu::TextureFormat::Bgra8UnormSrgb);
+        let scene_color = graph.resource("scene color", ResourceFormat::Color);
+        let scene_depth = graph.resource("scene depth", ResourceFormat::Depth);
+        let scene_blend = graph.resource("scene blend", ResourceFormat::Color);
+
+        graph.pass(
+            Pass::new("sky", PassKind::Sky).writes(scene_color, Load::Clear(wgpu::Color::BLACK)),
+        );
+        graph.pass(
+            Pass::new("opaque", PassKind::Opaque)
+                .writes(scene_color, Load::Keep)
+                .depth(scene_depth, Load::ClearDepth, true),
+        );
+        graph.pass(
+            Pass::new("composite", PassKind::Composite)
+                .reads(&[scene_color])
+                .writes(scene_blend, Load::Clear(wgpu::Color::BLACK)),
+        );
+        graph.pass(
+            Pass::new("blended", PassKind::Blended)
+                .reads(&[scene_color, scene_depth])
+                .writes(scene_blend, Load::Keep)
+                .depth(scene_depth, Load::Keep, false),
+        );
+        graph.pass(
+            Pass::new("present", PassKind::Present)
+                .reads(&[scene_blend, scene_depth])
+                .writes(SWAPCHAIN, Load::Clear(wgpu::Color::BLACK)),
+        );
+        graph.pass(Pass::new("overlay", PassKind::Overlay).writes(SWAPCHAIN, Load::Keep));
+
+        let order = graph
+            .resolve_order()
+            .into_iter()
+            .map(|i| graph.passes[i].label)
+            .collect();
+        (graph, order)
+    }
+
+    /// The frame schedules, and in the one order that is correct.
+    ///
+    /// Reading it as a list is the point: the water samples what the opaque pass
+    /// drew, so `blended` after `opaque` is a fact about the picture rather than
+    /// about the source file. Before Slice 16 this was enforced by nothing.
+    #[test]
+    fn frame_resolves_in_dependency_order() {
+        let (_, order) = frame();
+        assert_eq!(
+            order,
+            [
+                "sky",
+                "opaque",
+                "composite",
+                "blended",
+                "present",
+                "overlay"
+            ],
+        );
+    }
+
+    /// The two edges Slice 19 added, stated as properties rather than positions
+    /// so a future pass inserted between them does not fail this for no reason.
+    #[test]
+    fn present_follows_everything_that_writes_the_scene() {
+        let (_, order) = frame();
+        let at = |label: &str| order.iter().position(|l| *l == label).expect(label);
+        // The blit cannot run before the water is on the texture it blits.
+        assert!(at("present") > at("blended"));
+        assert!(at("present") > at("composite"));
+        // And the UI goes on top of the blit, not under it.
+        assert!(at("overlay") > at("present"));
+    }
+
+    /// Declaration order is what separates the two passes that accumulate onto
+    /// the same offscreen target, since neither reads what the other writes.
+    #[test]
+    fn blended_accumulates_onto_the_composite() {
+        let (_, order) = frame();
+        let at = |label: &str| order.iter().position(|l| *l == label).expect(label);
+        assert!(at("blended") > at("composite"));
+    }
+
+    /// `build` rejects a pass that samples what it draws to — the mistake this
+    /// module exists to make impossible, and the one the water pass is one
+    /// declaration away from at all times.
+    #[test]
+    #[should_panic(expected = "cannot be an attachment and a sampled input")]
+    fn a_pass_may_not_read_what_it_writes() {
+        let mut graph = RenderGraph::new(wgpu::TextureFormat::Bgra8UnormSrgb);
+        let color = graph.resource("scene color", ResourceFormat::Color);
+        graph.pass(
+            Pass::new("illegal", PassKind::Blended)
+                .reads(&[color])
+                .writes(color, Load::Keep),
+        );
+        // Panics in the declaration check, before it ever wants a device.
+        graph.validate();
     }
 }

@@ -221,6 +221,29 @@ impl ApplicationHandler<Renderer> for App {
             }
 
             WindowEvent::RedrawRequested => {
+                // A frozen frame: the screenshot harness has parked us on a
+                // checkpoint. Re-present what is already there and simulate
+                // nothing, so the window stays photographable and the picture
+                // stays exactly the one that was announced.
+                //
+                // Skipping `begin_frame` is what preserves the overlay's
+                // vertices (it is the call that clears them), and skipping
+                // `end_frame` below is what lets a click delivered during the
+                // freeze keep its press edge for the frame that follows. Both
+                // are deliberate; see `crate::capture`.
+                #[cfg(not(target_arch = "wasm32"))]
+                match renderer.capture_step() {
+                    crate::capture::Step::Frozen => {
+                        renderer.render();
+                        return;
+                    }
+                    // Motion accumulated while frozen is not this frame's motion
+                    // — the cursor was warped to a target, not dragged there.
+                    // Press edges survive, which is the point of the freeze.
+                    crate::capture::Step::Resumed => renderer.input_mut().discard_motion(),
+                    crate::capture::Step::Running => {}
+                }
+
                 // Start the frame: advance both clocks and clear the overlay so
                 // the consumer's hooks see a fresh delta-time and an empty UI to
                 // rebuild into. The count is this frame's fixed-step debt.
@@ -244,9 +267,14 @@ impl ApplicationHandler<Renderer> for App {
                 // The frame consumed this frame's input; clear the per-frame
                 // deltas and the event log (held keys/buttons persist).
                 renderer.input_mut().end_frame();
+                // Count it, and freeze here if it was a checkpoint — after the
+                // frame is on screen, so the announced number names a picture
+                // that exists rather than one about to be drawn.
+                #[cfg(not(target_arch = "wasm32"))]
+                renderer.capture_end_frame();
                 // A consumer that asked to quit during `update` gets its wish at
                 // the end of the frame rather than mid-way through one, so the
-                // frame it asked on is still drawn.
+                // frame it asked on is still drawn — and still counted above.
                 if renderer.exit_requested() {
                     event_loop.exit();
                 }

@@ -36,6 +36,10 @@ pub struct Clock {
     last: Option<f64>,
     /// The most recent delta, in seconds.
     dt: f32,
+    /// A delta to report instead of measuring one — the screenshot harness
+    /// pinning time so a frame is a pure function of its index. `None` in every
+    /// normal run, which is every run a consumer will ever have.
+    pinned: Option<f32>,
 }
 
 impl Default for Clock {
@@ -50,7 +54,28 @@ impl Clock {
         Self {
             last: None,
             dt: 0.0,
+            pinned: None,
         }
+    }
+
+    /// Report `dt` on every tick instead of measuring wall time.
+    ///
+    /// For the screenshot harness only, and the reason it can diff two runs at
+    /// all: with the delta pinned, `elapsed` — and therefore the ripple field,
+    /// the [`Timeline`]'s step payout and every UI animation — depends only on
+    /// how many frames have run, not on how fast the machine ran them.
+    ///
+    /// Note the **first tick still reports `0.0`**, pinned or not. That is not an
+    /// oversight: a frame with no predecessor genuinely has no delta, and keeping
+    /// the rule identical in both modes is what makes the pinned clock a faithful
+    /// stand-in rather than a subtly different one.
+    ///
+    /// Native only — the harness photographs a window, and the browser has none
+    /// it can reach. `tick` still consults `pinned` on both targets, where on the
+    /// web it is simply always `None`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn pin(&mut self, dt: f32) {
+        self.pinned = Some(dt);
     }
 
     /// Advance the clock to "now" and return the elapsed time since the previous
@@ -60,6 +85,14 @@ impl Clock {
     /// a backgrounded tab) can't inject a huge time step into a consumer's
     /// simulation.
     pub fn tick(&mut self) -> f32 {
+        if let Some(dt) = self.pinned {
+            // Still gated on `last`, so the first frame reports 0.0 exactly as an
+            // unpinned clock does. `last` is set to a non-`None` sentinel rather
+            // than a timestamp — nothing reads its value once pinned.
+            self.dt = if self.last.is_some() { dt } else { 0.0 };
+            self.last = Some(0.0);
+            return self.dt;
+        }
         let now = Self::now_seconds();
         let dt = match self.last {
             Some(prev) => (now - prev).max(0.0) as f32,
