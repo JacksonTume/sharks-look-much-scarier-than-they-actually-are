@@ -33,7 +33,9 @@ UI-shaped — and see the placement rule under *Conventions*.
 # Native
 cargo run --example terrain            # the capstone: layered Perlin + stream-power erosion
 cargo run --example workspace          # the scene inset in a UI pane (set_scene_rect)
-cargo run --example editor             # click/drag to pick and move objects (pointer_ray)
+cargo run --example editor             # click/drag to pick and move objects (pointer_ray);
+                                       # "+1000" grows the scene list to where a
+                                       # virtualized scroll area starts to matter
 cargo run --example scene              # articulated figures (instancing, material, primitives)
 cargo run --example triangle           # the smallest consumer (Esc / close to quit)
 cargo build                            # debug build
@@ -89,7 +91,15 @@ wrong (Windows reports `text: Some("a")` for `Ctrl+A`, so "select all" typed an
 `a`).
 The reverse also happens — two primitive bugs (an inverted pole degeneracy, a
 zero-length capsule emitting degenerate triangles) looked *fine* in a still frame
-and were caught by the outward-winding assertion. To confirm a change works:
+and were caught by the outward-winding assertion.
+
+There is one case where the recorder makes a claim no screen can: UI Slice 9's
+virtualized list. "Only these rows were built" is invisible by construction —
+a virtualized list and a real one are *supposed* to look identical — so
+`slmsttaa-ui/tests/virtual_rows.rs` compares the two draw lists directly. That is
+the exception, not a new rule.
+
+To confirm a change works:
 
 - **Always** `cargo build` (native) **and** `cargo build --target
   wasm32-unknown-unknown --lib` — the two targets diverge via `#[cfg]`, so one
@@ -112,6 +122,14 @@ and were caught by the outward-winding assertion. To confirm a change works:
 
 ## Conventions
 
+- **Never drive the developer's own mouse or keyboard.** Synthesizing global input
+  (`SetCursorPos`, `mouse_event`, `keybd_event`, `SendKeys`, `xdotool` against a
+  real display) seizes the machine someone is working on, and stray clicks land
+  wherever focus happens to be. `cargo xtask shoot` exists so this is never
+  necessary: it drives the demo through its own pinned frame clock and delivers
+  input to the window, not to the desktop. If the harness cannot run somewhere,
+  the interactive check belongs to a human — say which claim is unverified rather
+  than reaching for the pointer.
 - `web/pkg/` is a build artifact (`web/pkg/.gitignore` ignores its contents) —
   never edit or commit what `wasm-bindgen` emits there.
 - Keep native/web parity: anything touching instance/adapter/device/surface/event

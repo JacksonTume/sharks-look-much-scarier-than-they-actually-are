@@ -14,10 +14,15 @@ Slices [0](ROADMAP.md#slice-0--extraction-the-move) (extraction),
 [2](ROADMAP.md#slice-2--painter-capabilities-and-the-scroll-region) (painter
 capabilities), [3](ROADMAP.md#slice-3--layout) (layout),
 [4](ROADMAP.md#slice-4--theme-tokens--variants) (theme tokens),
-[5](ROADMAP.md#slice-5--typography-polish-labeled) (typography) and
-[6](ROADMAP.md#slice-6--animation-polish-labeled) (animation) are done. The
-toolkit is a zero-dependency crate the engine re-exports as `slmsttaa::ui`, and it
-now has the machinery that separates a toolkit from a pile of sliders:
+[5](ROADMAP.md#slice-5--typography-polish-labeled) (typography),
+[6](ROADMAP.md#slice-6--animation-polish-labeled) (animation),
+[7](ROADMAP.md#slice-7--keyboard-focus-and-text-entry-done) (keyboard and text
+entry), [8](ROADMAP.md#slice-8--a-header-that-lines-up-with-its-body-done) (a
+header that lines up with its body) and
+[9](ROADMAP.md#slice-9--only-lay-out-the-rows-you-can-see-done) (virtualized rows)
+are done. The toolkit is a zero-dependency crate the engine re-exports as
+`slmsttaa::ui`, and it now has the machinery that separates a toolkit from a pile
+of sliders:
 
 - **Ids** — `hash(scope, label)`, with `push_id`/`pop_id`. Never keyed by
   declaration order, so a row appearing above a widget can't steal its identity
@@ -43,18 +48,32 @@ now has the machinery that separates a toolkit from a pile of sliders:
   144 Hz. Hover and press fades, focus rings, a growing slider knob, smooth
   scrolling, and collapsing sections. Turning it off is a theme value
   (`Motion::none()`), not a flag anything checks.
-- **A public seam** — `allocate` / `interact` / `painter` / `theme` / `animate`,
-  so a widget written by a consumer is not second-class.
+- **Keyboard** — an ordered key and text event log, Tab and Shift-Tab focus
+  traversal, Enter and Space activating anything clickable, and `wants_keyboard`
+  so a camera and a text field can share a window. A shortcut is told from a
+  keystroke by the *engine*, because Windows reports `text: Some("a")` for
+  `Ctrl+A` and "select all" typed an `a` until it didn't.
+- **Scale** — `scroll_area_virtual` places only the rows its viewport covers, so
+  a list of five thousand costs the same as a list of five: seventeen draw
+  commands either way, and 0.71 ms where the same list cost 11 ms of a 16.7 ms
+  frame before. See [Slice
+  9](ROADMAP.md#slice-9--only-lay-out-the-rows-you-can-see-done) for what that
+  measurement found, which was mostly not what it went looking for.
+- **A public seam** — `allocate` / `interact` / `painter` / `theme` / `animate` /
+  `next_id` / `focusable`, so a widget written by a consumer is not second-class.
+  Two consumers have now built a table, a list and a filter on it without this
+  crate growing any of them.
 
 Widgets: `title` / `section` (collapsible) / `label` / `label_muted` /
-`label_value` / `separator` / `button` / `checkbox` / `slider` / `scroll_area`.
+`label_value` / `separator` / `button` / `checkbox` / `slider` / `text_field` /
+`scroll_area` / `scroll_area_headed` / `scroll_area_virtual`.
 
 **Nothing is scheduled next, and that is the intended state.** Every slice above
-was pulled into existence by something the terrain demo could not do; it can now
-do all of it. The next piece of UI work should arrive from a demo hitting a wall,
-not from the roadmap — see [*Waiting on a
+was pulled into existence by something a demo could not do. The next piece of UI
+work should arrive the same way, not from the roadmap — see [*Waiting on a
 roadblock*](ROADMAP.md#waiting-on-a-roadblock) for what is recognized but
-deliberately unbuilt.
+deliberately unbuilt, and [`WISHLIST.md`](WISHLIST.md) for what a second,
+data-dense consumer would want.
 
 **New UI code and UI docs belong here, not in the engine.**
 

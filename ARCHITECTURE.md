@@ -162,9 +162,11 @@ slmsttaa-ui/          The UI toolkit, as its own zero-dependency workspace membe
 │   │                 and dt, filled in by the host), the toolkit's own Key /
 │   │                 Modifiers / Event, UiState (hot/active/focused, the tab
 │   │                 ring, collapsed sections, scroll offsets, panel rects,
-│   │                 caret state, and the eased per-widget floats), and the
-│   │                 Response every widget returns.
-│   ├── layout.rs     Rect + the stack of layout regions widgets are placed in.
+│   │                 caret state, reveal targets, and the eased per-widget
+│   │                 floats), and the Response every widget returns.
+│   ├── layout.rs     Rect, Rows (how tall a virtualized list is, without
+│   │                 walking it) + the stack of layout regions widgets are
+│   │                 placed in.
 │   ├── theme.rs      Theme: semantic color tokens plus the radius/spacing/type/
 │   │                 control scales, with Variant and Size. Public, so a widget
 │   │                 written by a consumer can match the built-in ones — and no
@@ -172,8 +174,8 @@ slmsttaa-ui/          The UI toolkit, as its own zero-dependency workspace membe
 │   └── widgets/      One file per widget: text.rs, button.rs, slider.rs,
 │                     text_field.rs.
 └── tests/            The project's only tests — layout + ids + hit-testing +
-                      theming, driven against RecordingPainter. No GPU, no window,
-                      no async.
+                      theming + which rows a virtualized list built, driven
+                      against RecordingPainter. No GPU, no window, no async.
 
 xtask/                Dev tooling (a separate workspace member, no deps). `cargo
 └── src/main.rs       xtask serve [example]` builds the example natively and for
