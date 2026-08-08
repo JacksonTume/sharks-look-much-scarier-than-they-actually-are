@@ -478,7 +478,16 @@ things a material can layer on top:
   of sines gives you.
 - **Refraction and screen-space reflection** (`refraction`, `absorption`,
   `reflection`), which are the only terms that read another pass's output and so
-  live in a second fragment entry point — see below.
+  live in a second fragment entry point — see below. **The refraction offset is
+  scaled by the surface's own alpha**, and that is a correctness requirement
+  rather than a taste call: the branch composites the scene itself and then forces
+  `alpha = 1.0`, so a fragment carrying almost no water is still opaque, and at
+  full offset it paints a copy of the scene fetched from tens of pixels away.
+  A surface with a soft edge hides that in a few pixels; a surface that is
+  *mostly* soft edge — terrain's rivers, a channel about a cell wide — is
+  destroyed by it, and came out as bundles of smeared streaks with dry ground
+  between them. Displacing in proportion to coverage means a surface that is
+  barely there moves nothing.
 
 Two properties of that list matter more than the terms themselves:
 

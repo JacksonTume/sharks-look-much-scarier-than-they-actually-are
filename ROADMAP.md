@@ -534,6 +534,20 @@ constant is back to meaning what it says. And the minimap divided raw depth by
 end of the run the map painted lakes over basins the 3D view correctly showed as
 dry — two views of one field, disagreeing.
 
+*And it was only half of it.* Fixing the routing left the water still reading as
+lines, finer ones — and that half was **shading, not the model**, which is worth
+recording because the whole investigation had been aimed at the simulation. The
+refraction added in Slice 16 composites the scene itself and then forces
+`alpha = 1.0`, so a fragment with almost no water on it is nonetheless opaque and
+paints a copy of the scene fetched from tens of pixels away. On a lake that is a
+few pixels at the shore; on a channel a cell wide it is the entire surface, and it
+came out as bundles of smeared streaks with dry ground showing between them.
+Scaling the offset by the surface's own alpha fixes it (`shader.wgsl`, and see
+ARCHITECTURE.md's material list). It was isolated by turning the water's four
+shading terms off and back on one at a time under `cargo xtask shoot` — with all
+four off the ribbons were already clean, which said the field was fine and the
+material was not.
+
 *Deferred out of this slice, on purpose:*
 
 - **Animating it.** The original plan for this slice was the erosion *running* on

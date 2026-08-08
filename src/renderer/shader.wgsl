@@ -414,8 +414,22 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
         // mostly. Real refraction bends by Snell's law along the view ray; this
         // is the screen-space stand-in, and at these angles the difference is not
         // visible.
+        //
+        // **Scaled by how much water is actually here**, and that factor is a fix
+        // rather than a refinement. This branch ends by forcing `alpha = 1.0` and
+        // compositing the scene itself, so a fragment with almost no water on it
+        // is still an *opaque* fragment — and at full displacement it paints a
+        // copy of the scene fetched from tens of pixels away. Where a surface
+        // fades out over a few pixels that is invisible; where it is *mostly*
+        // fade it is the whole surface, and the terrain demo's rivers are exactly
+        // that (a channel a cell wide is feathered edge nearly all the way
+        // across). They came out as bundles of fine smeared streaks with dry
+        // ground showing between them, which is what a screen-space offset
+        // dragging a displaced copy of the ground looks like. Displacing in
+        // proportion to coverage means a surface that is not there does not move
+        // anything, and a lake still refracts at full strength.
         var uv = clamp(
-            screen_uv + vec2<f32>(normal.x, normal.z) * refraction,
+            screen_uv + vec2<f32>(normal.x, normal.z) * refraction * in.color.a,
             vec2<f32>(0.0),
             vec2<f32>(1.0),
         );
