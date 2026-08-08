@@ -589,7 +589,8 @@ impl Input {
         self.events.clear();
     }
 
-    /// Throw away accumulated motion, keeping button state and press edges.
+    /// Throw away accumulated motion, keeping button state, press edges, and the
+    /// wheel.
     ///
     /// For the screenshot harness, which parks the engine on a frame and then
     /// warps the cursor somewhere to click. All of that motion arrives as one
@@ -598,10 +599,16 @@ impl Input {
     ///
     /// The press edges deliberately survive: the whole point of holding a frame
     /// is that a click delivered during it should land on the frame that follows.
+    ///
+    /// **So does the wheel**, and it did not always. This cleared `scroll_delta`
+    /// too, which was invisible for as long as a capture script could not turn a
+    /// wheel — and the moment one could, every scripted notch was discarded on
+    /// precisely the frame that would have read it. A scroll is not motion the
+    /// harness caused as a side effect of aiming; it is input a script asked for,
+    /// exactly as deliberate as the click whose edge already survives here.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn discard_motion(&mut self) {
         self.mouse_delta = (0.0, 0.0);
-        self.scroll_delta = 0.0;
     }
 }
 

@@ -1,0 +1,59 @@
+# UI Slice 9's verification: a virtualized list, actually scrolled.
+#
+# The claim is that `scroll_area_virtual` places only the rows its viewport
+# covers *and* puts them exactly where a plain scroll area would. The first half
+# is asserted in `slmsttaa-ui/tests/virtual_rows.rs`, where the recorder can see
+# which rows were built. The second half is a picture, and these are the pictures:
+# a list of six, a list of five thousand, and the same list part-way down.
+#
+# Run it:  cargo xtask shoot editor --script capture/editor-list.script
+#
+# Frame numbers, not seconds. The engine holds on each one, so a click lands on a
+# known frame — which is what makes the coordinates below stable rather than a
+# guess about timing.
+#
+# The panel coordinates are logical points anchored to the top-left corner, so
+# they do not move with the window size. They *do* reflow: selecting an object
+# grows the Selected section by eight rows and pushes everything under it down,
+# which is why nothing here clicks a list row.
+
+# Frame 120: six objects, the list not yet overflowing its own viewport.
+120  shot  rest
+
+# Five presses of +1000. Each is on its own frame so the click lands while the
+# engine is parked, rather than somewhere in the gap between two.
+140  move  78 390
+140  click
+160  click
+180  click
+200  click
+220  click
+
+# Frame 240: 5,006 rows. Six of them are on screen and six of them were built.
+# `ui` in the HUD is the whole point of the slice — it read 11 ms here before.
+240  shot  populated
+
+# Into the list body — and then wait twenty frames before turning the wheel.
+#
+# That gap is load-bearing, and the first version of this script did not have it.
+# A frozen frame runs `render` and nothing else, so the demo never *updates* with
+# the pointer in its new place, and `ui_pointer` — which is deliberately one frame
+# stale, see `EditorDemo::ui_pointer` — is still false when the notch arrives. The
+# scroll goes to the camera instead of the list, and the picture is of a zoomed-in
+# scene beside a list that did not move. Moving on an earlier frame lets a real
+# update run in between.
+260  move  120 300
+
+# Two notches is 56 points, which is not a whole number of 22-point rows: the top
+# row must straddle the viewport's edge rather than a blank strip opening above it.
+280  wheel  -2
+282  shot  midglide
+320  shot  settled
+
+# A long way down, where a row's index is nowhere near its position on screen.
+340  wheel  -60
+380  shot  scrolled
+
+# And back to the top, which is the clamp that off-by-ones live in.
+400  wheel  120
+440  shot  backtotop

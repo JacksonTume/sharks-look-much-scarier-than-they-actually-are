@@ -12,20 +12,26 @@
 //! so `web/index.html` never has to change), then (3) serves `web/` from a tiny
 //! built-in static file server — no Python, no extra crates.
 //!
-//! `shoot` runs the example under a virtual X server and photographs it at exact
-//! frame numbers, optionally clicking things in between. It exists because
+//! `shoot` runs the example and photographs it at exact frame numbers,
+//! optionally clicking, typing and scrolling in between. It exists because
 //! `ROADMAP.md`'s Definition of Done ends with "runs and shows the new capability
-//! on screen", and doing that by hand in a container costs minutes per look. See
-//! [`shoot`] for what it needs installed.
+//! on screen", and doing that by hand costs minutes per look — in a container
+//! because there is no display, and on a desktop because a person has to sit
+//! there doing it. It works on **Linux and Windows**; see [`harness`] for the two
+//! very different ways that is arranged.
 //!
 //! **This crate has no dependencies and must keep it that way** — it is the thing
 //! you run constantly, `fontbake` was split out to a separate member purely to
 //! preserve that, and `.claude/CLAUDE.md` says so in as many words. Everything
 //! here is `std` plus shelling out to tools that are already prerequisites.
 //!
-//! External prerequisites: `wasm-bindgen` (the CLI) for `serve`; `Xvfb`,
-//! ImageMagick's `import`, and `xdotool` for `shoot`.
+//! External prerequisites: `wasm-bindgen` (the CLI) for `serve`. On Linux,
+//! `shoot` also needs `Xvfb`, ImageMagick's `import` and `xdotool`; on Windows it
+//! needs nothing, because it talks to Win32 itself rather than shelling out.
 
+mod harness;
+
+use harness::Harness;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -145,10 +151,10 @@ fn print_help() {
     println!("                    [--out <DIR>] [--size <WxH>] [--release]\n");
     println!("serve  Builds <example> (default: terrain) natively and for the web,");
     println!("       then serves web/ at http://localhost:<port> (default 8080).\n");
-    println!("shoot  Runs <example> under a virtual X server and photographs it at");
-    println!("       exact frame numbers, writing PNGs to <DIR> (default: capture/).");
-    println!("       A --script drives clicks between shots. Needs Xvfb, the");
-    println!("       ImageMagick `import` tool, and xdotool.");
+    println!("shoot  Runs <example> and photographs it at exact frame numbers,");
+    println!("       writing PNGs to <DIR> (default: capture/). A --script drives");
+    println!("       clicks, keys and the wheel between shots. On Linux it needs");
+    println!("       Xvfb, ImageMagick's `import` and xdotool; on Windows, nothing.");
 }
 
 /// Build the example natively and for the web, then serve `web/`.
@@ -201,6 +207,13 @@ enum Action {
     Move(u32, u32),
     /// Press and release the left button wherever the pointer is.
     Click,
+    /// Turn the wheel, in notches: negative scrolls down, the way a scroll area
+    /// reads it.
+    ///
+    /// Added when a virtualized list needed checking and the harness could not
+    /// scroll one — the demo could be clicked and typed at but not *read*, which
+    /// left the one widget whose whole behaviour is scrolling unreachable.
+    Wheel(i32),
     /// Tap a key by `xdotool` name (`space`, `Escape`, `w`).
     Key(String),
 }
@@ -272,10 +285,8 @@ fn shoot(
     checkpoints.dedup();
 
     // Checked before the build, because a three-minute compile followed by
-    // "could not run `Xvfb`" wastes the time and buries the actual reason. The
-    // harness needs all three: an X server to render into, `import` to
-    // photograph it, and `xdotool` to click it.
-    require_capture_tools();
+    // "could not run `Xvfb`" wastes the time and buries the actual reason.
+    Harness::require_tools();
 
     println!("==> building `{example}`");
     cargo(&root, &build_args(example, release, false));
@@ -306,11 +317,14 @@ fn shoot(
         frame_list.join(",")
     );
 
-    let (mut xvfb, display) = start_xvfb(w, h);
+    let mut stage = Harness::start(&root, w, h);
 
-    let mut child = Command::new(&bin)
-        .current_dir(&root)
-        .env("DISPLAY", &display)
+    let mut command = Command::new(&bin);
+    command.current_dir(&root);
+    for (key, value) in stage.env() {
+        command.env(key, value);
+    }
+    let mut child = command
         // A pinned delta is the whole reason two runs can be compared. 1/60 s is
         // arbitrary but it is what the demos are tuned to look right at.
         .env("SLMSTTAA_CAPTURE_DT", "0.0166666")
@@ -324,10 +338,14 @@ fn shoot(
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| {
-            let _ = xvfb.kill();
+            stage.stop();
             eprintln!("error: could not run {}: {e}", bin.display());
             exit(1);
         });
+
+    // Which process to photograph. X11 does not care — its display holds one
+    // window — but a Windows desktop holds hundreds.
+    stage.attach(child.id());
 
     let stdout = child.stdout.take().expect("stdout was piped");
     let mut stdin = child.stdin.take().expect("stdin was piped");
@@ -352,7 +370,7 @@ fn shoot(
             eprintln!("error: the example exited before frame {frame}");
             eprintln!("hint: run it directly to see why, or lower --frames");
             let _ = child.kill();
-            let _ = xvfb.kill();
+            stage.stop();
             exit(1);
         }
 
@@ -364,17 +382,14 @@ fn shoot(
                     } else {
                         out_dir.join(format!("{example}-{name}.png"))
                     };
-                    grab(&root, &display, &file);
+                    stage.shot(&file);
                     println!("    frame {frame}: {}", file.display());
                     shots += 1;
                 }
-                Action::Move(x, y) => xdo(
-                    &root,
-                    &display,
-                    &["mousemove", &x.to_string(), &y.to_string()],
-                ),
-                Action::Click => xdo(&root, &display, &["click", "1"]),
-                Action::Key(key) => xdo(&root, &display, &["key", key]),
+                Action::Move(x, y) => stage.mouse_move(*x, *y),
+                Action::Click => stage.click(),
+                Action::Wheel(notches) => stage.wheel(*notches),
+                Action::Key(key) => stage.key(key),
             }
         }
 
@@ -385,164 +400,13 @@ fn shoot(
     }
 
     // Everything wanted has been captured; the example has no other way to know.
-    // Both children are ours, so both die here — the reason this does not shell
-    // out to `xvfb-run`, which would have left the example behind.
+    // Both the demo and whatever the harness started are ours, so both die here —
+    // the reason this does not shell out to `xvfb-run`, which would have left the
+    // example behind.
     let _ = child.kill();
     let _ = child.wait();
-    let _ = xvfb.kill();
-    let _ = xvfb.wait();
+    stage.stop();
     println!("\n  {shots} shot(s) in {}", out_dir.display());
-}
-
-/// Start a virtual X server on the first free display, and wait for it.
-///
-/// Returns the handle to kill later and the `DISPLAY` value everything else must
-/// be given — the example, `import` and `xdotool` alike. That sharing is the
-/// whole point; see [`shoot`] for what happens without it.
-/// Whether `tool` is runnable at all, asked with a flag that prints and exits
-/// rather than doing any work — `Xvfb` with no arguments would start a server.
-fn have_tool(tool: &str, probe: &str) -> bool {
-    Command::new(tool)
-        .arg(probe)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok()
-}
-
-/// Fail early, once, naming **every** missing prerequisite.
-///
-/// The harness is X11-only by construction: it owns an `Xvfb` display, and
-/// `import` and `xdotool` both talk to one. That is a fine constraint — the
-/// point is a pinned, reproducible frame, and a virtual display is how you get
-/// one — but it means `shoot` cannot work on a bare Windows or macOS box, and
-/// the failure should say so instead of surfacing as a missing binary or a
-/// spawn error partway through.
-fn require_capture_tools() {
-    const TOOLS: [(&str, &str, &str); 3] = [
-        ("Xvfb", "-help", "apt-get install xvfb"),
-        ("import", "-version", "apt-get install imagemagick"),
-        ("xdotool", "--version", "apt-get install xdotool"),
-    ];
-
-    let missing: Vec<&(&str, &str, &str)> = TOOLS
-        .iter()
-        .filter(|(tool, probe, _)| !have_tool(tool, probe))
-        .collect();
-    if missing.is_empty() {
-        return;
-    }
-
-    eprintln!("error: `cargo xtask shoot` cannot run here — it needs an X11 display.");
-    eprintln!();
-    for (tool, _, install) in &missing {
-        eprintln!("  missing `{tool}`  ({install})");
-    }
-    eprintln!();
-    eprintln!("The harness renders into an Xvfb display, photographs it with");
-    eprintln!("ImageMagick's `import`, and clicks it with `xdotool`, so it is");
-    eprintln!("Linux-only. On Windows or macOS, run the demo and look at it:");
-    eprintln!();
-    eprintln!("  cargo run --example <name>");
-    exit(1);
-}
-
-fn start_xvfb(w: u32, h: u32) -> (std::process::Child, String) {
-    for number in 99..120 {
-        let socket = format!("/tmp/.X11-unix/X{number}");
-        // X servers advertise themselves with a socket named after the display.
-        // Skipping taken ones up front means two captures can run at once
-        // without racing, which matters more than it sounds: losing that race
-        // shows up as a screenshot of somebody else's window.
-        if Path::new(&socket).exists() {
-            continue;
-        }
-
-        let display = format!(":{number}");
-        let spawned = Command::new("Xvfb")
-            .arg(&display)
-            .args(["-screen", "0", &format!("{w}x{h}x24")])
-            .args(["-nolisten", "tcp"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-
-        let mut child = match spawned {
-            Ok(child) => child,
-            Err(e) => {
-                eprintln!("error: could not run `Xvfb`: {e}");
-                eprintln!("install it with: apt-get install xvfb");
-                exit(1);
-            }
-        };
-
-        // Poll for the socket rather than sleeping a fixed amount: a cold
-        // container takes noticeably longer than a warm one, so a fixed wait is
-        // either too short (flaky) or too long (paid on every capture).
-        for _ in 0..100 {
-            if Path::new(&socket).exists() {
-                return (child, display);
-            }
-            if matches!(child.try_wait(), Ok(Some(_))) {
-                break;
-            }
-            thread::sleep(std::time::Duration::from_millis(50));
-        }
-        let _ = child.kill();
-    }
-
-    eprintln!("error: no free X display in :99..:120");
-    exit(1);
-}
-
-/// Photograph the engine's window into `file`.
-///
-/// Targets the window by **name** rather than grabbing the root. The virtual
-/// screen is usually larger than the window, so a root grab pads the image with
-/// desktop background — which is invisible to a human and fatal to a diff.
-fn grab(root: &Path, display: &str, file: &Path) {
-    // Two attempts: the window can be a moment behind the first checkpoint on a
-    // cold software renderer, and a retry is cheaper than a wrong answer.
-    for attempt in 0..2 {
-        let status = Command::new("import")
-            .current_dir(root)
-            .env("DISPLAY", display)
-            .args(["-window", "SLMSTTAA"])
-            .arg(file)
-            .status();
-        match status {
-            Ok(s) if s.success() => return,
-            Ok(_) if attempt == 0 => thread::sleep(std::time::Duration::from_millis(400)),
-            Ok(_) => {
-                eprintln!("error: `import` could not find a window named SLMSTTAA");
-                exit(1);
-            }
-            Err(e) => {
-                eprintln!("error: could not run `import`: {e}");
-                eprintln!("install it with: apt-get install imagemagick");
-                exit(1);
-            }
-        }
-    }
-}
-
-/// Drive the pointer or keyboard with `xdotool`.
-fn xdo(root: &Path, display: &str, args: &[&str]) {
-    let status = Command::new("xdotool")
-        .current_dir(root)
-        .env("DISPLAY", display)
-        .args(args)
-        .status();
-    match status {
-        Ok(s) if s.success() => {}
-        Ok(_) => eprintln!("warning: xdotool {args:?} failed"),
-        Err(e) => {
-            eprintln!("error: could not run `xdotool`: {e}");
-            eprintln!("install it with: apt-get install xdotool");
-            exit(1);
-        }
-    }
 }
 
 /// Parse a capture script.
@@ -553,6 +417,7 @@ fn xdo(root: &Path, display: &str, args: &[&str]) {
 /// 120  shot   inset
 /// 120  move   414 368
 /// 150  click
+/// 150  wheel  -3
 /// 150  shot   selected
 /// ```
 ///
@@ -587,6 +452,10 @@ fn read_script(path: &Path) -> Vec<Step> {
                 _ => bad("move needs X and Y"),
             },
             Some("click") => Action::Click,
+            Some("wheel") => match words.next().map(str::parse) {
+                Some(Ok(notches)) => Action::Wheel(notches),
+                _ => bad("wheel needs a notch count, negative to scroll down"),
+            },
             Some("key") => match words.next() {
                 Some(key) => Action::Key(key.to_string()),
                 None => bad("key needs a key name"),

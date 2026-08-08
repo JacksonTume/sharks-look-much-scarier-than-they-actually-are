@@ -883,14 +883,27 @@ worked around:
 The first is the honest cost of the bargain and the likeliest driver of a Slice 10:
 a tab ring that a container can extend without every row declaring itself.
 
-**On the verification, which is short of the usual.** The headless half is
-unusually strong here — this is the first slice whose central claim (*only these
-rows were built*) the recording painter can state directly, rather than
-approximating. The interactive half is not: `cargo xtask shoot` is Linux-only and
-refuses on Windows, so **the scrolled list has not been watched on a screen** on
-the machine this was written on. A still frame of the six-object list is correct;
-a glide is not a still frame. Run `cargo run --example editor`, press **+1000**,
-and wheel it hard in both directions before believing the paragraph above.
+**On the verification.** The headless half is unusually strong here — this is the
+first slice whose central claim (*only these rows were built*) the recording
+painter can state directly rather than approximate, because a virtualized list
+and a real one are supposed to look identical.
+
+The interactive half was, briefly, missing: `cargo xtask shoot` was Linux-only, so
+the scrolled list could not be watched on the machine this was written on. That
+turned out to be worth fixing rather than disclaiming, and
+[`capture/editor-list.script`](../capture/editor-list.script) is the check written
+down — five presses of **+1000**, then the wheel, then the shot mid-glide where
+`box 1` is cut by the viewport's top edge and `box 7` by its bottom. Two partial
+rows and no blank strip is the picture that says the range came from the eased
+offset; taking it from the target instead opens a gap under the header.
+
+**Writing that script found two bugs, neither of them in this slice.** The wheel
+went to the camera rather than the list, because a frozen frame runs no update and
+`ui_pointer` is deliberately one frame stale — a script has to move the pointer on
+an *earlier* frame than it scrolls. And then the wheel did nothing at all, because
+`Input::discard_motion` cleared `scroll_delta` along with the mouse delta. That
+was invisible for as long as a capture script could not turn a wheel, and wrong
+the moment one could.
 
 ---
 

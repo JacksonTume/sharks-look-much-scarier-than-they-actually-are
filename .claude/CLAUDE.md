@@ -53,11 +53,13 @@ cargo xtask serve cube                 # a specific example; also --release / --
 # web/pkg/ as app.js, and serve web/ from a built-in static server (xtask/).
 
 # Photograph a demo, deterministically — the mechanical half of "run it and look
-# at it". Needs Xvfb + ImageMagick + xdotool (the session-start hook installs
-# them). Output lands in capture/ and is gitignored.
+# at it". Works on Linux (needs Xvfb + ImageMagick + xdotool, which the
+# session-start hook installs) and on Windows (needs nothing; the window is
+# parked off the desktop and never appears). capture/ is gitignored.
 cargo xtask shoot workspace                    # one PNG at frame 120
 cargo xtask shoot terrain --frames 400 --size 1280x720
 cargo xtask shoot workspace --script capture/workspace.script   # clicks between shots
+cargo xtask shoot editor --script capture/editor-list.script    # UI Slice 9's check
 
 # Type-check the wasm target without packaging
 cargo build --target wasm32-unknown-unknown --lib
@@ -114,8 +116,20 @@ To confirm a change works:
   a before/after you can diff. It pins the frame clock, so two runs of the same
   commit are pixel-identical and `compare -metric AE a.png b.png` is a real
   answer rather than noise — `terrain` differed by 0.6% between hand-taken
-  screenshots and by zero through the harness. A `--script` adds clicks at exact
-  frames; `capture/workspace.script` is Slice 19's picking check written down.
+  screenshots and by zero through the harness. A `--script` adds `move` / `click`
+  / `wheel` / `key` steps at exact frames; `capture/workspace.script` is Slice
+  19's picking check written down and `capture/editor-list.script` is UI Slice
+  9's. **It runs on Windows as well as Linux** — the demo's window is parked off
+  the desktop and driven by posted messages, so nothing appears on screen and the
+  developer's own mouse is never touched.
+
+  Two things about writing a script, both learned the hard way. A frozen frame
+  runs `render` and nothing else, so anything a demo derives from *last* frame's
+  update — `ui_pointer`, most obviously — is stale while it is parked: move the
+  pointer on an earlier frame than you click or scroll with it. And panel
+  coordinates are stable in logical points but **reflow**, so a click that opens a
+  section moves everything under it.
+
   It does **not** replace looking: it proves pixels did not move, which is a
   different claim from "this is right", and every bug in the list above was found
   by a person noticing something was wrong rather than merely different.

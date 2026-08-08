@@ -115,10 +115,10 @@ no screenshot tool until something installs them.
 looking: it photographs what the engine draws, and a picture nobody looks at
 proves only that the pixels did not change.
 
-**It is Linux-only, and it now says so.** The harness owns an `Xvfb` display and
-drives it with ImageMagick's `import` and `xdotool`, none of which exist on a
-bare Windows or macOS box. Two things made that land badly, both fixed while
-verifying Slice 20 from a Windows workstation:
+**It was Linux-only, and is not any more.** The harness owned an `Xvfb` display
+and drove it with ImageMagick's `import` and `xdotool`, none of which exist on a
+bare Windows box. Two things made that land badly, both fixed while verifying
+Slice 20 from a Windows workstation:
 
 - The example path was built without `std::env::consts::EXE_SUFFIX`, so on
   Windows it looked for `examples/terrain` on a machine that had just finished
@@ -129,10 +129,36 @@ verifying Slice 20 from a Windows workstation:
   runs **before** the build and names every missing tool at once, rather than
   spending minutes compiling to arrive at `could not run Xvfb`.
 
-Neither changes what the harness does where it works. They are worth the entry
-because a verification tool that fails confusingly is worse than one that is
-merely unavailable: the first time this was hit, the error read as a build
-problem rather than as "wrong operating system".
+**Then it grew a Windows half**, because "run the demo and look at it" is not a
+workable answer when the person who has to look is the one asking for the
+capture. The protocol was already portable — a pinned clock, checkpoints on
+stdout, a newline to release — so only three things were X11-shaped: somewhere to
+render, a way to photograph, a way to poke. Those are now a seam (`xtask/src/harness/`)
+with two implementations, and `shoot` itself contains no `#[cfg]` at all.
+
+The Windows side is deliberately unlike the Linux one, and the differences are
+the interesting part:
+
+- **No virtual display, so the window is parked off the desktop** — past the left
+  edge of the virtual screen, never activated. DWM keeps composing it, which is
+  all `PrintWindow(PW_RENDERFULLCONTENT)` needs, so a capture runs with nothing
+  visible and focus undisturbed. If a driver returns black for that — a real
+  possibility for a swap chain, and not an error it reports — the shot is retaken
+  from the screen and the window comes back into view for it, with a note saying
+  why.
+- **Input is posted to the window, not to the desktop.** `xdotool` warps the real
+  pointer; `PostMessageW` does not. That is a correctness improvement as well as
+  a courtesy — a synthetic click can no longer land in whatever happens to have
+  focus — and it is now a convention in `.claude/CLAUDE.md`.
+- **No dependencies, still.** Win32 is declared by hand, and the PNG writer is a
+  hundred lines using stored (uncompressed) deflate blocks, which is a real zlib
+  stream that every reader accepts. `capture/` is gitignored, so the size does
+  not matter and the compressor nobody needs was not written.
+
+A verification tool that fails confusingly is worse than one that is merely
+unavailable — but one that works everywhere is better than either, and the first
+thing it did on Windows was find two bugs in itself (see *Slice 9* in the UI
+roadmap).
 
 ### What it does
 
@@ -142,10 +168,11 @@ cargo xtask shoot terrain  --frames 400 --size 1280x720
 cargo xtask shoot workspace --script capture/workspace.script
 ```
 
-It starts its own `Xvfb`, runs the example against it (lavapipe answers as a
-software Vulkan adapter), and photographs the window with ImageMagick's `import`
-at frame numbers the engine announces. A script adds `move`/`click`/`key` steps
-keyed to those same frames.
+On Linux it starts its own `Xvfb`, runs the example against it (lavapipe answers
+as a software Vulkan adapter), and photographs the window with ImageMagick's
+`import` at frame numbers the engine announces. On Windows it parks the window
+off the desktop and asks the compositor for it instead. A script adds
+`move`/`click`/`wheel`/`key` steps keyed to those same frames.
 
 ### The two things that made this worth building
 
