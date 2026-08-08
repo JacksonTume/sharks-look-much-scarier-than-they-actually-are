@@ -905,21 +905,145 @@ an *earlier* frame than it scrolls. And then the wheel did nothing at all, becau
 was invisible for as long as a capture script could not turn a wheel, and wrong
 the moment one could.
 
+## Slice 10 — a painter that can draw a chart ✅ done
+
+*Roadblock:* [`WISHLIST.md` § Painter additions for data
+visualization](WISHLIST.md#painter-additions-for-data-visualization), which had
+sat there with **no driver** and was named in this file's own *Nothing is
+scheduled* as the nearest unbuilt candidate. So one was found rather than
+assumed, in the demo that has been computing the data all along:
+[`examples/terrain.rs`](../examples/terrain.rs) keeps a heightmap per erosion
+pass, and its own rustdoc cites a headless probe — *"lake coverage falls from
+22.6% to zero by about pass 110"* — that had never once been on screen. The
+`Painter` was six methods, none of which can draw a diagonal, so it could not be.
+
+**The demo went first, and it went first properly.** Before any primitive was
+designed, `terrain.rs` grew the plot it wanted and drew it with the vocabulary
+that existed: one thin `fill_rect` column per sample. That runs, it is real data,
+and it is unreadable — 150 samples with nothing between them, and the shape of a
+curve lives in the connections. That picture is the roadblock, and it was taken
+before a line of `overlay.wgsl` changed.
+
+- **`Painter::polyline(points, width, color)`** — an open stroked path, round
+  joins and round caps.
+- **`Painter::convex_polygon(points, color)`** — a filled convex polygon,
+  implicitly closed, indifferent to winding.
+- **`Painter::image(rect, ImageId, uv, tint)`** and a defaulted `image_full`, plus
+  the `ImageId` the engine mints — the toolkit half of [engine Slice
+  21](../ROADMAP.md#slice-21--pixels-a-consumer-supplies-done).
+- **Three `DrawCmd` variants and three recorder accessors**, and eight tests in
+  [`tests/shapes.rs`](tests/shapes.rs).
+
+*Proof:* terrain's **Plot** section draws two curves with a shaded area under
+one, a marker tracking the pass, and a shaded-relief minimap beneath it — and the
+HUD draws the same routine again at a quarter the height. Eight tests in
+`tests/shapes.rs`, three of which were confirmed able to fail by making the
+recorder close a path and by removing the `stroke_rect` guard. Four shots in
+[`capture/terrain-plot.script`](../capture/terrain-plot.script). Native and wasm
+both build.
+
+**What shipped, and what it cost:**
+
+- **The seam describes shapes; it does not carry triangles.** The alternative —
+  one `mesh(verts, indices)` primitive with the stroker living up here as pure,
+  unit-testable code — was rejected for a specific reason rather than a stylistic
+  one: antialiasing is measured in **physical pixels**, and this crate
+  deliberately never learns the scale factor. A feather generated up here would
+  be one *point* wide, which is two pixels on a 2× display. `font::aa_band` takes
+  physical pixels and is called by the painter for exactly this reason, and the
+  same argument decides this. `DrawCmd::Polyline` therefore carries points, which
+  is also what keeps the tests readable.
+- **A stroke reuses the vertex format rather than growing it.** `MODE_SEGMENT`
+  reinterprets `Vertex2D::shape` — four floats that describe an axis-aligned box —
+  as the segment's two endpoints, and `params.x` as its half-width. Four lines of
+  WGSL, **no new vertex attribute**, and round joins and caps for free, because
+  "every point within half a width of this segment" already means a capsule. That
+  was economy when it was chosen and turned out to be necessity: `Vertex2D` is 80
+  bytes and `max_vertex_buffer_array_stride` is **255**, so the whole format has
+  room for two more `vec4`s and no more.
+- **A filled polygon gets no SDF, and could not have one.** An arbitrary convex
+  polygon needs its half-plane list per fragment: a storage buffer, which WebGL2
+  does not have and `overlay.wgsl` forbids by design, or more vertex attributes
+  than exist. So the antialiasing is geometric — a fan from the centroid, wrapped
+  in a ring whose outer vertices are alpha 0 — and it needed **no shader change at
+  all**, because `MODE_RECT` already falls past every branch and takes its alpha
+  straight from the per-vertex color.
+- **The feather is half a pixel either side, not one pixel outside.** The obvious
+  version reads half a pixel fatter than a `fill_rect` of the same bounds, because
+  every SDF mode centres its band *on* the edge. Getting this wrong is invisible
+  in isolation and wrong beside anything else.
+- **A translucent fill is exact; a translucent stroke is not**, and they differ
+  for the same reason. A polygon's fan tiles its interior once and its ring tiles
+  the border once, sharing *indices* rather than merely positions, so nothing
+  overlaps and nothing cracks. A stroke's consecutive capsules must overlap at the
+  joint — that is what makes the joint round — so straight alpha puts `a` over `a`
+  as `1 − (1 − a)²`. Both are on the trait, because a consumer holding one needs
+  to know which it has.
+- **The degenerate contract moved onto the trait, which fixed a live bug it did
+  not cause.** `Overlay::stroke_rect` had skipped a zero-width stroke since Slice
+  2; `RecordingPainter::stroke_rect` recorded one anyway. The two painters had
+  disagreed about an empty draw for **eight slices** — `text_size`'s exact failure
+  mode, surviving in miniature — and adding three more methods with unspecified
+  degenerate behaviour would have tripled it. `degenerate_shapes_draw_nothing`
+  covers all four.
+
+**What the demo found that the plan did not:**
+
+- **One shared vertical scale was wrong by two orders of magnitude.** Standing
+  water is a depth; per-pass movement is a difference between consecutive passes.
+  The second is roughly two hundred times smaller, so a shared axis drew it as a
+  flat line on the floor. Each series is now scaled to its own peak with that peak
+  labelled in its own color — which is a *chart* decision, made in the demo, by
+  the person who could see it was wrong.
+- **The plot's horizontal axis has to be the whole time axis**, not the part
+  computed so far. Taking it from the data let the plot stretch itself every time
+  erosion ran a pass, and put the marker — a position on the *whole* axis —
+  somewhere the curve disagreed with.
+- **A 160² thumbnail does not want the gate the meshes want.** The minimap was
+  first gated on the same `(pass, alpha)` the terrain mesh is, which reshades it
+  every frame while playing: 128,000 bilinear samples to move a lake edge by less
+  than a texel. It is gated on the pass alone.
+
+**What it deliberately does not do**, all named in the rustdoc rather than worked
+around: joins and caps are round and not configurable; the painter does not
+decimate a path; convexity is a precondition rather than a check; and a frame may
+draw **one** image, because one draw call binds one texture.
+
+**On the verification.** The headless half is honest about its reach and says so
+in its own module doc: `tests/shapes.rs` can assert that the toolkit passes points
+through untouched, that a clip and a layer land on every new primitive, and that a
+chart built from `allocate` + `painter` in the *test itself* is clipped by an
+ordinary `scroll_area`. It cannot assert the capsule field, the feather, the
+one-physical-pixel band, or the `Rgba8Unorm` round trip, all of which are on a GPU
+this project cannot reach headlessly. Those are what the capture script and a
+person looking at it are for.
+
+**Writing the capture script found a limit in the harness, not in this slice.**
+The obvious script scrubs to a drained landscape by clicking four fifths along the
+`pass` track. It does nothing at all: `Action::Click` is a press *and* release with
+no update in between, so `Response::held` is never true for a single frame, and
+every drag widget in the toolkit acts on `held`. A button works; a slider cannot be
+moved by the harness at all. The script advances by playing instead, and the gap is
+recorded in the [engine roadmap's harness
+list](../ROADMAP.md#waiting-on-a-roadblock) beside the wheel, which exists because
+of the same class of discovery.
+
 ---
 
 ## Nothing is scheduled
 
-Slices 7, 8 and 9 answered every roadblock a second consumer has actually hit, and
-the one this file's own wishlist argued would get more expensive to answer later.
+Slices 7 through 10 answered every roadblock a second consumer has actually hit,
+the one this file's own wishlist argued would get more expensive to answer later,
+and — in Slice 10 — the largest of the wishlist's recognized-but-undriven entries.
 **That is the correct state for this crate to be in**, not a gap to fill: every
-slice above was pulled into existence by something a consumer couldn't do, and the
+slice above was pulled into existence by something a demo couldn't do, and the
 list below is what a *future* one would have to ask for first.
 
-The next UI work should therefore arrive from a demo, not from this file. The
-nearest candidate recorded in [`WISHLIST.md`](WISHLIST.md) is the painter
-additions for charts, and it has no driver yet. Slice 9 named one of its own — a
-tab ring a virtualized container can extend — which is a roadblock a demo has met
-but no consumer has yet complained about.
+The next UI work should therefore arrive from a demo, not from this file. Slice 9
+named the nearest candidate and Slice 10 did not touch it: **a tab ring a
+virtualized container can extend**, so a long list is walkable by keyboard without
+every row declaring itself. It is a roadblock a demo has met and no consumer has
+yet complained about, which is a weaker pedigree than any slice above has.
 
 ## Waiting on a roadblock
 

@@ -234,6 +234,27 @@ written to prevent: the tooling becoming the project.
   needed: with no window manager under Xvfb nothing holds keyboard focus, so
   `xdotool key` may not arrive at all. Pointer input via XTEST is proven; keys
   are not, and the script grammar accepts `key` on trust.
+
+  **Measured, while verifying UI Slice 10, and it bounds what a diff can claim.**
+  Two runs of `capture/terrain-plot.script` from *the same binary* are byte-
+  identical, including the shots after a click — the property this file advertises,
+  and it holds. Across a **rebuild**, the two input-free shots stayed identical and
+  the two taken after a click did not. So a click's delivery frame is stable within
+  a build and not guaranteed across one, which is precisely the exactness this
+  entry promises. Until it lands, a golden image taken after an input step is a
+  same-build comparison, not a same-commit one.
+- **A press and a release, so a script can drag.** Found writing
+  `capture/terrain-plot.script` for UI Slice 10, and it is the wheel's story
+  again: `Action::Click` is a press *and* release with no update in between, so
+  `Response::held` is never true for a single frame — and **every drag widget in
+  the toolkit acts on `held`**. A button can be clicked; a slider cannot be moved
+  at all, which means the transport's scrub, both erosion `log_slider`s, and every
+  numeric knob in every demo are unreachable by the harness. The script worked
+  around it by letting the demo *play* to the pass it wanted, which happens to be
+  available here and will not always be. The fix is small — split `Click` into
+  `press`/`release` steps, or add a `drag` that holds across a frame — and it is
+  listed rather than done because the workaround cost nothing this time and the
+  grammar is worth changing once, deliberately.
 - **Web capture.** Headless Chrome here photographs a blank canvas from a WebGPU
   surface — verified against *unmodified* code as a control, so it is
   environmental rather than a defect. Until it moves, the web half of the
@@ -1835,6 +1856,69 @@ verification infrastructure you cannot run is how you find out later. The featur
 is proven by the trait and its tests; the demos are still called SLMSTTAA because
 they *are* SLMSTTAA.
 
+## Slice 21 — pixels a consumer supplies ✅ done
+
+*Roadblock:* [`examples/terrain.rs`](examples/terrain.rs) wanting a top-down
+thumbnail in its parameter panel. The 3D view shows one corner of a basin from one
+angle, and the thing the erosion demo is *about* — where the water is, and where it
+stops being — is a property of the whole map. The demo owns a heightmap and can
+shade one; it had no way to put pixels on the screen. This is the entry *Beyond*
+has carried as **consumer-supplied textures** since it was written, and the second
+of the two demanders it predicted (the other being the UI crate's textured quads —
+they turned out to be the same slice).
+
+- **`Renderer::create_image(width, height, rgba) -> ImageId`** and
+  **`Renderer::update_image(id, rgba)`**, beside `upload_mesh`/`update_mesh` and
+  with the same contract: append-only, handles never invalidated, nothing ever
+  freed.
+- **A second texture in the overlay's existing bind group**, with a 1×1 dummy
+  bound until a consumer supplies one, so the whole UI is **still one
+  `draw_indexed`**.
+- **`MODE_IMAGE` in `overlay.wgsl`**, tinting by the vertex color.
+
+*Proof:* terrain's minimap — a 160² shaded-relief thumbnail with the water mask,
+regenerated as the erosion runs, in `capture/terrain-plot.script`'s four shots.
+Native and wasm both build.
+
+**What shipped, and what it cost:**
+
+- **One atlas, not many, and that is a real restriction rather than a stage.**
+  The overlay's single draw call binds one texture; N images means splitting the
+  index run at every texture change, which gives up a property `ARCHITECTURE.md`
+  has claimed since UI Slice 1. So a frame may draw one image, a consumer packs
+  what it needs into one sheet and addresses it with `uv`, and a frame that asks
+  for a second gets an **edge-triggered** warning and a skipped primitive. Edge-
+  triggered because this project already has 170,897 lines of evidence about what
+  a per-frame complaint does to a log.
+- **`Rgba8Unorm`, not `Rgba8UnormSrgb`, and the fallback is what settles it.** The
+  overlay writes into a target that encodes, so a `Color` component is linear and
+  an image texel has to arrive as exactly `byte / 255` to sit in the same space as
+  the panel around it. On the WebGL2 path the surface cannot be re-viewed as sRGB
+  and nothing is encoded — the documented, visible wrongness. `Rgba8Unorm` keeps
+  an image wrong in precisely the same direction and amount as every color beside
+  it; sRGB would have made it wrong in a *second, different* way on one backend
+  only, which is worse than either.
+- **The dummy texture is load-bearing, not tidiness.** The layout declares the
+  binding whether or not anything ever draws an image, and a bind group with a
+  missing entry does not validate. Binding the *glyph atlas* there instead would
+  have validated — it is a filterable float texture too — and then quietly drawn
+  the font wherever an image belonged.
+- **The pipeline layout is fixed at construction; only the bind group moves**, and
+  only when a frame draws a different image than the last one did. A UI that draws
+  one image or none rebuilds nothing after startup.
+- **`ImageId` is declared in `slmsttaa-ui`**, which is the opposite of what the
+  keyboard did, deliberately. `Key` is declared on both sides and translated
+  because nothing outside the engine ever holds one; a consumer holds an `ImageId`
+  between creating an image and drawing it, so two types would have cost it a
+  conversion in its own code for no benefit. The id is `Painter` vocabulary, like
+  `Color` and `Rect`.
+
+**What it deliberately does not do:** no destroy, no resize, no mipmaps, no second
+sampler. `update_image` is same-size only — a thumbnail that regenerates every pass
+wants one texture rewritten, and terrain's is a **fixed** 160² with the heightmap
+resampled into it precisely because its grid moves between 32 and 256 and a
+per-resolution image would leak one texture per drag of the slider.
+
 ## The UI split (post-Slice 6)
 
 Slice 5 delivered a UI framework as a side effect of the terrain demo needing
@@ -1881,11 +1965,17 @@ terrain did.) Each of the rest waits for a consumer to ask:
   file, and the seam it needed (`Renderer::pointer_ray`) took nine lines. The
   items below have been sitting here longer and are still waiting for the same
   thing — a consumer that is actually blocked.
-- **Consumer-supplied textures.** The overlay already samples a glyph atlas, so
-  the shader work is adjacent, but no public API exists to upload an image and
-  nothing has demanded one. Two things would: a 3D demo wanting surface detail
-  that per-instance color can't express, and the UI crate's request for textured
-  quads (icons, portraits) — see [UI `WISHLIST.md`](slmsttaa-ui/WISHLIST.md).
+- ~~**Consumer-supplied textures**~~ — **landed as [Slice
+  21](#slice-21--pixels-a-consumer-supplies-done).** This entry predicted two
+  demanders, "a 3D demo wanting surface detail that per-instance color can't
+  express, and the UI crate's request for textured quads", and said the shader
+  work was adjacent to the glyph atlas. The shader work *was* adjacent — one mode
+  and one binding. What it got wrong is that it read as two separate demands
+  needing two answers, and only one of them ever arrived: terrain wanted a
+  **thumbnail of its own data**, which is neither surface detail nor an icon, and
+  answering it answered the UI request in the same breath because a picture in a
+  panel and an icon in a panel are the same primitive. The 3D half — a texture
+  sampled by the *scene* shader — is still unbuilt and still has no demander.
 - **An asset pipeline (glTF/OBJ + runtime file loading).** Explicitly *not* taken:
   Slice 11 answers "geometry the consumer didn't compute" with primitives plus
   transforms instead, which costs zero dependencies and no wasm asset-fetching

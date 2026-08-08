@@ -99,7 +99,7 @@ mod widgets;
 pub use font::Weight;
 pub use interact::{Event, Key, KeyEvent, Modifiers, Response, UiInput, UiState};
 pub use layout::{Rect, Rows};
-pub use painter::{Color, DrawCmd, Layer, Painter, RecordingPainter};
+pub use painter::{Color, DrawCmd, ImageId, Layer, Painter, RecordingPainter};
 pub use theme::{Motion, Size, Theme, TypeStep, Variant};
 pub use widgets::{Button, Slider, SliderLayout, TextField};
 

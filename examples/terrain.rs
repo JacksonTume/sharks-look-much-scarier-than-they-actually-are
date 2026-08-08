@@ -56,6 +56,23 @@
 //! The panel also carries [`log_slider`] — a widget written *here*, in the demo,
 //! from the toolkit's public API alone. That it can be is the point.
 //!
+//! **The *Plot* section is the same point made twice.** [`plot`] draws the
+//! erosion's own history — mean lake depth and mean height moved, one reading per
+//! pass — as two curves with the area under the first shaded and a marker on the
+//! pass currently rendered, and the HUD calls the identical routine at a quarter
+//! the height. Beneath it, [`TerrainDemo::shade_minimap`] shades a top-down
+//! thumbnail and hands the engine the pixels. All of it is written here, out of
+//! `allocate` + `painter` + three primitives ([`slmsttaa::ui::Painter::polyline`],
+//! [`convex_polygon`](slmsttaa::ui::Painter::convex_polygon) and
+//! [`image`](slmsttaa::ui::Painter::image)) and an [`ImageId`]. The
+//! toolkit has no chart widget, no plot, and no minimap, and it does not need
+//! one.
+//!
+//! The numbers were free. [`erosion::step`] has always returned the water
+//! belonging to the state it was given, and this demo threw that return away on
+//! every pass for three slices — so the series costs two sums over the grid and
+//! no second flow routing.
+//!
 //! The HUD's **light** toggle swaps one [`Theme`] value and restyles the whole
 //! UI — both panels, every built-in widget, and `log_slider` with them. That is
 //! the demo's half of the toolkit's design-token claim: if any widget had kept a
@@ -65,10 +82,10 @@
 //!   native — `cargo run --example terrain`
 //!   web    — `cargo xtask serve terrain`, then open the printed URL.
 
-use slmsttaa::ui::{font, Anchor, Rect, Response, Size, Theme, Ui, Variant};
+use slmsttaa::ui::{font, Anchor, Color, Rect, Response, Size, Theme, Ui, Variant};
 use slmsttaa::{
-    run, Application, Instance, Key, Material, Mesh, MeshHandle, MouseButton, RenderMode, Renderer,
-    Vertex,
+    run, Application, ImageId, Instance, Key, Material, Mesh, MeshHandle, MouseButton, RenderMode,
+    Renderer, Vertex,
 };
 
 #[path = "terrain/erosion.rs"]
@@ -177,6 +194,137 @@ fn log_slider(ui: &mut Ui, label: &str, value: &mut f32, min: f32, max: f32) -> 
     );
 
     response
+}
+
+/// A plot of one or more series against the erosion time axis, written *here*
+/// rather than in the toolkit — a chart is content, and content belongs in the
+/// consumer.
+///
+/// `series` are sampled at pass 0, 1, 2, … and share one vertical scale, so two
+/// quantities in the same units can be read against each other. `marker`, if
+/// given, is a position along the axis in `0..=1` — the scrub, so the plot says
+/// where on this curve the landscape currently on screen is sitting. `labels`
+/// buys the axis annotations; the HUD copy runs without them.
+///
+/// Each series is scaled to **its own** peak, and each peak is labelled in that
+/// series' color. One shared scale was the obvious thing and it was wrong here by
+/// two orders of magnitude: standing water is a depth and per-pass movement is a
+/// difference between consecutive passes, so the second is a couple of hundred
+/// times smaller and a shared axis draws it as a flat line along the floor.
+///
+/// This is the demo's proof that the toolkit did not need a chart widget. It
+/// uses [`Ui::allocate`] for space and [`Ui::painter`] to draw, and the three
+/// primitives UI Slice 10 added — `polyline`, `convex_polygon` and (for the
+/// minimap beneath it) `image` — are reached the same way `fill_rect` always was.
+/// Nothing here is privileged.
+fn plot(
+    ui: &mut Ui,
+    rect: Rect,
+    series: &[&[f32]],
+    colors: &[Color],
+    axis: usize,
+    marker: Option<f32>,
+    labels: bool,
+) {
+    let theme = *ui.theme();
+    let (px, weight) = theme.text.small.parts();
+
+    // The horizontal scale is the **whole** axis, not the part computed so far.
+    // Taking it from the data instead would let the plot stretch itself every
+    // time the erosion ran a pass, and would put the marker — which is a
+    // position on the whole axis — somewhere the data disagrees with.
+    let span = axis.max(1) as f32;
+    let step = rect.w / span;
+
+    let painter = ui.painter();
+    painter.fill_rect(rect, theme.radius.sm, theme.color.surface);
+
+    // Gridlines at quarters. Horizontal, so a rect is still the right shape for
+    // them and always was — it was the *diagonals* that could not be drawn.
+    for i in 1..4 {
+        let y = rect.y + rect.h * i as f32 / 4.0;
+        painter.fill_rect(Rect::new(rect.x, y, rect.w, 1.0), 0.0, theme.color.border);
+    }
+
+    // 150 samples across a run at least 190 points wide, so there is always less
+    // than one sample per pixel and nothing needs thinning. A plot with more
+    // samples than pixels would have to decimate here: the painter does not.
+    let mut pts: Vec<(f32, f32)> = Vec::with_capacity(axis + 1);
+
+    for (index, (s, color)) in series.iter().zip(colors).enumerate() {
+        let peak = s.iter().fold(0.0f32, |acc, v| acc.max(*v));
+        if peak <= 0.0 || s.len() < 2 {
+            continue;
+        }
+        pts.clear();
+        pts.extend(s.iter().enumerate().map(|(i, v)| {
+            let y = rect.max_y() - (v / peak).clamp(0.0, 1.0) * rect.h;
+            (rect.x + i as f32 * step, y)
+        }));
+
+        // The area under the leading series, as one convex trapezoid per sample
+        // — a curve's own area fill is concave in general, so it arrives in
+        // pieces. Translucent both because that is what an area fill looks like
+        // and because it is what makes the pieces join cleanly: two feathered
+        // polygons sharing an edge composite to within a few percent of a solid
+        // one at low alpha, and leave a visible light seam at high alpha.
+        if index == 0 {
+            let base = rect.max_y();
+            let wash = [color[0], color[1], color[2], 0.22];
+            for pair in pts.windows(2) {
+                painter.convex_polygon(
+                    &[pair[0], pair[1], (pair[1].0, base), (pair[0].0, base)],
+                    wash,
+                );
+            }
+        }
+
+        painter.polyline(&pts, 1.5, *color);
+    }
+
+    if let Some(t) = marker {
+        let x = rect.x + t.clamp(0.0, 1.0) * rect.w;
+        painter.fill_rect(
+            Rect::new(x, rect.y, 1.0, rect.h),
+            0.0,
+            theme.color.accent_hover,
+        );
+    }
+
+    painter.stroke_rect(
+        rect,
+        theme.radius.sm,
+        theme.control.border,
+        theme.color.border,
+    );
+
+    if labels {
+        // One peak per series, in that series' color, because each has its own
+        // vertical scale and an unlabelled axis would be a lie about both.
+        //
+        // Right-aligned at the top, which is the one corner these particular
+        // curves leave empty: both start at their maximum on the left and decay.
+        // A rising series would want the other corner, and a general-purpose
+        // chart would have to measure — this one is allowed to know its data.
+        let mut y = rect.y + 2.0;
+        for (s, color) in series.iter().zip(colors) {
+            let peak = s.iter().fold(0.0f32, |acc, v| acc.max(*v));
+            let text = format!("{peak:.4}");
+            let w = font::text_width(&text, px, weight);
+            painter.text(rect.max_x() - w - 4.0, y, &text, px, weight, *color);
+            y += font::line_height(px);
+        }
+        let last = format!("{axis}");
+        let w = font::text_width(&last, px, weight);
+        painter.text(
+            rect.max_x() - w - 4.0,
+            rect.max_y() - font::line_height(px) - 2.0,
+            &last,
+            px,
+            weight,
+            theme.color.muted,
+        );
+    }
 }
 
 /// Half-extent of the rendered terrain in world units (spans `[-HALF, HALF]`).
@@ -304,6 +452,30 @@ const WATER_ALPHA_DEFAULT: f32 = 0.72;
 /// corner and sized by its caller, not stretched to the viewport, so the demo
 /// picks a budget that leaves the 3D view usable at the default 1280x720.
 const PANEL_SCROLL_MAX: f32 = 420.0;
+
+/// How tall the plot in the parameter panel is, in UI points.
+///
+/// Deep enough that two series at different magnitudes are separable, shallow
+/// enough that the section it lives in does not push everything else off the
+/// scroll. The panel is 340 points wide, so this is close to a 4:1 box.
+const PLOT_H: f32 = 84.0;
+
+/// How tall the HUD's sparkline copy of the same plot is.
+const SPARK_H: f32 = 28.0;
+
+/// Side length of the minimap thumbnail, in texels.
+///
+/// A **constant**, and deliberately not `self.n`. The resolution slider moves the
+/// grid between 32 and 256, [`Renderer::update_image`] rewrites an image at the
+/// size it was created with, and there is no way to free one — so a thumbnail
+/// that tracked the grid would leak a texture per resolution change. The
+/// heightmap is resampled into this instead, through the same [`bilinear`] the
+/// mesh builder already uses.
+const MINIMAP_N: usize = 160;
+
+/// How big the minimap is drawn, in UI points. Smaller than the texture it
+/// samples, so the thumbnail stays sharp on a HiDPI display.
+const MINIMAP_VIEW: f32 = 132.0;
 /// Width of the HUD panel in the opposite corner. Narrow on purpose — it holds
 /// two readouts and a toggle, and a 340-point slab for that would be absurd.
 ///
@@ -366,6 +538,24 @@ struct TerrainDemo {
     /// a pass (three times the total), and it is only ever needed for the two
     /// passes currently on screen — see [`TerrainDemo::snap_water`].
     history: Vec<Vec<f32>>,
+    /// **Two readings per computed pass**, aligned with [`TerrainDemo::history`]:
+    /// mean standing depth and mean height moved. `series[_][k]` describes pass
+    /// `k`, so it exists as soon as `history[k + 1]` does.
+    ///
+    /// Two vectors rather than one of pairs, so each is a `&[f32]` the plot can
+    /// be handed without copying it apart first.
+    ///
+    /// This costs a sum over the grid and **no extra flow routing**, which is the
+    /// only reason a plot of the whole axis is affordable here. [`erosion::step`]
+    /// already hands back the water belonging to the state it was *given*, and
+    /// this demo threw that return away until there was something to draw with it
+    /// — the numbers below have been computed on every pass since Slice 13 and
+    /// discarded on every pass since Slice 13.
+    ///
+    /// Both are means rather than totals so the vertical scale means the same
+    /// thing at 32² and at 256², which matters because the resolution slider
+    /// throws the axis away and rebuilds it.
+    series: [Vec<f32>; 2],
     /// Which pass the blend starts from; the head of the time axis.
     pass: usize,
     /// The water at `pass` and at `pass + 1` — the two ends of the blend.
@@ -452,6 +642,24 @@ struct TerrainDemo {
     /// Handles to the uploaded terrain and water meshes, claimed on the first
     /// upload and refilled in place afterwards. `None` until `init` runs.
     handles: Option<(MeshHandle, MeshHandle)>,
+
+    /// The top-down thumbnail in the parameter panel. `None` until `init` runs.
+    ///
+    /// The 3D view shows one corner of a basin from one angle; this shows the
+    /// whole thing, including where the water is, which is the half of the
+    /// erosion you cannot see from inside it.
+    minimap: Option<ImageId>,
+    /// Scratch RGBA for the thumbnail, kept so regenerating it does not allocate
+    /// `MINIMAP_N²` texels every erosion pass.
+    minimap_rgba: Vec<u8>,
+    /// Which pass the thumbnail was last shaded for.
+    ///
+    /// The **pass**, not the `(pass, alpha)` pair the meshes are gated on. The
+    /// meshes are re-blended every frame because a landscape sliding between two
+    /// passes is the thing the transport exists to show; a 160² thumbnail is not,
+    /// and reshading one every frame is 128,000 bilinear samples to move a lake
+    /// edge by less than a texel. Once a pass is all it earns.
+    minimap_for: Option<usize>,
 }
 
 impl TerrainDemo {
@@ -465,6 +673,7 @@ impl TerrainDemo {
             erosion,
             base: hm.heights,
             history: Vec::new(),
+            series: [Vec::new(), Vec::new()],
             pass: 0,
             snap_water: [erosion::Water::default(), erosion::Water::default()],
             resolved: None,
@@ -489,6 +698,9 @@ impl TerrainDemo {
             distance: 6.5,
             fps: 60.0,
             handles: None,
+            minimap: None,
+            minimap_rgba: vec![0; MINIMAP_N * MINIMAP_N * 4],
+            minimap_for: None,
         };
         demo.reset_history();
         demo.resolve(0.0);
@@ -514,6 +726,8 @@ impl TerrainDemo {
     /// exactly as it did when it was one batch `erode` call.
     fn reset_history(&mut self) {
         self.history.clear();
+        self.series[0].clear();
+        self.series[1].clear();
         self.history.push(self.base.clone());
         let pass = self.pass;
         self.pass = 0;
@@ -525,12 +739,106 @@ impl TerrainDemo {
     /// Each iteration steps a clone of the newest state, which is the cheap way
     /// round: [`erosion::step`] hands back the water belonging to the state it was
     /// *given*, so walking forward never routes the same flow twice.
+    ///
+    /// That return value is also where [`TerrainDemo::series`] comes from. It was
+    /// discarded here for three slices; reading it costs two sums over the grid
+    /// and no second flow routing, which is the difference between a plot of the
+    /// whole time axis and a freeze every time one is drawn.
     fn extend_to(&mut self, target: usize) {
         let target = target.min(MAX_PASS);
+        let cells = (self.n * self.n).max(1) as f32;
         while self.history.len() <= target {
-            let mut next = self.history[self.history.len() - 1].clone();
-            erosion::step(&mut next, self.n, &self.erosion);
+            let prev = self.history.len() - 1;
+            let mut next = self.history[prev].clone();
+            let water = erosion::step(&mut next, self.n, &self.erosion);
+
+            // The water belongs to `history[prev]`, so both readings describe
+            // pass `prev` and `series` stays index-aligned with `history`.
+            let lake = water.depth.iter().sum::<f32>() / cells;
+            // Halved because a sum of |dz| counts every grain twice: once where
+            // it was cut and once where it landed.
+            let moved = self.history[prev]
+                .iter()
+                .zip(&next)
+                .map(|(a, b)| (b - a).abs())
+                .sum::<f32>()
+                / (2.0 * cells);
+            self.series[0].push(lake);
+            self.series[1].push(moved);
+
             self.history.push(next);
+        }
+    }
+
+    /// Reshade the minimap from the heights and water currently on screen.
+    ///
+    /// Reads [`TerrainDemo::heights`] and [`TerrainDemo::water`] — the *blended*
+    /// fields the meshes were built from — so the thumbnail and the landscape can
+    /// never disagree about which pass they are showing.
+    ///
+    /// Shaded with the same [`palette`] the mesh uses, then darkened by a
+    /// north-west hillshade so the relief reads without a light model, and
+    /// finally tinted toward water wherever there is standing depth. The colors
+    /// go out as `Rgba8Unorm` bytes, which is what makes them land in the same
+    /// space as every [`Color`] the panel around them is drawn in.
+    fn shade_minimap(&mut self) {
+        let n = self.n;
+        if n < 2 || self.heights.len() < n * n {
+            return;
+        }
+        let scale = (n - 1) as f32 / (MINIMAP_N - 1) as f32;
+        let wet = !self.water.depth.is_empty();
+
+        for ty in 0..MINIMAP_N {
+            for tx in 0..MINIMAP_N {
+                let (fx, fy) = (tx as f32 * scale, ty as f32 * scale);
+                let h = bilinear(&self.heights, n, fx, fy);
+
+                // A surface normal, built exactly the way the mesh builds one, so
+                // the thumbnail and the landscape agree about what is rock and
+                // what is meadow. Central differences over two cells, converted
+                // into *world* units — a raw height difference is meaningless
+                // here, because it shrinks as the grid gets finer.
+                let dx = bilinear(&self.heights, n, fx + 1.0, fy)
+                    - bilinear(&self.heights, n, fx - 1.0, fy);
+                let dy = bilinear(&self.heights, n, fx, fy + 1.0)
+                    - bilinear(&self.heights, n, fx, fy - 1.0);
+                let cell = 2.0 * HALF / (n - 1) as f32;
+                let gx = dx * VHEIGHT / (2.0 * cell);
+                let gy = dy * VHEIGHT / (2.0 * cell);
+                let inv = 1.0 / (1.0 + gx * gx + gy * gy).sqrt();
+
+                // `1 - normal.y`: 0 flat, 1 vertical. The same number
+                // `terrain_mesh` hands the palette.
+                let mut rgb = palette(h.clamp(0.0, 1.0), 1.0 - inv.clamp(0.0, 1.0));
+
+                // Relief shading from a north-west sun, which is the cartographic
+                // convention and the reason a printed contour map reads as
+                // terrain rather than as contours.
+                let normal = [-gx * inv, inv, -gy * inv];
+                let sun = normalize3([-0.55, 0.75, -0.35]);
+                let lambert =
+                    (normal[0] * sun[0] + normal[1] * sun[1] + normal[2] * sun[2]).clamp(0.0, 1.0);
+                let shade = 0.5 + 0.6 * lambert;
+                for c in &mut rgb {
+                    *c = (*c * shade).clamp(0.0, 1.0);
+                }
+
+                if wet {
+                    let depth = bilinear(&self.water.depth, n, fx, fy);
+                    let t = (depth / LAKE_OPAQUE_DEPTH).clamp(0.0, 1.0) * 0.85;
+                    let water = [0.24, 0.53, 0.66];
+                    for (c, w) in rgb.iter_mut().zip(water) {
+                        *c += (w - *c) * t;
+                    }
+                }
+
+                let i = (ty * MINIMAP_N + tx) * 4;
+                self.minimap_rgba[i] = (rgb[0] * 255.0) as u8;
+                self.minimap_rgba[i + 1] = (rgb[1] * 255.0) as u8;
+                self.minimap_rgba[i + 2] = (rgb[2] * 255.0) as u8;
+                self.minimap_rgba[i + 3] = 255;
+            }
         }
     }
 
@@ -1031,6 +1339,15 @@ impl TerrainDemo {
         let mut scrubbed = false;
         let pass = self.pass;
 
+        // Borrowed before the UI takes the renderer, and read only inside the
+        // panel closure. `self` and `renderer` are disjoint, so these live
+        // happily alongside `ui`.
+        let lake_series: &[f32] = &self.series[0];
+        let moved_series: &[f32] = &self.series[1];
+        // Where along the axis the landscape on screen is sitting, in `0..=1`.
+        let scrub_t = pass as f32 / MAX_PASS as f32;
+        let minimap = self.minimap;
+
         let mut ui = renderer.ui();
         // One line, at the top of the frame, and the whole UI is styled. Nothing
         // style-shaped is retained by the toolkit between frames.
@@ -1082,6 +1399,46 @@ impl TerrainDemo {
                         ui.slider("passes/sec", &mut pass_hz, PASS_HZ_MIN, PASS_HZ_MAX)
                             .decimals(0)
                             .show();
+                    });
+                    ui.separator();
+
+                    // --- The history the demo has always measured and never shown ---
+                    //
+                    // Directly under Time on purpose: it reads as part of the same
+                    // axis, and it keeps every coordinate a capture script clicks
+                    // *above* it, so opening or closing this section reflows only
+                    // the rows beneath and moves nothing scripted.
+                    ui.section("Plot", |ui| {
+                        let r = ui.allocate([0.0, PLOT_H]);
+                        plot(
+                            ui,
+                            r,
+                            &[lake_series, moved_series],
+                            &[theme.color.accent, theme.color.heading],
+                            MAX_PASS,
+                            Some(scrub_t),
+                            true,
+                        );
+                        ui.label_muted("lake depth / moved, per pass");
+
+                        // The whole basin from above, which is the half of the
+                        // erosion the 3D view cannot show you: from inside a
+                        // valley you can see that a lake drained, not where the
+                        // water went. Square, centred, and drawn straight from
+                        // pixels the demo shaded itself.
+                        if let Some(id) = minimap {
+                            let row = ui.allocate([0.0, MINIMAP_VIEW]);
+                            let x = row.x + (row.w - MINIMAP_VIEW) * 0.5;
+                            let box_ = Rect::new(x, row.y, MINIMAP_VIEW, MINIMAP_VIEW);
+                            let painter = ui.painter();
+                            painter.image_full(box_, id, [1.0, 1.0, 1.0, 1.0]);
+                            painter.stroke_rect(
+                                box_,
+                                theme.radius.sm,
+                                theme.control.border,
+                                theme.color.border,
+                            );
+                        }
                     });
                     ui.separator();
 
@@ -1265,6 +1622,19 @@ impl TerrainDemo {
             ui.label_value("fps", &format!("{fps:.0}"));
             ui.label_value("grid", &format!("{n}x{n}"));
             ui.label_value("pass", &format!("{pass}/{MAX_PASS}"));
+            // The same routine as the panel's, at a quarter the height and with
+            // the annotations off. Two call sites is the check that the demo's
+            // chart code generalised rather than being fitted to one rectangle.
+            let r = ui.allocate([0.0, SPARK_H]);
+            plot(
+                ui,
+                r,
+                &[lake_series],
+                &[theme.color.accent],
+                MAX_PASS,
+                Some(scrub_t),
+                false,
+            );
             ui.checkbox("wireframe", &mut self.wireframe);
             ui.checkbox("light", &mut light);
         });
@@ -1383,6 +1753,11 @@ impl TerrainDemo {
 impl Application for TerrainDemo {
     fn init(&mut self, renderer: &mut Renderer) {
         self.upload(renderer);
+        // Created once, at a fixed size, and rewritten in place from then on.
+        self.shade_minimap();
+        self.minimap =
+            Some(renderer.create_image(MINIMAP_N as u32, MINIMAP_N as u32, &self.minimap_rgba));
+        self.minimap_for = self.resolved.map(|(pass, _)| pass);
     }
 
     /// One erosion pass, and nothing else.
@@ -1407,6 +1782,19 @@ impl Application for TerrainDemo {
         let dt = renderer.dt();
         if dt > 0.0 {
             self.fps = self.fps * 0.9 + (1.0 / dt) * 0.1;
+        }
+
+        // Before the UI, not inside it: `renderer.ui()` holds the renderer for as
+        // long as the panels are being built, so an image cannot be uploaded from
+        // inside a panel closure. Gated on the same `(pass, alpha)` the meshes
+        // are, so a paused frame reshades nothing.
+        let shaded_for = self.resolved.map(|(pass, _)| pass);
+        if self.minimap_for != shaded_for {
+            self.shade_minimap();
+            if let Some(id) = self.minimap {
+                renderer.update_image(id, &self.minimap_rgba);
+            }
+            self.minimap_for = shaded_for;
         }
 
         let outcome = self.build_ui(renderer);

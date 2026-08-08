@@ -35,7 +35,7 @@ use crate::input::{Input, MouseButton};
 use crate::time::{Clock, Timeline};
 use graph::{Load, Pass, PassKind, RenderGraph, ResourceFormat, ResourceId, SWAPCHAIN};
 use overlay::Overlay;
-use slmsttaa_ui::{Ui, UiInput, UiState};
+use slmsttaa_ui::{ImageId, Ui, UiInput, UiState};
 
 /// Format of the depth buffer used for depth testing.
 ///
@@ -1231,6 +1231,42 @@ impl Renderer {
             handle,
         );
         self.meshes[handle.0] = GpuMesh::upload(&self.device, mesh);
+    }
+
+    /// Upload an RGBA8 image the UI can draw, and return its handle.
+    ///
+    /// `rgba` is `width * height` straight-alpha texels, row-major, top row
+    /// first. Draw it with [`Painter::image`](slmsttaa_ui::Painter::image) or
+    /// [`image_full`](slmsttaa_ui::Painter::image_full) from anywhere a
+    /// [`Ui`](slmsttaa_ui::Ui) hands out its painter.
+    ///
+    /// The bytes are read the way a [`Color`] is — see
+    /// [`Ui`](slmsttaa_ui::Painter::image) for what `uv` and `tint` mean, and
+    /// note the one restriction that follows from the overlay being a single
+    /// draw call: **one image per frame**.
+    ///
+    /// Images are never freed. A picture that changes wants
+    /// [`Renderer::update_image`], not a second handle.
+    ///
+    /// # Panics
+    ///
+    /// If the size is zero, if `rgba` is not exactly `width * height * 4` bytes,
+    /// or if either dimension exceeds this device's texture limit.
+    pub fn create_image(&mut self, width: u32, height: u32, rgba: &[u8]) -> ImageId {
+        self.overlay
+            .create_image(&self.device, &self.queue, width, height, rgba)
+    }
+
+    /// Rewrite an image's pixels, keeping the handle valid.
+    ///
+    /// Same size as it was created at — a thumbnail that regenerates every pass
+    /// wants one texture rewritten, not one per pass that nothing can free.
+    ///
+    /// # Panics
+    ///
+    /// If `id` did not come from this renderer, or `rgba` is the wrong length.
+    pub fn update_image(&mut self, id: ImageId, rgba: &[u8]) {
+        self.overlay.update_image(&self.queue, id, rgba);
     }
 
     /// Replace the draw-list: what to draw, and where.

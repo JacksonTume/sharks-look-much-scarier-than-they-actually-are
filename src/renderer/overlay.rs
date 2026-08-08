@@ -24,7 +24,16 @@
 use wgpu::util::DeviceExt;
 
 use slmsttaa_ui::font::{self, Weight};
-use slmsttaa_ui::{Color, Layer, Painter, Rect};
+use slmsttaa_ui::{Color, ImageId, Layer, Painter, Rect};
+
+/// One consumer-supplied image, kept alive alongside the view the bind group
+/// borrows and the size [`Overlay::update_image`] checks against.
+struct ImageTexture {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    width: u32,
+    height: u32,
+}
 
 /// A 2D overlay vertex: pixel position, atlas UV, RGBA tint, and the shape
 /// parameters the fragment shader needs for rounded corners, borders, and
@@ -41,11 +50,21 @@ struct Vertex2D {
     uv: [f32; 2],
     color: [f32; 4],
     /// The shape being drawn: `[centre.x, centre.y, half.x, half.y]`, in pixels.
+    ///
+    /// **Reinterpreted by [`MODE_SEGMENT`] as the two endpoints**
+    /// `[a.x, a.y, b.x, b.y]`. Four floats describe an axis-aligned box or a line
+    /// segment equally well, and reusing them is not merely tidy: `Vertex2D` is
+    /// already 80 bytes and `max_vertex_buffer_array_stride` is 255, so there is
+    /// room for two more `vec4`s in the whole format and no more.
     shape: [f32; 4],
     /// `[radius, border width, mode, glyph AA band]`.
     ///
     /// The last slot was unused through Slice 4 and is now what makes distance
     /// field text work without derivatives — see [`Overlay::text`].
+    ///
+    /// [`MODE_SEGMENT`] reads the first slot as the stroke's **half-width**,
+    /// which is the same role the corner radius plays for a capsule-shaped
+    /// rounded box.
     params: [f32; 4],
     /// `[min.x, min.y, max.x, max.y]`, in pixels.
     clip: [f32; 4],
@@ -59,6 +78,14 @@ const MODE_FILL: f32 = 1.0;
 const MODE_STROKE: f32 = 2.0;
 /// Shader mode: a glyph, sampled from the distance field atlas.
 const MODE_TEXT: f32 = 3.0;
+/// Shader mode: one segment of a stroked path, drawn as a capsule.
+///
+/// Round joins and caps are not a feature the geometry provides — they are what
+/// "every point within half a width of this segment" already means, so the SDF
+/// gives both away for nothing.
+const MODE_SEGMENT: f32 = 4.0;
+/// Shader mode: a quad textured from the consumer's atlas.
+const MODE_IMAGE: f32 = 5.0;
 
 /// A clip rectangle large enough to never clip anything.
 const NO_CLIP: [f32; 4] = [-1.0e9, -1.0e9, 1.0e9, 1.0e9];
@@ -120,6 +147,24 @@ pub struct Overlay {
     screen_bind_group: wgpu::BindGroup,
     atlas_bind_group: wgpu::BindGroup,
 
+    /// Kept so the atlas group can be rebuilt when a different consumer image is
+    /// drawn. The *pipeline* layout is built from this once and never rebuilt —
+    /// only the bind group moves.
+    atlas_layout: wgpu::BindGroupLayout,
+    atlas_view: wgpu::TextureView,
+    atlas_sampler: wgpu::Sampler,
+    /// Consumer-supplied images, indexed by [`ImageId::raw`]. Append-only and
+    /// never freed, the same contract `MeshHandle` has.
+    images: Vec<ImageTexture>,
+    /// Which image `atlas_bind_group` currently carries, if any.
+    bound: Option<ImageId>,
+    /// Which image *this frame* drew with. One draw call binds one texture, so
+    /// this is also the enforcement point for "one image per frame".
+    frame_image: Option<ImageId>,
+    /// Set once when a frame asked for a second image, so the complaint is
+    /// edge-triggered rather than one line per frame forever.
+    warned_second_image: bool,
+
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     /// Capacities in *elements*, so we only reallocate when geometry grows.
@@ -143,6 +188,11 @@ pub struct Overlay {
     /// where they become pixels, which is the only place the display's scale
     /// factor is allowed to matter.
     scale: f32,
+
+    /// Reused ring buffers for [`Overlay::convex_polygon`], so a chart drawing a
+    /// polygon per sample does not allocate once per sample per frame.
+    scratch_inner: Vec<u32>,
+    scratch_outer: Vec<u32>,
 }
 
 impl Overlay {
@@ -254,22 +304,59 @@ impl Overlay {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // The consumer's atlas. Declared unconditionally, and filled with
+                // a dummy texel until something supplies one — a layout entry
+                // with nothing bound to it is not a valid bind group.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
-        let atlas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("overlay atlas bind group"),
-            layout: &atlas_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&atlas_view),
+
+        // The stand-in consumer atlas: one opaque white texel.
+        //
+        // Load-bearing rather than tidy. The layout declares binding 2 whether or
+        // not anything ever draws an image, and a bind group with a missing entry
+        // does not validate. Binding the *glyph* atlas there instead would
+        // validate — it is a filterable float texture too — and would then
+        // quietly draw the font wherever an image belonged, which is the kind of
+        // bug that survives review. Like the atlas above, the texture and view
+        // are dropped here and kept alive by the bind group.
+        let dummy = device.create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("overlay dummy image"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
                 },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&atlas_sampler),
-                },
-            ],
-        });
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &[255, 255, 255, 255],
+        );
+        let dummy_view = dummy.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let atlas_bind_group = Self::build_atlas_group(
+            device,
+            &atlas_layout,
+            &atlas_view,
+            &atlas_sampler,
+            &dummy_view,
+        );
 
         // --- Pipeline ---
         let shader = device.create_shader_module(wgpu::include_wgsl!("overlay.wgsl"));
@@ -333,6 +420,13 @@ impl Overlay {
             screen_buffer,
             screen_bind_group,
             atlas_bind_group,
+            atlas_layout,
+            atlas_view,
+            atlas_sampler,
+            images: Vec::new(),
+            bound: None,
+            frame_image: None,
+            warned_second_image: false,
             vertex_buffer,
             index_buffer,
             vertex_capacity,
@@ -343,7 +437,157 @@ impl Overlay {
             layer: Layer::default().index(),
             clips: Vec::new(),
             scale: 1.0,
+            scratch_inner: Vec::new(),
+            scratch_outer: Vec::new(),
         }
+    }
+
+    /// Build the group that carries the glyph atlas, its sampler, and whichever
+    /// consumer image is bound.
+    ///
+    /// Only the third entry ever changes, and it changes rarely — a UI that draws
+    /// no image, or the same image every frame, never rebuilds this at all.
+    fn build_atlas_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        atlas: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+        image: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("overlay atlas bind group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(atlas),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(image),
+                },
+            ],
+        })
+    }
+
+    /// Upload an RGBA8 image and return the handle a [`Painter`] draws it with.
+    ///
+    /// `rgba` is `width * height` texels of straight (non-premultiplied) RGBA,
+    /// row-major, top row first.
+    ///
+    /// **The bytes are read the same way a [`Color`] is**, which is why the
+    /// format is `Rgba8Unorm` and not its sRGB sibling: the overlay writes colors
+    /// into a target that encodes them, so a `Color` component is linear, and a
+    /// texel has to arrive as exactly `byte / 255` to sit in the same space as
+    /// the panel around it. On the WebGL2 fallback, where the surface cannot be
+    /// re-viewed as sRGB and nothing is encoded, that choice keeps the image
+    /// wrong in precisely the same direction as every color beside it instead of
+    /// wrong in a second, different way.
+    ///
+    /// Sampling is **linear and clamped** — it shares the glyph atlas's sampler.
+    /// A packed sheet therefore wants a one-texel gutter between sub-images, the
+    /// same rule the font bake already follows.
+    ///
+    /// Images are never freed; the handle stays valid for the renderer's life.
+    pub fn create_image(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> ImageId {
+        let expected = (width as usize) * (height as usize) * 4;
+        assert!(width > 0 && height > 0, "an image needs a non-zero size");
+        assert_eq!(
+            rgba.len(),
+            expected,
+            "expected {expected} bytes for a {width}x{height} RGBA image, got {}",
+            rgba.len()
+        );
+        // Checked against the device rather than a constant: the engine asks for
+        // downlevel limits but raises the texture-dimension caps to the adapter's
+        // own, so the real ceiling is not the one in the limit table.
+        let max = device.limits().max_texture_dimension_2d;
+        assert!(
+            width <= max && height <= max,
+            "{width}x{height} exceeds this device's {max}x{max} texture limit"
+        );
+
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("overlay consumer image"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let id = ImageId::from_raw(self.images.len() as u32);
+        self.images.push(ImageTexture {
+            texture,
+            view,
+            width,
+            height,
+        });
+        self.write_image(queue, id, rgba);
+        id
+    }
+
+    /// Rewrite an image's pixels in place, at the size it was created with.
+    ///
+    /// Same size only, deliberately: a consumer whose picture changes every frame
+    /// wants one texture rewritten, not a new one per frame that nothing can
+    /// free. A picture that genuinely changes shape is a new image.
+    pub fn update_image(&mut self, queue: &wgpu::Queue, id: ImageId, rgba: &[u8]) {
+        let image = self
+            .images
+            .get(id.raw() as usize)
+            .expect("image handle came from another renderer");
+        let expected = (image.width as usize) * (image.height as usize) * 4;
+        assert_eq!(
+            rgba.len(),
+            expected,
+            "update_image is same-size only: expected {expected} bytes, got {}",
+            rgba.len()
+        );
+        self.write_image(queue, id, rgba);
+    }
+
+    /// The shared upload. `bytes_per_row` needs no 256-byte padding — that rule
+    /// applies to buffer-to-texture copies, not to `write_texture`.
+    fn write_image(&self, queue: &wgpu::Queue, id: ImageId, rgba: &[u8]) {
+        let image = &self.images[id.raw() as usize];
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &image.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * image.width),
+                rows_per_image: Some(image.height),
+            },
+            wgpu::Extent3d {
+                width: image.width,
+                height: image.height,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 
     /// Set how many physical pixels one logical point is worth.
@@ -377,6 +621,10 @@ impl Overlay {
         self.flat_indices.clear();
         self.layer = Layer::default().index();
         self.clips.clear();
+        // Not `bound`: which texture is *attached* survives the frame, so a UI
+        // that draws the same image every frame never rebuilds a bind group, and
+        // one that stops drawing it does not pay to swing back to the dummy.
+        self.frame_image = None;
     }
 
     /// The clip rectangle currently in force, in pixels.
@@ -425,42 +673,45 @@ impl Overlay {
         };
         let (x, y, w, h) = (sx - pad, sy - pad, sw + 2.0 * pad, sh + 2.0 * pad);
 
+        self.push_quad(
+            [[x, y], [x + w, y], [x + w, y + h], [x, y + h]],
+            uv,
+            color,
+            shape,
+            params,
+            clip,
+        );
+    }
+
+    /// Push four corners as one quad (two triangles) into the current layer.
+    ///
+    /// Corners are already in **physical pixels** and in perimeter order, and
+    /// need not be axis-aligned: [`Overlay::push_shape`] hands over a rectangle,
+    /// a stroke segment hands over an oriented one. All four carry the same
+    /// `shape`/`params`, which is what lets the fragment shader evaluate one SDF
+    /// across the whole quad however the quad is turned.
+    fn push_quad(
+        &mut self,
+        corners: [[f32; 2]; 4],
+        uv: [f32; 4],
+        color: Color,
+        shape: [f32; 4],
+        params: [f32; 4],
+        clip: [f32; 4],
+    ) {
         let base = self.vertices.len() as u32;
         let [u0, v0, u1, v1] = uv;
-        self.vertices.extend_from_slice(&[
-            Vertex2D {
-                pos: [x, y],
-                uv: [u0, v0],
+        let uvs = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]];
+        for (pos, uv) in corners.into_iter().zip(uvs) {
+            self.vertices.push(Vertex2D {
+                pos,
+                uv,
                 color,
                 shape,
                 params,
                 clip,
-            },
-            Vertex2D {
-                pos: [x + w, y],
-                uv: [u1, v0],
-                color,
-                shape,
-                params,
-                clip,
-            },
-            Vertex2D {
-                pos: [x + w, y + h],
-                uv: [u1, v1],
-                color,
-                shape,
-                params,
-                clip,
-            },
-            Vertex2D {
-                pos: [x, y + h],
-                uv: [u0, v1],
-                color,
-                shape,
-                params,
-                clip,
-            },
-        ]);
+            });
+        }
         self.indices[self.layer].extend_from_slice(&[
             base,
             base + 1,
@@ -469,6 +720,35 @@ impl Overlay {
             base + 2,
             base + 3,
         ]);
+    }
+
+    /// Push one flat vertex and return its index.
+    ///
+    /// [`MODE_RECT`] reads neither the shape nor the params — it takes its
+    /// coverage from the mode and its alpha straight from the vertex color — so
+    /// this is the path for geometry that is *tessellated* rather than described,
+    /// and a per-vertex alpha ramp reaches the output untouched. That is what
+    /// antialiases a filled polygon.
+    ///
+    /// Position is in physical pixels. Indices are pushed separately, by
+    /// [`Overlay::push_tri`], because the shapes built this way do not come in
+    /// quads.
+    fn push_flat(&mut self, pos: [f32; 2], color: Color, clip: [f32; 4]) -> u32 {
+        let index = self.vertices.len() as u32;
+        self.vertices.push(Vertex2D {
+            pos,
+            uv: [0.0, 0.0],
+            color,
+            shape: [0.0; 4],
+            params: [0.0, 0.0, MODE_RECT, 0.0],
+            clip,
+        });
+        index
+    }
+
+    /// Push one triangle by vertex index into the current layer.
+    fn push_tri(&mut self, a: u32, b: u32, c: u32) {
+        self.indices[self.layer].extend_from_slice(&[a, b, c]);
     }
 
     /// Upload this frame's geometry and record the overlay render pass on top of
@@ -491,6 +771,21 @@ impl Overlay {
         }
         if self.flat_indices.is_empty() {
             return;
+        }
+
+        // Attach whichever consumer image this frame drew with. Rebuilt only on a
+        // change, which for a UI that draws one image or none is never after the
+        // first — the pipeline *layout* is fixed at construction, so only the
+        // group moves and no pipeline is recompiled.
+        if let Some(id) = self.frame_image.filter(|id| self.bound != Some(*id)) {
+            self.atlas_bind_group = Self::build_atlas_group(
+                device,
+                &self.atlas_layout,
+                &self.atlas_view,
+                &self.atlas_sampler,
+                &self.images[id.raw() as usize].view,
+            );
+            self.bound = Some(id);
         }
 
         // Grow the GPU buffers if this frame outgrew them.
@@ -633,5 +928,193 @@ impl Painter for Overlay {
 
     fn set_layer(&mut self, layer: Layer) {
         self.layer = layer.index();
+    }
+
+    /// One capsule quad per segment.
+    ///
+    /// The quad is the segment's bounding box in its *own* frame, grown by the
+    /// half-width and the antialiasing band on all four sides — including past
+    /// both ends, because the round caps are part of the shape and the distance
+    /// field needs somewhere to draw them.
+    ///
+    /// Consecutive segments overlap at their shared endpoint, which is what makes
+    /// the joint round for free and what makes a translucent stroke blend twice
+    /// there. Both are documented on the trait.
+    fn polyline(&mut self, points: &[(f32, f32)], width: f32, color: Color) {
+        if points.len() < 2 || width <= 0.0 {
+            return;
+        }
+        let s = self.scale;
+        let half = width * s * 0.5;
+        let reach = half + AA_PAD;
+        let clip = self.clip();
+
+        for pair in points.windows(2) {
+            let (ax, ay) = (pair[0].0 * s, pair[0].1 * s);
+            let (bx, by) = (pair[1].0 * s, pair[1].1 * s);
+            let (dx, dy) = (bx - ax, by - ay);
+            let len = (dx * dx + dy * dy).sqrt();
+            // Two samples landing on the same pixel is an ordinary thing for a
+            // plot to produce; normalizing that would put NaN in the corners and
+            // take the whole draw call with it. The shader already renders a
+            // zero-length segment as the disc it is.
+            let (ux, uy) = if len > 1.0e-6 {
+                (dx / len, dy / len)
+            } else {
+                (1.0, 0.0)
+            };
+            let (nx, ny) = (-uy, ux);
+
+            self.push_quad(
+                [
+                    [ax - (ux - nx) * reach, ay - (uy - ny) * reach],
+                    [bx + (ux + nx) * reach, by + (uy + ny) * reach],
+                    [bx + (ux - nx) * reach, by + (uy - ny) * reach],
+                    [ax - (ux + nx) * reach, ay - (uy + ny) * reach],
+                ],
+                NO_UV,
+                color,
+                [ax, ay, bx, by],
+                [half, 0.0, MODE_SEGMENT, 0.0],
+                clip,
+            );
+        }
+    }
+
+    /// A triangle fan from the centroid, wrapped in a one-pixel feather.
+    ///
+    /// There is no SDF for this and there cannot be one: an arbitrary convex
+    /// polygon needs its half-plane list per fragment, which means a storage
+    /// buffer (unavailable on WebGL2, and forbidden by `overlay.wgsl`) or more
+    /// vertex attributes than the format has room for. So the antialiasing is
+    /// geometric, and it is built *here* rather than in the toolkit because a
+    /// feather is measured in physical pixels and the toolkit never learns the
+    /// scale factor.
+    ///
+    /// The rings sit half a pixel either side of the true edge, not one pixel
+    /// outside it, so this reads exactly as wide as a `fill_rect` of the same
+    /// bounds — the SDF modes centre their band on the edge too.
+    ///
+    /// Interior edges are seamless because adjacent triangles share *indices*,
+    /// not merely positions, and nothing overlaps: the fan tiles the inside once
+    /// and the ring tiles the border once. That is why a translucent fill is
+    /// exact here where a translucent stroke is not.
+    fn convex_polygon(&mut self, points: &[(f32, f32)], color: Color) {
+        let n = points.len();
+        if n < 3 {
+            return;
+        }
+        let s = self.scale;
+        let clip = self.clip();
+
+        // Signed area decides which way the outward normals point, so a caller
+        // may wind either way round. The overlay pass does not cull, so nothing
+        // else cares.
+        let mut area2 = 0.0;
+        let mut cx = 0.0;
+        let mut cy = 0.0;
+        for i in 0..n {
+            let (xi, yi) = (points[i].0 * s, points[i].1 * s);
+            let (xj, yj) = (points[(i + 1) % n].0 * s, points[(i + 1) % n].1 * s);
+            area2 += xi * yj - xj * yi;
+            cx += xi;
+            cy += yi;
+        }
+        let orient = if area2 >= 0.0 { 1.0 } else { -1.0 };
+        // The vertex mean, which for a convex polygon is always inside it — all a
+        // fan needs, and cheaper than the true centroid.
+        let (cx, cy) = (cx / n as f32, cy / n as f32);
+
+        // The outward unit normal of the edge leaving each vertex.
+        let normal = |i: usize| {
+            let (xi, yi) = (points[i].0 * s, points[i].1 * s);
+            let (xj, yj) = (points[(i + 1) % n].0 * s, points[(i + 1) % n].1 * s);
+            let (ex, ey) = (xj - xi, yj - yi);
+            let len = (ex * ex + ey * ey).sqrt();
+            if len > 1.0e-6 {
+                (orient * ey / len, -orient * ex / len)
+            } else {
+                (0.0, 0.0)
+            }
+        };
+
+        let feather = AA_PAD * 0.5;
+        let mut inner = std::mem::take(&mut self.scratch_inner);
+        let mut outer = std::mem::take(&mut self.scratch_outer);
+        inner.clear();
+        outer.clear();
+
+        let faded = [color[0], color[1], color[2], 0.0];
+        let centre = self.push_flat([cx, cy], color, clip);
+
+        for (i, point) in points.iter().enumerate() {
+            let (px, py) = (point.0 * s, point.1 * s);
+            let (n0x, n0y) = normal((i + n - 1) % n);
+            let (n1x, n1y) = normal(i);
+
+            // The offset that lands `feather` from *both* adjacent edges. With
+            // `m = n0 + n1` and `c = n0 . n1`, that is `m * d / (1 + c)` — which
+            // blows up as the turn approaches a spike, hence the clamp.
+            let (mx, my) = (n0x + n1x, n0y + n1y);
+            let c = n0x * n1x + n0y * n1y;
+            let denom = (1.0 + c).max(0.25);
+            let (mut vx, mut vy) = (mx * feather / denom, my * feather / denom);
+            let vlen = (vx * vx + vy * vy).sqrt();
+            let cap = 4.0 * AA_PAD;
+            if vlen > cap {
+                vx *= cap / vlen;
+                vy *= cap / vlen;
+            }
+
+            // The inward half must not walk past the middle of a polygon only a
+            // few pixels across, which would turn it inside out.
+            let to_centre = ((cx - px).powi(2) + (cy - py).powi(2)).sqrt();
+            let shrink = if vlen > 1.0e-6 && vlen > 0.45 * to_centre {
+                0.45 * to_centre / vlen
+            } else {
+                1.0
+            };
+
+            inner.push(self.push_flat([px - vx * shrink, py - vy * shrink], color, clip));
+            outer.push(self.push_flat([px + vx, py + vy], faded, clip));
+        }
+
+        for i in 0..n {
+            let j = (i + 1) % n;
+            self.push_tri(centre, inner[i], inner[j]);
+            self.push_tri(inner[i], outer[i], outer[j]);
+            self.push_tri(inner[i], outer[j], inner[j]);
+        }
+
+        self.scratch_inner = inner;
+        self.scratch_outer = outer;
+    }
+
+    fn image(&mut self, rect: Rect, image: ImageId, uv: [f32; 4], tint: Color) {
+        if self.images.get(image.raw() as usize).is_none() {
+            return;
+        }
+        match self.frame_image {
+            Some(already) if already != image => {
+                // One draw call binds one texture. Said once rather than once a
+                // frame: a per-frame complaint about a per-frame mistake buries
+                // itself, and this project has half a megabyte of evidence.
+                if !self.warned_second_image {
+                    self.warned_second_image = true;
+                    log::warn!(
+                        "overlay: a frame drew two different images ({:?} then {:?}); \
+                         the overlay binds one texture per frame, so the second was \
+                         skipped. Pack them into one atlas and address it with uv.",
+                        already,
+                        image
+                    );
+                }
+                return;
+            }
+            _ => self.frame_image = Some(image),
+        }
+        self.push_shape(
+            rect.x, rect.y, rect.w, rect.h, uv, tint, 0.0, 0.0, MODE_IMAGE, 0.0,
+        );
     }
 }

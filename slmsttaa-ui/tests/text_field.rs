@@ -377,7 +377,11 @@ fn every_color_a_selected_field_draws_comes_from_the_theme() {
     ];
     for cmd in &field.painter.cmds {
         let color = match *cmd {
-            DrawCmd::Rect { color, .. } | DrawCmd::Text { color, .. } => color,
+            DrawCmd::Rect { color, .. }
+            | DrawCmd::Text { color, .. }
+            | DrawCmd::Polyline { color, .. }
+            | DrawCmd::Polygon { color, .. } => color,
+            DrawCmd::Image { tint, .. } => tint,
         };
         assert!(
             tokens.iter().any(|token| {

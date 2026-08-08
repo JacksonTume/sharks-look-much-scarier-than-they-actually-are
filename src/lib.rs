@@ -57,7 +57,7 @@ pub use config::Config;
 pub use input::{Input, Key, MouseButton};
 pub use renderer::{Instance, Material, Mesh, MeshHandle, RenderMode, Renderer, Transform, Vertex};
 pub use time::Timeline;
-pub use ui::{Color, Painter, Ui};
+pub use ui::{Color, ImageId, Painter, Ui};
 
 use winit::event_loop::{ControlFlow, EventLoop};
 

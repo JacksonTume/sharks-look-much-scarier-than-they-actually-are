@@ -54,7 +54,11 @@ fn colors(p: &RecordingPainter) -> Vec<Color> {
     p.cmds
         .iter()
         .map(|c| match *c {
-            DrawCmd::Rect { color, .. } | DrawCmd::Text { color, .. } => color,
+            DrawCmd::Rect { color, .. }
+            | DrawCmd::Text { color, .. }
+            | DrawCmd::Polyline { color, .. }
+            | DrawCmd::Polygon { color, .. } => color,
+            DrawCmd::Image { tint, .. } => tint,
         })
         .collect()
 }

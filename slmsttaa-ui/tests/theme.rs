@@ -36,8 +36,16 @@ fn frame<T>(theme: Theme, declare: impl FnOnce(&mut Ui) -> T) -> (RecordingPaint
 fn colors(p: &RecordingPainter) -> Vec<Color> {
     p.cmds
         .iter()
+        // Exhaustive on purpose. A primitive added to the seam without a case
+        // here is a compile error rather than a hole in the rule this file
+        // exists to enforce — which is exactly how the three UI Slice 10 shapes
+        // arrived.
         .map(|c| match *c {
-            DrawCmd::Rect { color, .. } | DrawCmd::Text { color, .. } => color,
+            DrawCmd::Rect { color, .. }
+            | DrawCmd::Text { color, .. }
+            | DrawCmd::Polyline { color, .. }
+            | DrawCmd::Polygon { color, .. } => color,
+            DrawCmd::Image { tint, .. } => tint,
         })
         .collect()
 }

@@ -32,6 +32,13 @@ var<uniform> screen: Screen;
 var atlas_tex: texture_2d<f32>;
 @group(1) @binding(1)
 var atlas_sampler: sampler;
+// The consumer's atlas, or a 1x1 white texel when there is none. It shares the
+// sampler above: both want linear filtering and clamped addressing, and a second
+// sampler for one texture would be a binding spent on nothing. The consequence is
+// that a consumer's sheet is always filtered, so — exactly like the glyph bake —
+// it wants a one-texel gutter between packed sub-images.
+@group(1) @binding(2)
+var image_tex: texture_2d<f32>;
 
 struct VertexInput {
     @location(0) pos: vec2<f32>,
@@ -40,9 +47,15 @@ struct VertexInput {
     // The shape this fragment belongs to: centre.xy, half-size.xy, in pixels.
     // Note this is the *shape*, not the quad — the quad is inflated slightly so
     // the antialiased edge has somewhere to fade out.
+    //
+    // Mode 4 reads the same four floats as the segment's two endpoints instead.
+    // A box and a line need the same amount of description, and the vertex has no
+    // room to spare: it is 80 bytes against a 255-byte stride ceiling.
     @location(3) shape: vec4<f32>,
-    // x: corner radius, y: border width (0 = filled), z: mode, w: glyph AA band.
-    // Modes: 0 flat rect, 1 rounded fill, 2 rounded stroke, 3 distance-field glyph.
+    // x: corner radius (mode 4: half stroke width), y: border width (0 = filled),
+    // z: mode, w: glyph AA band.
+    // Modes: 0 flat rect, 1 rounded fill, 2 rounded stroke, 3 distance-field
+    // glyph, 4 stroke segment (a capsule), 5 textured quad.
     @location(4) params: vec4<f32>,
     // Clip rectangle: min.xy, max.xy, in pixels.
     @location(5) clip: vec4<f32>,
@@ -87,12 +100,32 @@ fn sd_round_box(p: vec2<f32>, half_size: vec2<f32>, radius: f32) -> f32 {
     return length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
 
+// Signed distance to the segment a-b, in pixels. A stroke is every point within
+// half a width of the segment — a swept disc — so subtracting the half-width from
+// this gives round joins and round caps with no geometry for either. That is the
+// whole reason the *segment* is the primitive here rather than the polyline.
+//
+// `max` on the denominator rather than a branch: two samples landing on the same
+// pixel is an ordinary thing for a plot to produce, and it has to degenerate to
+// the distance from `a`, which is exactly what `h = 0` gives.
+fn sd_segment(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+    let pa = p - a;
+    let ba = b - a;
+    let h = clamp(dot(pa, ba) / max(dot(ba, ba), 1.0e-6), 0.0, 1.0);
+    return length(pa - ba * h);
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Sampled before any branching: WGSL requires texture sampling to happen in
-    // uniform control flow, so this cannot move below the clip test or into the
-    // text branch, even though only glyphs use the result.
+    // Both textures are sampled before any branching: WGSL requires texture
+    // sampling to happen in uniform control flow, so neither can move below the
+    // clip test or into the one branch that reads it. The second fetch is the
+    // price of keeping the whole overlay a single draw call; if it ever measures,
+    // `textureSampleLevel(..., 0.0)` takes an explicit LOD and so needs neither
+    // derivatives nor uniformity, and both textures are single-mip so the
+    // substitution is exact.
     let field = textureSample(atlas_tex, atlas_sampler, in.uv).r;
+    let texel = textureSample(image_tex, atlas_sampler, in.uv);
 
     // Clipping is a discard rather than a scissor rect, so a clipped region
     // costs nothing in draw calls and nests by simple intersection on the CPU.
@@ -101,10 +134,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
+    var rgb = in.color.rgb;
     var alpha = in.color.a;
 
     let mode = in.params.z;
-    if (mode > 2.5) {
+    if (mode > 4.5) {
+        // A textured quad. The tint multiplies, so opaque white draws the image
+        // untouched and a themed tint shades a monochrome sheet. Straight
+        // (non-premultiplied) alpha, matching the pipeline's blend state and what
+        // a `Color` means everywhere else in the toolkit.
+        rgb = rgb * texel.rgb;
+        alpha = alpha * texel.a;
+    } else if (mode > 3.5) {
+        // One segment of a stroked path, as a capsule. `shape` is the two
+        // endpoints and `params.x` the half-width; the caps and the joint are
+        // what "within half a width of this segment" already means.
+        let d = sd_segment(in.px, in.shape.xy, in.shape.zw) - in.params.x;
+        alpha = alpha * (1.0 - smoothstep(-0.5, 0.5, d));
+    } else if (mode > 2.5) {
         // A glyph. 0.5 is the outline; the band is how much of the field one
         // screen pixel spans, so the same atlas antialiases correctly at 15pt on
         // a 1x display and at 24pt on a 2x one.
@@ -122,5 +169,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         alpha = alpha * cov;
     }
 
-    return vec4<f32>(in.color.rgb, alpha);
+    return vec4<f32>(rgb, alpha);
 }

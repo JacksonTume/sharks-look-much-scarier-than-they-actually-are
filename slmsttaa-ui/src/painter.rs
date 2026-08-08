@@ -33,6 +33,40 @@ use crate::{font, Rect};
 /// An RGBA color in `[0, 1]`, the only color type the UI speaks.
 pub type Color = [f32; 4];
 
+/// A handle to an image a [`Painter`] can draw.
+///
+/// Opaque on purpose: this crate never learns what an image *is*, only that a
+/// painter can be handed one back. It lives here rather than in the engine for
+/// the same reason [`Color`] and [`Rect`] do — it is part of the vocabulary of
+/// the [`Painter`] trait, and a trait cannot speak a type its own crate cannot
+/// name. The engine mints these and resolves them to textures; a consumer holds
+/// one and gives it back.
+///
+/// That is a different answer from the one the keyboard got, where `Key` is
+/// declared on both sides of the seam and translated. The difference is who
+/// holds the value: nothing outside the engine ever holds a `Key`, but a
+/// consumer holds an `ImageId` between creating an image and drawing it, so two
+/// types would cost it a conversion in its own code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ImageId(u32);
+
+impl ImageId {
+    /// Mint an id from a painter's own index.
+    ///
+    /// For [`Painter`] implementors. It is public because the seam is
+    /// unprivileged — a consumer writing its own painter has to be able to issue
+    /// these, exactly as the engine's does — not because a consumer should be
+    /// forging them.
+    pub fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// The index this id was minted from.
+    pub fn raw(self) -> u32 {
+        self.0
+    }
+}
+
 /// Which stacking bucket a primitive is drawn into.
 ///
 /// An immediate-mode UI declares widgets top-to-bottom, but *draws* them in an
@@ -113,9 +147,66 @@ pub trait Painter {
     /// Undo the innermost [`Painter::push_clip`].
     fn pop_clip(&mut self);
 
+    /// Stroke the open path through `points`, `width` points thick.
+    ///
+    /// **Open**: the last point is not joined back to the first. A closed outline
+    /// is the caller repeating its first point, which is the honest way round —
+    /// there is no way to un-close a closed primitive.
+    ///
+    /// Joins and caps are **round**, and are not configurable. A segment is drawn
+    /// as the set of points within half `width` of it — a swept disc — so both
+    /// fall out of the shape rather than being constructed, which is why they are
+    /// free and why they are the only ones on offer.
+    ///
+    /// Fewer than two points, or a `width` at or below zero, draws nothing.
+    ///
+    /// **A translucent stroke double-blends at its joints.** Consecutive segments
+    /// overlap where they meet, and straight alpha compositing puts `a` over `a`
+    /// as `1 - (1 - a)²` — a visibly darker dot at every vertex. Opaque strokes
+    /// are unaffected, and [`Painter::convex_polygon`] has no overlap at all, so
+    /// a translucent *fill* is clean where a translucent *outline* is not.
+    ///
+    /// The painter does not decimate. One point per pixel of travel is the useful
+    /// limit; a caller plotting more samples than the run is wide should thin
+    /// them first.
+    fn polyline(&mut self, points: &[(f32, f32)], width: f32, color: Color);
+
+    /// Fill the **convex** polygon through `points`, which is implicitly closed.
+    ///
+    /// Convexity is a precondition, not a check: a concave input still draws, as
+    /// a fan from the centroid, which is wrong in a way that looks like a bug
+    /// because it is one — in the caller. Winding may be either way round.
+    ///
+    /// Fewer than three points draws nothing.
+    ///
+    /// Unlike [`Painter::polyline`] this never overlaps itself, so it composites
+    /// correctly at any alpha — an area fill under a curve is exact.
+    fn convex_polygon(&mut self, points: &[(f32, f32)], color: Color);
+
+    /// Draw the sub-rectangle `uv` of `image`, stretched to fill `rect`.
+    ///
+    /// `uv` is `[u0, v0, u1, v1]` in `0..=1` with `[u0, v0]` landing at `rect`'s
+    /// **top-left**, matching how a glyph's atlas rectangle is read. `tint`
+    /// multiplies, so opaque white draws the image untouched and a themed color
+    /// shades a monochrome sheet.
+    ///
+    /// An [`ImageId`] is minted by the painter — see [`ImageId::from_raw`]. A
+    /// painter that has never issued one draws nothing here.
+    ///
+    /// **One image per frame.** The engine's overlay keeps the whole UI to a
+    /// single draw call, which binds one texture; a frame that draws two
+    /// different images cannot be honored, and the first one wins. Pack what a
+    /// frame needs into one atlas and address it with `uv`.
+    fn image(&mut self, rect: Rect, image: ImageId, uv: [f32; 4], tint: Color);
+
     /// Fill `rect` with square corners — the common case.
     fn rect(&mut self, rect: Rect, color: Color) {
         self.fill_rect(rect, 0.0, color);
+    }
+
+    /// Draw the whole of `image` into `rect`.
+    fn image_full(&mut self, rect: Rect, image: ImageId, tint: Color) {
+        self.image(rect, image, [0.0, 0.0, 1.0, 1.0], tint);
     }
 }
 
@@ -156,20 +247,74 @@ pub enum DrawCmd {
         /// The clip region in force, if any.
         clip: Option<Rect>,
     },
+    /// An open stroked path.
+    ///
+    /// Recorded as the points that were asked for, **not** as the triangles they
+    /// become. That is the seam working as designed: the toolkit describes a
+    /// shape and the painter renders it, so a test here asserts what a widget
+    /// meant rather than how one implementation drew it.
+    Polyline {
+        /// The path, in logical points, in order.
+        points: Vec<(f32, f32)>,
+        /// Stroke thickness in points.
+        width: f32,
+        /// The color.
+        color: Color,
+        /// The layer this was drawn into.
+        layer: Layer,
+        /// The clip region in force, if any.
+        clip: Option<Rect>,
+    },
+    /// A filled convex polygon, implicitly closed.
+    Polygon {
+        /// The outline, in logical points, in order.
+        points: Vec<(f32, f32)>,
+        /// The fill color.
+        color: Color,
+        /// The layer this was drawn into.
+        layer: Layer,
+        /// The clip region in force, if any.
+        clip: Option<Rect>,
+    },
+    /// A textured quad.
+    Image {
+        /// The bounds drawn.
+        rect: Rect,
+        /// Which image.
+        image: ImageId,
+        /// The sub-rectangle sampled, `[u0, v0, u1, v1]` in `0..=1`.
+        uv: [f32; 4],
+        /// The multiplied tint.
+        tint: Color,
+        /// The layer this was drawn into.
+        layer: Layer,
+        /// The clip region in force, if any.
+        clip: Option<Rect>,
+    },
 }
 
 impl DrawCmd {
     /// The layer this primitive was drawn into.
     pub fn layer(&self) -> Layer {
+        // Exhaustive, with no catch-all arm, so a primitive added later is a
+        // compile error here rather than one that silently sorts to `Base`.
         match *self {
-            DrawCmd::Rect { layer, .. } | DrawCmd::Text { layer, .. } => layer,
+            DrawCmd::Rect { layer, .. }
+            | DrawCmd::Text { layer, .. }
+            | DrawCmd::Polyline { layer, .. }
+            | DrawCmd::Polygon { layer, .. }
+            | DrawCmd::Image { layer, .. } => layer,
         }
     }
 
     /// The clip region in force when this was drawn.
     pub fn clip(&self) -> Option<Rect> {
         match *self {
-            DrawCmd::Rect { clip, .. } | DrawCmd::Text { clip, .. } => clip,
+            DrawCmd::Rect { clip, .. }
+            | DrawCmd::Text { clip, .. }
+            | DrawCmd::Polyline { clip, .. }
+            | DrawCmd::Polygon { clip, .. }
+            | DrawCmd::Image { clip, .. } => clip,
         }
     }
 }
@@ -263,6 +408,27 @@ impl RecordingPainter {
             .collect()
     }
 
+    /// The recorded stroked paths, in call order.
+    pub fn polylines(&self) -> impl Iterator<Item = &DrawCmd> {
+        self.cmds
+            .iter()
+            .filter(|c| matches!(c, DrawCmd::Polyline { .. }))
+    }
+
+    /// The recorded filled polygons, in call order.
+    pub fn polygons(&self) -> impl Iterator<Item = &DrawCmd> {
+        self.cmds
+            .iter()
+            .filter(|c| matches!(c, DrawCmd::Polygon { .. }))
+    }
+
+    /// The recorded textured quads, in call order.
+    pub fn images(&self) -> impl Iterator<Item = &DrawCmd> {
+        self.cmds
+            .iter()
+            .filter(|c| matches!(c, DrawCmd::Image { .. }))
+    }
+
     /// The clip region currently in force.
     fn clip(&self) -> Option<Rect> {
         self.clips.last().copied()
@@ -282,6 +448,13 @@ impl Painter for RecordingPainter {
     }
 
     fn stroke_rect(&mut self, rect: Rect, radius: f32, width: f32, color: Color) {
+        // The degenerate guard is the trait's, not an implementation detail: the
+        // overlay has skipped a zero-width stroke since Slice 2, and recording one
+        // here anyway meant a test could see a command the screen never drew. That
+        // is `text_size`'s failure in miniature, and it lived here until Slice 10.
+        if width <= 0.0 {
+            return;
+        }
         self.cmds.push(DrawCmd::Rect {
             rect,
             radius,
@@ -319,5 +492,44 @@ impl Painter for RecordingPainter {
 
     fn pop_clip(&mut self) {
         self.clips.pop();
+    }
+
+    fn polyline(&mut self, points: &[(f32, f32)], width: f32, color: Color) {
+        if points.len() < 2 || width <= 0.0 {
+            return;
+        }
+        self.cmds.push(DrawCmd::Polyline {
+            // Recorded verbatim. Nothing here decimates, closes, or reorders —
+            // if it did, a test asserting on these points would be asserting on
+            // the recorder rather than on the widget that called it.
+            points: points.to_vec(),
+            width,
+            color,
+            layer: self.layer,
+            clip: self.clip(),
+        });
+    }
+
+    fn convex_polygon(&mut self, points: &[(f32, f32)], color: Color) {
+        if points.len() < 3 {
+            return;
+        }
+        self.cmds.push(DrawCmd::Polygon {
+            points: points.to_vec(),
+            color,
+            layer: self.layer,
+            clip: self.clip(),
+        });
+    }
+
+    fn image(&mut self, rect: Rect, image: ImageId, uv: [f32; 4], tint: Color) {
+        self.cmds.push(DrawCmd::Image {
+            rect,
+            image,
+            uv,
+            tint,
+            layer: self.layer,
+            clip: self.clip(),
+        });
     }
 }

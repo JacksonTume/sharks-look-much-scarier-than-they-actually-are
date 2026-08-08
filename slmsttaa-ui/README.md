@@ -18,9 +18,10 @@ capabilities), [3](ROADMAP.md#slice-3--layout) (layout),
 [6](ROADMAP.md#slice-6--animation-polish-labeled) (animation),
 [7](ROADMAP.md#slice-7--keyboard-focus-and-text-entry-done) (keyboard and text
 entry), [8](ROADMAP.md#slice-8--a-header-that-lines-up-with-its-body-done) (a
-header that lines up with its body) and
+header that lines up with its body),
 [9](ROADMAP.md#slice-9--only-lay-out-the-rows-you-can-see-done) (virtualized rows)
-are done. The toolkit is a zero-dependency crate the engine re-exports as
+and [10](ROADMAP.md#slice-10--a-painter-that-can-draw-a-chart-done) (lines,
+polygons and images) are done. The toolkit is a zero-dependency crate the engine re-exports as
 `slmsttaa::ui`, and it now has the machinery that separates a toolkit from a pile
 of sliders:
 
@@ -59,19 +60,27 @@ of sliders:
   frame before. See [Slice
   9](ROADMAP.md#slice-9--only-lay-out-the-rows-you-can-see-done) for what that
   measurement found, which was mostly not what it went looking for.
+- **Shapes** — stroked paths with round joins and caps, filled convex polygons,
+  and textured quads from an image the consumer uploads. The painter *describes*
+  them and the overlay renders them, which is why the toolkit shipped a chart
+  without shipping a chart widget: `examples/terrain.rs` plots its own erosion
+  history from these three plus `allocate`. See [Slice
+  10](ROADMAP.md#slice-10--a-painter-that-can-draw-a-chart-done).
 - **A public seam** — `allocate` / `interact` / `painter` / `theme` / `animate` /
   `next_id` / `focusable`, so a widget written by a consumer is not second-class.
-  Two consumers have now built a table, a list and a filter on it without this
-  crate growing any of them.
+  Two consumers have now built a table, a list, a filter and a chart on it
+  without this crate growing any of them.
 
 Widgets: `title` / `section` (collapsible) / `label` / `label_muted` /
 `label_value` / `separator` / `button` / `checkbox` / `slider` / `text_field` /
 `scroll_area` / `scroll_area_headed` / `scroll_area_virtual`.
 
 **Nothing is scheduled next, and that is the intended state.** Every slice above
-was pulled into existence by something a demo could not do. The next piece of UI
-work should arrive the same way, not from the roadmap — see [*Waiting on a
-roadblock*](ROADMAP.md#waiting-on-a-roadblock) for what is recognized but
+was pulled into existence by something a demo could not do — including Slice 10,
+whose wishlist entry had sat undriven until the terrain demo turned out to have
+been computing a plottable series every erosion pass and discarding it. The next
+piece of UI work should arrive the same way, not from the roadmap — see [*Waiting
+on a roadblock*](ROADMAP.md#waiting-on-a-roadblock) for what is recognized but
 deliberately unbuilt, and [`WISHLIST.md`](WISHLIST.md) for what a second,
 data-dense consumer would want.
 
@@ -225,7 +234,10 @@ scrollbar; `tests/theme.rs` pins that no widget draws a color or reads a metric 
 theme didn't supply; `tests/typography.rs` pins proportional advances, tabular
 digits, em-linear metrics, and that an unbaked character draws a visible box rather
 than vanishing; `tests/virtual_rows.rs` pins that a virtualized list places only
-the rows its viewport covers *and* puts them exactly where a real one would. All of
+the rows its viewport covers *and* puts them exactly where a real one would;
+`tests/shapes.rs` pins that a path's points reach the painter untouched, that the
+degenerate cases draw nothing on *both* implementations, and that a chart built in
+the test from `allocate` + `painter` is clipped by an ordinary scroll area. All of
 them drive the crate through its public API only, which doubles as a check that a
 consumer could do the same.
 

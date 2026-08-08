@@ -60,6 +60,7 @@ cargo xtask shoot workspace                    # one PNG at frame 120
 cargo xtask shoot terrain --frames 400 --size 1280x720
 cargo xtask shoot workspace --script capture/workspace.script   # clicks between shots
 cargo xtask shoot editor --script capture/editor-list.script    # UI Slice 9's check
+cargo xtask shoot terrain --script capture/terrain-plot.script  # UI Slice 10's
 
 # Type-check the wasm target without packaging
 cargo build --target wasm32-unknown-unknown --lib
@@ -76,7 +77,9 @@ the browser console.
 ## Verifying changes
 
 Tests live in the places that don't need a GPU: `slmsttaa-ui/tests/` (the
-zero-dependency toolkit, via the `RecordingPainter` double), and inside the
+zero-dependency toolkit, via the `RecordingPainter` double — note the recorder
+holds *shapes*, so `tests/shapes.rs` asserts the points a chart asked for, never
+the triangles they became), and inside the
 engine wherever the logic is pure — `src/renderer/primitives.rs` (mesh builders
 are CPU geometry), `src/renderer/graph.rs` (pass ordering), `src/camera.rs` and
 `src/renderer/mod.rs` (the cursor→NDC mapping picking rests on), `src/time.rs`,
@@ -123,12 +126,16 @@ To confirm a change works:
   the desktop and driven by posted messages, so nothing appears on screen and the
   developer's own mouse is never touched.
 
-  Two things about writing a script, both learned the hard way. A frozen frame
+  Three things about writing a script, all learned the hard way. A frozen frame
   runs `render` and nothing else, so anything a demo derives from *last* frame's
   update — `ui_pointer`, most obviously — is stale while it is parked: move the
-  pointer on an earlier frame than you click or scroll with it. And panel
+  pointer on an earlier frame than you click or scroll with it. Panel
   coordinates are stable in logical points but **reflow**, so a click that opens a
-  section moves everything under it.
+  section moves everything under it. And **a script cannot move a slider**: `click`
+  is a press and a release with no update between them, so `Response::held` is
+  never true for a frame, and every drag widget reads `held`. Buttons, checkboxes
+  and the wheel work; sliders have to be worked around (UI Slice 10's script
+  advances the erosion by *playing* rather than by scrubbing).
 
   It does **not** replace looking: it proves pixels did not move, which is a
   different claim from "this is right", and every bug in the list above was found

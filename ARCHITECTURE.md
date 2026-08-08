@@ -580,7 +580,8 @@ render graph will eventually grow. The design holds two boundaries at once:
 
 - **`Painter` is the seam, and it is the engine's only obligation to the UI.**
   The toolkit talks to the overlay *only* through that trait (`fill_rect` /
-  `stroke_rect` / `text` / `set_layer` / `push_clip` / `pop_clip`)
+  `stroke_rect` / `text` / `polyline` / `convex_polygon` / `image` / `set_layer` /
+  `push_clip` / `pop_clip`)
   and never sees `wgpu`; the overlay is just one implementation, and a headless
   recorder in the UI crate's tests is another. Everything above the trait —
   widgets, layout, theming, interaction — is
@@ -638,6 +639,32 @@ render graph will eventually grow. The design holds two boundaries at once:
   clipped scroll region inside it is still **one** `draw_indexed`. Clip
   rectangles intersect rather than replace as they nest, so an inner region can
   only ever shrink what is visible.
+
+  **A stroked path reuses those same four floats rather than adding any** (UI
+  Slice 10). `MODE_SEGMENT` reads `shape` as the segment's two endpoints and
+  `params.x` as its half-width, and the fragment evaluates a capsule — which is
+  where round joins and round caps come from, since "within half a width of this
+  segment" already means one. That was chosen as economy and turned out to be
+  forced: 80 bytes against a 255-byte `max_vertex_buffer_array_stride` leaves room
+  for two more `vec4`s in the entire format.
+
+  **A filled convex polygon is the exception, and it is tessellated.** An
+  arbitrary polygon's SDF needs its half-plane list per fragment, which means a
+  storage buffer (absent on WebGL2, and forbidden by `overlay.wgsl`'s own rules)
+  or attributes that do not fit. So it is a fan from the centroid wrapped in a
+  ring of alpha-zero vertices, built in `overlay.rs` where the scale factor is
+  known — a feather is measured in *physical pixels*, and the toolkit never learns
+  what one is. It needed no shader change: `MODE_RECT` already takes its alpha
+  straight from the vertex color.
+
+- **The consumer's images share the glyph atlas's bind group** (engine Slice 21).
+  A second texture at binding 2, a 1×1 dummy until something supplies one, and
+  `MODE_IMAGE` samples it. The group is rebuilt only when a frame draws a
+  *different* image than the last one did, and the pipeline layout is fixed at
+  construction — so the whole overlay is still one `draw_indexed`, at the price of
+  a hard rule: **one image per frame**. Format is `Rgba8Unorm` so a texel lands in
+  the same space as a `Color`, which matters most on the WebGL2 path where the
+  surface cannot be re-viewed as sRGB and neither is encoded.
 
 - **Draw layers cost one index vector, not one draw call.** `Painter::set_layer`
   directs primitives into one of four buckets (base / panel / popup / tooltip).

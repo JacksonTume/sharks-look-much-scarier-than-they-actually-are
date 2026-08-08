@@ -330,6 +330,42 @@ with no driver. This consumer supplies one, plus two more:
 
 ### Painter additions for data visualization
 
+> **All three built, as [UI Slice
+> 10](ROADMAP.md#slice-10--a-painter-that-can-draw-a-chart-done) and [engine Slice
+> 21](../ROADMAP.md#slice-21--pixels-a-consumer-supplies-done) — and the central
+> claim below held exactly.** "If those three land, every chart above is writable
+> in the consumer with no widget roster growth here at all." The roster grew by
+> **nothing**. `slmsttaa-ui` gained three trait methods, three `DrawCmd` variants
+> and an id type; the chart itself is a free function in `examples/terrain.rs`,
+> reached through `allocate` + `painter` like everything else a demo has ever
+> written for itself. That is the fourth time this file has expected to pay for a
+> widget and not had to.
+>
+> **What it got wrong is who would ask.** This entry names a roadblock made of
+> career curves, ranking history and style-matchup heatmaps — screens in a
+> consumer this project cannot run. None of them drove it. The driver was the
+> *terrain demo*, which has been computing a lake-volume series on every erosion
+> pass since Slice 13 and throwing it away, and whose own rustdoc has cited a
+> headless measurement — "lake coverage falls to zero by about pass 110" — that
+> had never been on screen. The data was already there; only the diagonal line was
+> missing. A wishlist entry can be right about the capability and wrong about
+> every consumer it imagined for it.
+>
+> Two things fell out that this entry did not anticipate, both worth keeping:
+>
+> - **"Textured quads from a consumer-supplied atlas" and the engine's own
+>   "consumer-supplied textures" entry were one slice, not two.** They read as
+>   separate demands — icons in a panel, surface detail on a mesh — and the thing
+>   that actually arrived was neither: a thumbnail of the consumer's own data,
+>   which is a picture in a panel and therefore the UI's answer exactly. The 3D
+>   half is still unbuilt and still has no demander.
+> - **The seam had to keep describing shapes rather than carrying triangles**, and
+>   the reason is the one Slice 5 already established. Antialiasing is measured in
+>   physical pixels; this crate never learns the scale factor. A tessellator up
+>   here would have produced a feather one *point* wide — correct at 1× and twice
+>   too soft at 2×, with a green test suite either way. The same argument that
+>   moved `text_size` out of the trait kept the stroker out of the toolkit.
+
 Charts themselves should **not** live in this crate — they are content, and the
 unprivileged-widget rule says a consumer writes them from `allocate` +
 `interact` + `painter`. But the painter cannot currently draw them at all.

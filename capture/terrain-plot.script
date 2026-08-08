@@ -1,0 +1,67 @@
+# UI Slice 10's verification: three new painter primitives, on screen.
+#
+# The claim is that a chart became writable in a *consumer* — stroked polylines
+# for the curves, filled convex polygons for the area under one of them, and a
+# textured quad for a thumbnail the demo shaded itself — with no widget added to
+# `slmsttaa-ui`, and with the overlay still a single `draw_indexed`. Three of
+# those are pictures, and these are the pictures.
+#
+# Run it:  cargo xtask shoot terrain --script capture/terrain-plot.script
+#
+# Frame numbers, not seconds. The engine holds on each one, so a click lands on a
+# known frame and the erosion is at a known pass — which is what makes the
+# coordinates below stable rather than a guess about timing. At the default 8
+# passes a second, frame N is pass N/7.5.
+#
+# Two things about the coordinates, both learned the hard way elsewhere:
+#
+#  - **They were read off `shot rest`**, in physical pixels from the window's
+#    top-left. The pause button is at (97, 109); the Plot heading at (52, 227).
+#  - **Every click here is on or above the Plot heading**, deliberately.
+#    Collapsing a section reflows only the rows beneath it, so nothing in this
+#    file moves under its own steps. That is the reflow trap
+#    `capture/editor-list.script` records, sidestepped by ordering rather than
+#    survived.
+#
+# **The pass is advanced by playing, not by scrubbing, and that is a harness
+# limit rather than a preference.** The obvious script clicks four fifths of the
+# way along the `pass` track and jumps straight to a drained landscape. It does
+# nothing: `Action::Click` is a press *and* release with no update in between, so
+# `Response::held` is never true for a single frame, and every drag widget in the
+# toolkit — slider, and the demo's own `log_slider` — acts on `held`. A button
+# works (the pause below is one), a slider cannot be moved at all. Recorded in
+# the engine roadmap beside the wheel, which was added for the same class of
+# reason: a widget the harness could not reach.
+
+# Frame 200: about pass 26. Lakes full, both curves still climbing away from the
+# origin, and the minimap wet. The reference shot, and where the coordinates
+# above were read from.
+200  shot  rest
+
+# Frame 700: about pass 93, running. The curves have grown to the right and the
+# marker with them; the area fill under lake depth has grown with both. Two
+# shots of a plot that is being *made* is the cheapest proof the marker is a
+# function of the pass rather than a decoration.
+700  shot  mid
+
+# Pause at about pass 136, so the last two shots hold still. The play/pause
+# button is the left half of the Time section's two-column row, and a button is
+# the one interactive thing a press-and-release can actually work.
+1020  move  97 109
+1040  click
+
+# Frame 1080: the shot the whole section exists for. Lake depth has decayed to
+# nearly nothing while height-moved has not, which is the demo's own headless
+# measurement — "lake coverage falls to zero by about pass 110", written in
+# `terrain.rs` since Slice 14 and never once on screen — finally drawn. The
+# minimap has lost its water at the same time, from the same data, which is what
+# says the image and the plot are two views of one thing rather than two
+# pictures that happen to agree.
+1080  shot  late
+
+# Collapse the Plot heading. Everything below it moves up and the panel shrinks,
+# which proves the section is an ordinary `ui.section` with no privileges — and
+# leaves a picture of the demo with the capability switched off to diff against.
+1120  move  52 227
+1140  click
+1180  shot  collapsed
