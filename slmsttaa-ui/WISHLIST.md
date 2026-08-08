@@ -74,6 +74,18 @@ Each names the screen that would pull it into existence.
 > toolkit owes. What it did owe is the gutter fix directly beneath this entry,
 > and that has since shipped. Sorting and selection remain unbuilt, and look
 > consumer-shaped for the same reason.
+>
+> **Sorting and selection are now built — in the consumer, and the toolkit still
+> grew nothing.** A stable three-state column sort over a sort key emitted beside
+> every cell, a selection held against the row rather than the drawn position, and
+> since then arrow-key walking, Enter to open and a typed filter. The one thing
+> that table takes from this crate that it could not have written is the scroll
+> offset: `Rows::reveal`. Everything else on the list at the top of this entry —
+> column model, sticky header, row selection, hover, cell renderers — is content,
+> and four screens now share one 400-line `table.rs` in the consumer.
+>
+> That is the fourth time this entry has been revised downward, and it is the last
+> one that will say anything new. **The keystone was never this crate's to lay.**
 
 Nothing in the current roadmap approaches this, and it is the single
 highest-value widget for a data-dense consumer. Not a styled grid of labels: a
@@ -345,6 +357,48 @@ Immediate mode's structural weakness. The fix is damage tracking — repaint onl
 when input, animation, or consumer state changed — and it is much cheaper to
 design in near Slice 1 than to retrofit once widgets assume a frame is free.
 
+> **Now measured, and Slice 9 spent most of this entry's urgency.** The consumer
+> adopted `scroll_area_virtual_headed` for a whole-world roster and timed it: a
+> static screen of **1,400 rows costs 0.3 ms a frame and emits a constant 196
+> draw commands**. The premise above — "redrawing 450 table rows" — is no longer
+> what happens. A virtualized screen redraws a *screenful*, about twenty rows,
+> however large the roster is.
+>
+> That is an argument against urgency, not against the item. 0.3 ms of CPU at
+> 60 Hz is still 0.3 ms spent to show nothing new, and a handheld's GPU still
+> wakes for every one of those frames — the battery case was always more about
+> the *frame* than about the rows in it. But "much cheaper to design in near
+> Slice 1" has been overtaken twice over: Slices 1–9 are done, and the thing this
+> entry worried about got 50× cheaper without it.
+>
+> Recorded with the number rather than quietly downgraded, because the shape is
+> worth keeping: **an entry can be right about a mechanism and wrong about which
+> fix retires it.** Damage tracking was the predicted answer; virtualization is
+> what actually arrived, and it was pulled by something else entirely.
+
+### A sort arrow is not in the atlas
+
+Small, and found twice by the same consumer without either time being enough to
+schedule it — which is the pattern this file exists to catch before the third.
+
+`fontbake`'s `EXTRAS` bakes `… ° ± × · → ← ✓ ▶ ■ □`. It has `▶` and neither `▲`
+nor `▼`. A sortable table wants the pair, so that consumer's tables draw `^` and
+`v` instead: legible, and visibly not the glyph the genre uses.
+
+The reason the Slice 5 charset work did not cover it is worth stating, because it
+is a seam question rather than an oversight. The bake's non-ASCII range is the
+closure over that consumer's **name pools** — 150,502 entries of world data, and
+the consumer owns a test that fails if one carries an unbaked codepoint. **UI
+chrome is not in any pool**, so nothing on either side of the seam can notice it:
+this crate cannot see the tables, and that test only walks names.
+
+*Roadblock:* not one, honestly — `^`/`v` work. What makes it worth recording is
+the cost, which is two codepoints × two weights against an atlas that already
+carries 240 glyphs, and the fact that [`columns`' own
+documentation](README.md) now points consumers at building their own tables. Every
+table built on this toolkit will want a sort arrow, and every one of them will
+find the atlas has `▶` and stop there for a minute.
+
 ### Engine-side, not this crate
 
 One item that belonged in [`../ROADMAP.md`](../ROADMAP.md), noted here because the
@@ -388,6 +442,62 @@ engine's:
   entry filed, surviving its own fix. `title` is now `Option<String>` and the
   engine sets `document.title` itself, but only when a consumer actually asked —
   writing the default there would have overwritten every page's own caption.
+- **The harness cannot photograph a binary it did not build.** `cargo xtask shoot`
+  takes an *example name*, builds it in this repo, and looks for it under
+  `target/…/examples/`. The capture protocol itself has no such limit: it is
+  entirely env-var driven and lives in `src/capture.rs`, so **any binary linking
+  this engine already participates**. That is not an inference: run that client
+  under `SLMSTTAA_CAPTURE_DT=0.016666 SLMSTTAA_CAPTURE_FRAMES=60,180` and it
+  prints `slmsttaa: capture 60` and `slmsttaa: capture 180` and freezes on each,
+  from a repository this one has never heard of. Everything the protocol needs
+  works. The only missing piece is a way to *name* the binary.
+
+  An `--exe <path>` that skips the build and shoots an existing binary would close
+  it, and the argument is one [*The harness*](../ROADMAP.md#the-harness) already
+  makes for itself: *"run the demo and look at it" is not a workable answer when
+  the person who has to look is the one asking for the capture.* A consumer in
+  another repository is the sharpest case of that, because this project's author
+  cannot look at that window at all — and it is the case the harness's own
+  cross-platform work was undertaken for.
+
+  The dividend runs the other way too. Slice 8 recorded that a fix pulled by this
+  file gets a weaker demo, *"written afterward to check the fix rather than to
+  discover the need"*. A harness that can shoot the second consumer's screens is
+  the one thing that would let a wishlist entry come with a picture of the wall
+  attached.
+
+- **…and it cannot photograph a build that is already running**, which is a
+  different gap wearing the same coat, and on reflection the more useful half.
+
+  `shoot` is *scripted*: pin the clock, name the frames, write the pointer moves
+  in advance, get a deterministic PNG. That is the right instrument for a
+  regression and the wrong one for the question that actually arises, which is
+  **"I am looking at something odd right now — what is on this screen?"** A script
+  can only photograph what its author already predicted; the whole value of
+  looking at a window is the thing nobody predicted. Six bugs are on file here
+  that passed every test and were caught by a human looking, and not one of them
+  was found by a script that knew where to click.
+
+  Concretely: the second consumer's C8 adopted Slices 7, 8 and 9 across four
+  screens, and **every visual claim in it rests on golden files**, because there
+  was no way to see a pixel. The keyboard walk, the focus ring, the filter box,
+  the selection colour, the division links — all verified as draw-command text and
+  none of them looked at. That is a lot of trust in a recorder, and the recorder
+  cannot see a shader.
+
+  This needs none of `capture.rs`: no pinned clock, no frame numbers, no stdin
+  handshake. It is "capture this window, now" — the `PrintWindow` path
+  `xtask/src/harness/win32.rs` already has, aimed at a live process. The obvious
+  shapes, cheapest first: a `--pid`/`--window` flag on a `shoot`-like command; or
+  the engine itself writing a PNG on a keystroke, which costs a key binding and a
+  policy about who owns it and is the one that needs designing rather than
+  plumbing.
+
+  Two demanders already, which is normally what promotes an item: the consumer
+  above, and this project's own DoD line *"looking at it yourself still counts,
+  and still catches things the harness cannot"* — which is unactionable for
+  anyone who cannot see the machine the window is on.
+
 - **A per-frame failure is logged every frame.** A surface that fails validation
   logs one line per attempt: the consumer's first run of its table screen
   produced **170,897 lines and 512 KiB in about eighteen minutes** and never
@@ -534,3 +644,61 @@ planning in this file.
 > without every row declaring itself. That last one is the only item here found by
 > a demo rather than recognized in advance, which is exactly the pedigree this
 > file cannot give anything.
+
+---
+
+## What the second consumer's adoption cost
+
+Slices 7, 8 and 9 were all built for a consumer this project cannot run, so what
+they cost *on the other side of the seam* was unknown until it happened. It has
+now happened — that client took all three in one milestone, along with engine
+Slice 20 — and the numbers are the thing this file could not previously supply.
+
+- **The whole adoption cost no screen a signature.** Not one of that client's
+  screens learned that a keyboard exists: input arrives through `Ui`, which every
+  screen already held. The keyboard reached a table, a filter and a route stack
+  without moving a single boundary. The one parameter any screen gained was for
+  *filter text*, which is content.
+- **Slice 8 was invisible and correct.** Swapping a hand-shed `scrollbar_w + gap`
+  for `scroll_area_headed` moved **one line** in that client's golden files — a
+  separator that had been overhanging the gutter by 12 points. No column moved,
+  which is what says the private arithmetic agrees with the arithmetic every
+  consumer was doing by hand. Keeping the number private cost nothing and the
+  consumer deleted code.
+- **Slice 9 was the one that mattered, and by more than its own demo showed.**
+  The editor's measurement was a two-column list. A real table is eight columns,
+  and that multiplies: **1,400 rows cost 15.6 ms of a 16.7 ms frame** laid out in
+  full, and **0.3 ms** virtualized. The screen that had already shipped — 243
+  rows, and which nobody suspected — was spending **2.6 ms**, 16% of a frame, to
+  draw twenty visible rows. The draw list went 11,220 → **196, constant**.
+- **`Rows::reveal` was the part that could not have been written in the consumer**,
+  and that entry called it correctly. That client's own keyboard request had
+  explicitly *declined* to ask for scroll-to-selection — "the strong prior says
+  client-shaped; this client owns the table and can clamp its own visible range"
+  — and it was wrong for a reason it half-anticipated: once the list is
+  virtualized, the row worth revealing is by definition one that was never
+  placed, so there is no rectangle to clamp against. Naming the row by index is
+  the only shape that works.
+- **`next_id`'s duplicate re-hash is a live trap for a virtualized list**, and it
+  is worth one line of rustdoc where `scroll_area_virtual` documents its other
+  three costs. A consumer that derives a row's id inside the row closure *and*
+  again outside it — which the keyboard walk requires — gets two identities for
+  one row, and the symptom is hover working while focus does not. Both this
+  project's demo and that client arrived at "hoist the ids" independently, which
+  is usually the sign that the container should say so.
+- **The tab-ring entry Slice 9 opened is confirmed rather than aggravated.** At
+  1,400 rows Tab does walk a screenful, exactly as documented. It has not hurt,
+  because the consumer owns the ids and the arrows walk the whole list from them
+  — which is the bargain working as designed. Recorded so the entry keeps its
+  driver without gaining an urgency it has not earned.
+
+One thing came back that this file did not predict, and it belongs to Slice 7
+rather than to a wishlist entry: **the toolkit's Escape is better than the
+consumer's plan for it.** That client intended Escape to unwind its route stack
+whenever no widget bound the key, and assumed a focused table row would let it
+through. `Ui::new` consumes Escape whenever *anything* holds focus, so Escape
+became three-stage — leave the field, drop the ring, then go back. The consumer
+kept the toolkit's behaviour and deleted its own plan, because "Escape gets me out
+of whatever I am in" is true at every depth without either side knowing the other
+exists. That is the `wants_keyboard` seam paying for itself in a direction nobody
+designed it for.
