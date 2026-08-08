@@ -22,10 +22,11 @@
 //!
 //! ## The algorithm (one timestep)
 //!
-//! 1. **Flow routing** — a Priority-Flood (Barnes 2014) over the 8-neighborhood
-//!    assigns every cell a downstream *receiver* even across pits (depressions are
-//!    filled with an ε slope so nothing dead-ends), and yields a downstream-first
-//!    processing order.
+//! 1. **Flow routing** — a Priority-Flood (Barnes 2014) raises every depression to
+//!    its spill level, each cell then takes its steepest downhill neighbor, and the
+//!    level ground left inside the filled basins is given a direction by the
+//!    flat-resolution of Barnes, Lehman & Mulla 2014. Nothing dead-ends, and the
+//!    receiver forest yields a downstream-first processing order.
 //! 2. **Drainage area** — accumulate cell areas up the receiver tree (each cell
 //!    adds its area to its receiver), processing the order in reverse.
 //! 3. **Stream-power incision** — pull each cell toward its receiver by the stream
@@ -80,7 +81,7 @@
 //! principle 3): the engine never sees a heightmap, only the mesh built from one.
 
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, VecDeque};
 
 /// Tunable erosion parameters — the knobs the UI exposes.
 #[derive(Debug, Clone, Copy)]
@@ -294,13 +295,17 @@ fn analyze(z: &[f32], n: usize) -> (Flow, Water) {
     )
 }
 
-/// Depth below which "standing water" is really just accumulated flood ε.
+/// Depth below which standing water is too shallow to be worth calling a pond.
 ///
-/// The Priority-Flood raises each cell a hair above the one it was reached from,
-/// so a long dead-flat run picks up a nonzero depth that is an artifact of the
-/// algorithm and not a pond. Heights are normalized to `[0, 1]`, so this is a
-/// thousandth of the terrain's full relief — far below anything visible, and a
-/// thousand cells of ε before a false positive.
+/// Heights are normalized to `[0, 1]`, so this is a thousandth of the terrain's
+/// full relief.
+///
+/// It used to carry a second, larger job: the flood raised each cell a hair above
+/// the one it was reached from, so a long flat run accumulated ε into a "depth"
+/// that was an artifact of the algorithm and not water, and this threshold was
+/// what discarded it. [`fill_depressions`] no longer adds that ε — a cell outside
+/// a depression now comes out at exactly its own height — so the artifact is gone
+/// at the source and this is back to meaning what it says.
 pub const MIN_POND: f32 = 1.0e-3;
 
 // --- Thermal erosion -------------------------------------------------------
@@ -360,6 +365,9 @@ struct Flow {
     filled: Vec<f32>,
 }
 
+/// Distance marker for "this BFS has not reached the cell".
+const UNREACHED: u32 = u32::MAX;
+
 /// A min-heap node ordered by (filled) elevation, with a deterministic index
 /// tie-break so the flood is reproducible.
 #[derive(PartialEq)]
@@ -395,25 +403,34 @@ const D8: [(isize, isize, f32); 8] = [
     (1, 1, std::f32::consts::SQRT_2),
 ];
 
-/// Route flow with a Priority-Flood + ε (Barnes 2014): grow inward from the
-/// boundary outlets in elevation order, carving an ε-downhill path out of every
-/// depression so the whole grid drains. Each cell's receiver is the already-
-/// processed (lower, on the filled surface) neighbor it was reached from.
-fn flow_route(z: &[f32], n: usize) -> Flow {
+/// Raise every depression to its spill elevation — Priority-Flood (Barnes 2014).
+///
+/// Grow inward from the boundary in elevation order. A cell reached from `c`
+/// cannot drain lower than `c` did, so it comes out at `max(z, filled[c])`:
+/// outside a depression that is just `z`, and inside one it is the level of the
+/// rim the water spills over — the lake surface.
+///
+/// **No ε, and that is the fix for the water rails.** The classic variant lifts
+/// each cell a hair above the one it was reached from so that everything has a
+/// strictly lower neighbour and the receiver can simply be "whoever got here
+/// first". It is cheap and it is wrong in a way that shows: on flat ground the
+/// flood is a breadth-first wave, so "whoever got here first" is a BFS parent
+/// tree, whose branches are *dead-straight rays* from the point the wave entered.
+/// Drainage area then piles onto those rays, and the demo drew them as rivers —
+/// the long parallel diagonal lines across every drained basin. Filling honestly
+/// leaves the depression exactly level and hands the direction problem to
+/// [`resolve_flats`], which is where it belongs.
+fn fill_depressions(z: &[f32], n: usize) -> Vec<f32> {
     let count = n * n;
-    let mut receiver = vec![usize::MAX; count];
-    let mut dist = vec![1.0f32; count];
     let mut filled = vec![0.0f32; count];
     let mut visited = vec![false; count];
-    let mut order = Vec::with_capacity(count);
-    let mut heap = BinaryHeap::new();
+    let mut heap = BinaryHeap::with_capacity(4 * n);
 
-    // Seed every boundary cell as an outlet (drains to itself, base level).
+    // Seed every boundary cell at its own height: the grid drains off its edges.
     for y in 0..n {
         for x in 0..n {
             if x == 0 || y == 0 || x == n - 1 || y == n - 1 {
                 let c = y * n + x;
-                receiver[c] = c;
                 filled[c] = z[c];
                 visited[c] = true;
                 heap.push(HeapNode {
@@ -424,30 +441,14 @@ fn flow_route(z: &[f32], n: usize) -> Flow {
         }
     }
 
-    // A tiny increment so breached paths slope strictly downhill (no flat pits).
-    let epsilon = 1e-6;
-
     while let Some(node) = heap.pop() {
         let c = node.idx as usize;
-        order.push(c);
-        let cx = (c % n) as isize;
-        let cy = (c / n) as isize;
-        for (ox, oy, step) in D8 {
-            let nx = cx + ox;
-            let ny = cy + oy;
-            if nx < 0 || ny < 0 || nx >= n as isize || ny >= n as isize {
-                continue;
-            }
-            let nb = ny as usize * n + nx as usize;
+        for (nb, _) in neighbors(c, n) {
             if visited[nb] {
                 continue;
             }
             visited[nb] = true;
-            receiver[nb] = c;
-            dist[nb] = step;
-            // Fill/breach: the neighbor sits at least ε above its receiver,
-            // guaranteeing a downhill route even across a basin.
-            filled[nb] = z[nb].max(filled[c] + epsilon);
+            filled[nb] = z[nb].max(filled[c]);
             heap.push(HeapNode {
                 elev: filled[nb],
                 idx: nb as u32,
@@ -455,10 +456,218 @@ fn flow_route(z: &[f32], n: usize) -> Flow {
         }
     }
 
+    filled
+}
+
+/// The D8 neighbors of `c` on an `n × n` grid, each with its step distance.
+fn neighbors(c: usize, n: usize) -> impl Iterator<Item = (usize, f32)> {
+    let (cx, cy) = ((c % n) as isize, (c / n) as isize);
+    D8.into_iter().filter_map(move |(ox, oy, step)| {
+        let (nx, ny) = (cx + ox, cy + oy);
+        (nx >= 0 && ny >= 0 && nx < n as isize && ny < n as isize)
+            .then(|| (ny as usize * n + nx as usize, step))
+    })
+}
+
+/// Route flow over the filled surface: fill the depressions, point every cell at
+/// a downstream neighbour, and hand back a downstream-first order.
+///
+/// Three steps, because a filled surface has two quite different kinds of cell on
+/// it. Anywhere with a lower neighbour takes the **steepest** one, which is the
+/// ordinary D8 answer. Everywhere else is *level* — the interior of a filled
+/// depression — and has no steepest anything; [`resolve_flats`] gives those a
+/// direction. [`downstream_order`] then walks the resulting forest.
+fn flow_route(z: &[f32], n: usize) -> Flow {
+    let count = n * n;
+    let filled = fill_depressions(z, n);
+    let mut receiver = vec![usize::MAX; count];
+    let mut dist = vec![1.0f32; count];
+
+    for y in 0..n {
+        for x in 0..n {
+            let c = y * n + x;
+            // The boundary is base level: it drains off the map, to itself.
+            if x == 0 || y == 0 || x == n - 1 || y == n - 1 {
+                receiver[c] = c;
+                continue;
+            }
+            let mut steepest = 0.0f32;
+            for (nb, step) in neighbors(c, n) {
+                let slope = (filled[c] - filled[nb]) / step;
+                if slope > steepest {
+                    steepest = slope;
+                    receiver[c] = nb;
+                    dist[c] = step;
+                }
+            }
+        }
+    }
+
+    // Whatever is still unassigned has no lower neighbour at all: it is level
+    // ground, and level ground is the whole of every filled basin.
+    resolve_flats(&filled, n, &mut receiver, &mut dist);
+
+    let order = downstream_order(&receiver);
     Flow {
         receiver,
         order,
         dist,
         filled,
     }
+}
+
+/// Give every cell on level ground a downstream neighbour — the flat-resolution
+/// of Barnes, Lehman & Mulla 2014 ("An efficient assignment of drainage direction
+/// over flat surfaces in raster digital elevation models").
+///
+/// A filled depression is exactly level, so "downhill" is not defined on it and
+/// something has to invent a direction. Doing that badly is what produced the
+/// rails: any rule that picks the neighbour nearest the exit alone leaves every
+/// cell sprinting for the door in a straight line, and a hundred cells doing that
+/// in parallel is a hundred parallel lines.
+///
+/// The fix is to steer by two distances at once, measured over the level ground
+/// with a pair of breadth-first sweeps:
+///
+/// - `to_exit` — steps to the nearest cell that *does* drain off the flat. Flow
+///   must strictly descend this, which is what makes the result acyclic and what
+///   guarantees it reaches the spill point.
+/// - `from_rim` — steps from the higher ground pouring in around the edge. Among
+///   the neighbours that get closer to the exit, the one **furthest from the rim**
+///   wins.
+///
+/// That second term is the whole point. It pulls flow lines off the shoreline and
+/// onto the middle of the basin before they run for the outlet, so they *merge*
+/// into a channel instead of racing side by side — a drained lake gets one river
+/// down its axis with tributaries joining it, which is what a drained lake looks
+/// like.
+fn resolve_flats(filled: &[f32], n: usize, receiver: &mut [usize], dist: &mut [f32]) {
+    let count = n * n;
+    // Snapshot before assigning anything, or a cell resolved early would stop
+    // counting as level ground for its neighbours and split the flat in two.
+    let level: Vec<bool> = (0..count).map(|c| receiver[c] == usize::MAX).collect();
+    if !level.iter().any(|l| *l) {
+        return;
+    }
+
+    // Sweep 1, outward from the exits. A flat's exits are the cells on it that
+    // already have a receiver — the spill point, and any shore the flood reached
+    // without having to raise it.
+    let mut to_exit = vec![UNREACHED; count];
+    let mut queue = VecDeque::new();
+    for c in 0..count {
+        if !level[c] {
+            continue;
+        }
+        if neighbors(c, n).any(|(nb, _)| !level[nb] && filled[nb] == filled[c]) {
+            to_exit[c] = 1;
+            queue.push_back(c);
+        }
+    }
+    bfs_over_flat(&mut to_exit, &mut queue, filled, n, &level);
+
+    // Sweep 2, inward from the rim: the higher ground that drains into the flat.
+    let mut from_rim = vec![UNREACHED; count];
+    let mut queue = VecDeque::new();
+    for c in 0..count {
+        if !level[c] {
+            continue;
+        }
+        if neighbors(c, n).any(|(nb, _)| filled[nb] > filled[c]) {
+            from_rim[c] = 0;
+            queue.push_back(c);
+        }
+    }
+    bfs_over_flat(&mut from_rim, &mut queue, filled, n, &level);
+
+    for c in 0..count {
+        if !level[c] {
+            continue;
+        }
+        if to_exit[c] == UNREACHED {
+            // No way off this flat. A correct fill cannot produce one — every
+            // cell has a non-ascending path to the boundary — so this is a guard
+            // against a future change rather than a case that fires: leave the
+            // cell as its own outlet, which is inert but never a cycle.
+            receiver[c] = c;
+            continue;
+        }
+        // Closer to the exit, then as far from the rim as possible.
+        let mut best: Option<(u32, usize)> = None;
+        for (nb, step) in neighbors(c, n) {
+            if filled[nb] != filled[c] {
+                continue;
+            }
+            // An exit is rank zero: leaving the flat always beats crossing it.
+            let rank = if level[nb] { to_exit[nb] } else { 0 };
+            if rank >= to_exit[c] {
+                continue;
+            }
+            let depth = if level[nb] { from_rim[nb] } else { 0 };
+            if best.map_or(true, |(b, _)| depth > b) {
+                best = Some((depth, nb));
+                receiver[c] = nb;
+                dist[c] = step;
+            }
+        }
+        if best.is_none() {
+            receiver[c] = c;
+        }
+    }
+}
+
+/// Breadth-first over one level surface: spread `field` from the cells already
+/// seeded in `queue` to every level neighbour at the same elevation.
+fn bfs_over_flat(
+    field: &mut [u32],
+    queue: &mut VecDeque<usize>,
+    filled: &[f32],
+    n: usize,
+    level: &[bool],
+) {
+    while let Some(c) = queue.pop_front() {
+        for (nb, _) in neighbors(c, n) {
+            if level[nb] && filled[nb] == filled[c] && field[nb] == UNREACHED {
+                field[nb] = field[c] + 1;
+                queue.push_back(nb);
+            }
+        }
+    }
+}
+
+/// Cells ordered so that every receiver comes before the cells draining into it.
+///
+/// The flood used to hand this over for free — popping by elevation *is* a
+/// downstream-first order — but the flood no longer decides who drains where, so
+/// the order has to come off the receiver forest itself. Breadth-first from the
+/// outlets down the donor lists, which is O(n) and needs no sorting.
+fn downstream_order(receiver: &[usize]) -> Vec<usize> {
+    let count = receiver.len();
+    // Donor lists, packed: `donors[first[c]..first[c + 1]]` drains into `c`.
+    let mut first = vec![0usize; count + 1];
+    for (c, &r) in receiver.iter().enumerate() {
+        if r != c {
+            first[r + 1] += 1;
+        }
+    }
+    for i in 0..count {
+        first[i + 1] += first[i];
+    }
+    let mut next = first.clone();
+    let mut donors = vec![0usize; first[count]];
+    for (c, &r) in receiver.iter().enumerate() {
+        if r != c {
+            donors[next[r]] = c;
+            next[r] += 1;
+        }
+    }
+
+    let mut order: Vec<usize> = (0..count).filter(|&c| receiver[c] == c).collect();
+    let mut i = 0;
+    while i < order.len() {
+        let c = order[i];
+        i += 1;
+        order.extend_from_slice(&donors[first[c]..first[c + 1]]);
+    }
+    order
 }

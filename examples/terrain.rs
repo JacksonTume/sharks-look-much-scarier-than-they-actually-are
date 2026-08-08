@@ -826,7 +826,14 @@ impl TerrainDemo {
 
                 if wet {
                     let depth = bilinear(&self.water.depth, n, fx, fy);
-                    let t = (depth / LAKE_OPAQUE_DEPTH).clamp(0.0, 1.0) * 0.85;
+                    // Measured from `MIN_POND`, exactly as `wetness_field` does.
+                    // Without the subtraction the two views of one field disagree
+                    // at the end of the run: every drained basin keeps a hair of
+                    // depth, far too little for the water surface to draw, and the
+                    // minimap painted it as a lake — so the map still showed water
+                    // over a landscape that plainly had none.
+                    let t =
+                        ((depth - erosion::MIN_POND) / LAKE_OPAQUE_DEPTH).clamp(0.0, 1.0) * 0.85;
                     let water = [0.24, 0.53, 0.66];
                     for (c, w) in rgb.iter_mut().zip(water) {
                         *c += (w - *c) * t;
@@ -1095,12 +1102,15 @@ impl TerrainDemo {
         // waterline while still giving the shallows a few cells of fade.
         //
         // Measured from `MIN_POND`, not from zero, and that subtraction is
-        // load-bearing rather than tidy. The Priority-Flood lifts each cell a
-        // hair above the one it was reached from, so depths of a few ε are strewn
-        // across the map — the old per-cell test discarded them by construction,
-        // but a *continuous* field happily draws them, and the result is a faint
-        // blue-green film over half the landscape that reads as the terrain
-        // having changed colour rather than as water being present.
+        // load-bearing rather than tidy. A basin that has silted almost to its
+        // spill point still holds a hair of water across its whole floor — a
+        // fifteenth of the map, by the end of the run — and a *continuous* field
+        // happily draws it. The result is a faint blue-green film over every
+        // drained basin that reads as the terrain having changed colour rather
+        // than as water being present. (It used to be worse and for a second
+        // reason: the flood itself lifted each cell a hair above the one it was
+        // reached from, strewing ε depths over dry ground. `erosion` no longer
+        // does that — see `MIN_POND`.)
         for (w, &d) in wet.iter_mut().zip(&self.water.depth) {
             *w = ((d - erosion::MIN_POND) / LAKE_OPAQUE_DEPTH).clamp(0.0, 1.0);
         }
@@ -1119,8 +1129,8 @@ impl TerrainDemo {
             // the obvious optimisation and punches holes in the rivers. A cell
             // whose depth sits just above `MIN_POND` would be dropped here while
             // contributing almost nothing as lake — it falls through the gap
-            // between the two rules — and since the flood's ε leaves plenty of
-            // river cells in exactly that band, the network ends up riddled with
+            // between the two rules — and a channel crossing a silted-up basin
+            // runs through exactly that band, so the network ends up riddled with
             // single-point dry spots. Each one shows up as a little diamond of
             // bare ground, because its four surrounding cells each contour around
             // it. Splatting regardless costs nothing: the combine below is a

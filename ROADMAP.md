@@ -503,6 +503,37 @@ and **the engine is unchanged**: no new public API, no `Painter` method, no shad
 edit. `set_meshes` turned out to already take a slice, so the water went in beside
 the terrain as a second element of a call that has existed since Slice 1.
 
+*Fixed later: the water turned into straight lines.* Watched to the end of the
+axis, a mature run drew bundles of dead-straight parallel diagonals across every
+drained basin instead of a channel. The cause was in `flow_route`, and it had
+been there since this slice: Priority-Flood **+ ε** lifts each cell a hair above
+whichever neighbour reached it first, and on level ground the flood is a
+breadth-first wave, so "whoever got here first" is a BFS parent tree whose
+branches are straight rays. Drainage area piled onto the rays and the demo drew
+them. Lakes hid it early on; once they silted up it was all that was left, so it
+read as *the water turning into lines*.
+
+The fix drops the ε — a filled depression is now exactly level — and gives the
+level ground a direction with the flat-resolution of Barnes, Lehman & Mulla 2014:
+two breadth-first sweeps, one measuring steps to the flat's exit and one steps
+from the higher rim, with flow taking the neighbour that gets closer to the exit
+and stays furthest from the rim. That second term is what makes flow lines *merge*
+into one channel rather than race side by side. Measured on the default terrain:
+the longest run of unchanging D8 direction in the river network fell from 31 cells
+to 21, and runs of 12 or more from 52 to 16. Lake coverage and the shape of the
+arc are unchanged (22.6% at pass 0, nothing by ~pass 110), so the table below
+still stands; river coverage rose slightly, 5.8% to 6.5%, because converging flow
+puts more cells over the drawing threshold. It costs about 50% more per pass
+(1.8ms to 3.0ms at 128², 8.7ms to 13.4ms at 256²), which at eight passes a second
+is noise.
+
+Two smaller things fell out of it. The ε used to strew fake shallow depths over
+dry ground, which is what `MIN_POND` was really for; that job is gone and the
+constant is back to meaning what it says. And the minimap divided raw depth by
+`LAKE_OPAQUE_DEPTH` where the water surface subtracts `MIN_POND` first, so at the
+end of the run the map painted lakes over basins the 3D view correctly showed as
+dry — two views of one field, disagreeing.
+
 *Deferred out of this slice, on purpose:*
 
 - **Animating it.** The original plan for this slice was the erosion *running* on
