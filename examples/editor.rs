@@ -48,7 +48,7 @@
 //!   **Delete** removes the selected object; **mouse-4** deselects.
 //! - **Q** quits, because Escape no longer does (see `quit_on_escape`).
 
-use slmsttaa::ui::{anim, font, Anchor, Theme, Ui, Variant};
+use slmsttaa::ui::{anim, font, Anchor, Rows, Theme, Ui, Variant};
 // The toolkit declares its own key enum — it depends on nothing, including on
 // the engine — so a demo that reads both ends up naming both. Aliased rather
 // than hidden, because the duplication is the design and not an accident.
@@ -307,6 +307,17 @@ struct EditorDemo {
     wireframe: bool,
     theme: Theme,
     fps: f32,
+    /// Smoothed wall time spent inside [`EditorDemo::build_ui`], in milliseconds.
+    ///
+    /// `fps` alone cannot see the scene list's cost: vsync pins a frame at 16.7 ms
+    /// until the work exceeds it, so anything cheaper than a frame is invisible.
+    /// This is the instrument that reads *below* that floor, which is what makes
+    /// "the list costs N ms" a number rather than an impression.
+    ///
+    /// Native only. `Instant::now()` panics on `wasm32-unknown-unknown` (see
+    /// `src/time.rs`) and the engine's own clock is private, so the web build
+    /// shows a dash rather than a wrong number.
+    ui_ms: f32,
 }
 
 impl Default for EditorDemo {
@@ -326,6 +337,7 @@ impl Default for EditorDemo {
             wireframe: false,
             theme: Theme::dark(),
             fps: 60.0,
+            ui_ms: 0.0,
         }
     }
 }
@@ -551,6 +563,8 @@ impl EditorDemo {
     fn build_ui(&mut self, renderer: &mut Renderer) -> (bool, bool) {
         let theme = self.theme;
         let fps = self.fps;
+        // Last frame's, necessarily: this method is the thing being timed.
+        let ui_ms = self.ui_ms;
         let count = self.objects.len();
         let selected = self.selected;
         let mut light = self.theme == Theme::light();
@@ -561,6 +575,7 @@ impl EditorDemo {
         let mut duplicate = false;
         let mut delete = false;
         let mut clear = false;
+        let mut populate = false;
         let mut pick: Option<usize> = None;
 
         let mut ui = renderer.ui();
@@ -649,16 +664,41 @@ impl EditorDemo {
                     .placeholder("filter by name")
                     .show();
                 pick = object_list(ui, &self.objects, &self.filter, selected);
-                clear = ui
-                    .button("clear all")
-                    .variant(Variant::Destructive)
-                    .show()
-                    .clicked;
+                // Two buttons in a row need `columns`, not `horizontal` — a
+                // button takes whatever is left of the line, so the first would
+                // eat the row and the second would be clipped off the edge.
+                ui.columns(2, |ui, column| {
+                    if column == 0 {
+                        populate = ui
+                            .button("+1000")
+                            .variant(Variant::Secondary)
+                            .show()
+                            .clicked;
+                    } else {
+                        clear = ui
+                            .button("clear all")
+                            .variant(Variant::Destructive)
+                            .show()
+                            .clicked;
+                    }
+                });
             });
         });
 
         ui.panel(Anchor::TopRight, HUD_W, |ui| {
             ui.label_value("fps", &format!("{fps:.0}"));
+            // What the panel above costs, separately from what the scene costs.
+            // Collapsing the Scene section and watching this fall is how the
+            // list's own price is read off a demo that is also drawing `count`
+            // instanced objects.
+            ui.label_value(
+                "ui",
+                &if ui_ms > 0.0 {
+                    format!("{ui_ms:.2} ms")
+                } else {
+                    "-".to_string()
+                },
+            );
             ui.label_value("objects", &format!("{count}"));
             ui.label_value("meshes", "4");
             ui.label_value(
@@ -709,8 +749,32 @@ impl EditorDemo {
             self.objects.clear();
             self.selected = None;
         }
+        if populate {
+            self.populate(1000);
+        }
 
         (wants_pointer, wants_keyboard)
+    }
+
+    /// [`build_ui`](Self::build_ui), with a stopwatch around it on the target
+    /// that has one.
+    ///
+    /// Smoothed the same way `fps` is, because a single frame's reading is noise
+    /// — what a wall looks like is a number that stays high.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn timed_build_ui(&mut self, renderer: &mut Renderer) -> (bool, bool) {
+        let start = std::time::Instant::now();
+        let taken = self.build_ui(renderer);
+        let ms = start.elapsed().as_secs_f32() * 1000.0;
+        self.ui_ms = self.ui_ms * 0.9 + ms * 0.1;
+        taken
+    }
+
+    /// The web has no `Instant`, so it simply builds the UI and leaves `ui_ms` at
+    /// zero, which the HUD reads as "no measurement" and draws as a dash.
+    #[cfg(target_arch = "wasm32")]
+    fn timed_build_ui(&mut self, renderer: &mut Renderer) -> (bool, bool) {
+        self.build_ui(renderer)
     }
 
     /// Add an object of `shape`, placed in front of the camera so it lands where
@@ -728,6 +792,45 @@ impl EditorDemo {
         object.position[1] = object.resting_y();
         self.objects.push(object);
         self.selected = Some(self.objects.len() - 1);
+    }
+
+    /// Scatter `count` more objects across the ground, so the scene list has
+    /// enough rows to be slow.
+    ///
+    /// This exists to find a wall, not to compose a scene. Six objects is a demo;
+    /// a few thousand is the roster a data-dense consumer actually has, and it is
+    /// the only way to see what an immediate-mode list costs when nothing is
+    /// scrolled off. A button rather than a flag or an environment variable
+    /// because the web build has neither.
+    ///
+    /// The scatter is the R2 low-discrepancy sequence — two irrational strides
+    /// taken modulo one. It fills the ground evenly without clumping, is the same
+    /// field on every run, and costs no random-number generator.
+    fn populate(&mut self, count: usize) {
+        // The plastic number's reciprocal powers: the 2D analogue of the golden
+        // ratio, and the reason successive points land in each other's gaps.
+        const R2_X: f32 = 0.754_877_7;
+        const R2_Z: f32 = 0.569_840_3;
+
+        self.objects.reserve(count);
+        for _ in 0..count {
+            let index = self.objects.len();
+            let shape = Shape::ALL[index % 3];
+            let mut object = Object {
+                name: format!("{} {}", shape.label(), index + 1),
+                shape,
+                position: [
+                    ((index as f32 * R2_X).fract() * 2.0 - 1.0) * GROUND,
+                    0.0,
+                    ((index as f32 * R2_Z).fract() * 2.0 - 1.0) * GROUND,
+                ],
+                yaw: (index as f32 * 0.618_034).fract() * std::f32::consts::TAU,
+                scale: [1.0; 3],
+                hue: (index as f32 * 0.618_034).fract(),
+            };
+            object.position[1] = object.resting_y();
+            self.objects.push(object);
+        }
     }
 
     /// Orbit the stage. Unlike `scene.rs`, the left button is spoken for — it
@@ -797,8 +900,21 @@ const ROW_H: f32 = 22.0;
 /// table and no tree, and a consumer that wants one is not second-class.
 ///
 /// The one thing it cannot do for itself is scroll the focused row into view —
-/// the offset belongs to the `scroll_area` — so the toolkit chases focus on its
-/// behalf. That is the seam earning its keep rather than a special case.
+/// the offset belongs to the scroll area — so the toolkit does it, told either
+/// where the row landed or, here, which row it is.
+///
+/// **The list is virtualized**, which is the second thing the toolkit does that a
+/// consumer cannot: only the rows the viewport covers are placed at all. Six
+/// objects made that pointless and five thousand make it the frame — a list this
+/// shape cost 11 ms of a 16.7 ms budget to show six rows before
+/// `scroll_area_virtual` existed. Press **+1000** and watch `ui` in the HUD.
+///
+/// It costs something, and the cost is visible right here: `focusable` is called
+/// only for the rows that were placed, so **Tab walks a screenful rather than the
+/// whole list**. The arrow keys still walk all of it, because this demo owns
+/// `ids` and can name a row the list has not drawn — which is what
+/// `Rows::reveal` is for, and why it takes an index rather than waiting to be
+/// shown a rectangle.
 fn object_list(
     ui: &mut Ui,
     objects: &[Object],
@@ -822,10 +938,51 @@ fn object_list(
         return None;
     }
 
+    // Ids up front, in one pass, so the walk below can name a row the eye has not
+    // reached yet — and, now, so it can name one the *list* has not placed.
+    // Containers push no id scope, so these are the same ids the rows would have
+    // been given inside the area.
+    let ids: Vec<u64> = matching
+        .iter()
+        .map(|index| ui.next_id(&format!("object {index}")))
+        .collect();
+
     let mut chosen = None;
-    ui.scroll_area_headed(
+
+    // Arrow keys move focus, but only when focus is already *in* the list —
+    // otherwise they belong to the camera. This is the same "who gets the input"
+    // question `wants_pointer` answers for the mouse, decided here by the consumer
+    // because the list is the consumer's.
+    let cursor = ids.iter().position(|id| Some(*id) == ui.focused());
+    if let Some(cursor) = cursor {
+        ui.capture_keyboard();
+        let mut target = cursor;
+        for event in ui.input().key_presses() {
+            match event.key {
+                UiKey::Up => target = target.saturating_sub(1),
+                UiKey::Down => target = (target + 1).min(ids.len() - 1),
+                UiKey::Home => target = 0,
+                UiKey::End => target = ids.len() - 1,
+                UiKey::Enter => chosen = Some(matching[cursor]),
+                _ => {}
+            }
+        }
+        if target != cursor {
+            ui.set_focus(Some(ids[target]));
+        }
+    }
+
+    // Which row to keep in view. A plain scroll area works this out for itself by
+    // comparing the focused row's rectangle against its viewport — but a row this
+    // list did not place has no rectangle, and the row worth revealing is by
+    // definition usually one of those. So the demo names the row instead. It is
+    // the same information, handed over one step earlier.
+    let focused = ids.iter().position(|id| Some(*id) == ui.focused());
+
+    ui.scroll_area_virtual_headed(
         "objects",
         ROW_H * 6.0,
+        Rows::uniform(matching.len(), ROW_H).reveal(focused),
         |ui| {
             // The scroll area lays this out itself, at exactly the width its
             // rows get. Written as an ordinary row *above* the area instead, it
@@ -851,87 +1008,54 @@ fn object_list(
                 theme.color.muted,
             );
         },
-        |ui| {
+        |ui, position| {
             let theme = *ui.theme();
+            let index = matching[position];
+            let id = ids[position];
 
-            // Ids up front, in one pass, so the walk below can name a row the eye
-            // has not reached yet. `next_id` is called exactly once per row either
-            // way — what changes is that all of them are known before any is drawn.
-            let ids: Vec<u64> = matching
-                .iter()
-                .map(|index| ui.next_id(&format!("object {index}")))
-                .collect();
-
-            // Arrow keys move focus, but only when focus is already *in* the list —
-            // otherwise they belong to the camera. This is the same "who gets the
-            // input" question `wants_pointer` answers for the mouse, decided here by
-            // the consumer because the list is the consumer's.
-            let cursor = ids.iter().position(|id| Some(*id) == ui.focused());
-            if let Some(cursor) = cursor {
-                ui.capture_keyboard();
-                let mut target = cursor;
-                for event in ui.input().key_presses() {
-                    match event.key {
-                        UiKey::Up => target = target.saturating_sub(1),
-                        UiKey::Down => target = (target + 1).min(ids.len() - 1),
-                        UiKey::Home => target = 0,
-                        UiKey::End => target = ids.len() - 1,
-                        UiKey::Enter => chosen = Some(matching[cursor]),
-                        _ => {}
-                    }
-                }
-                if target != cursor {
-                    ui.set_focus(Some(ids[target]));
-                }
+            // Only the rows that got here are in the tab ring, which is the whole
+            // bargain: a ring of six is walkable, a ring of five thousand is a
+            // list of everything the user cannot see.
+            ui.focusable(id);
+            let rect = ui.allocate([0.0, ROW_H]);
+            let response = ui.interact(rect, id);
+            if response.clicked {
+                chosen = Some(index);
             }
 
-            for (&index, &id) in matching.iter().zip(ids.iter()) {
-                ui.focusable(id);
-                let rect = ui.allocate([0.0, ROW_H]);
-                let response = ui.interact(rect, id);
-                if response.clicked {
-                    chosen = Some(index);
-                }
-
-                let is_selected = selected == Some(index);
-                let warmth = ui.animate(id, "row", if response.hovered { 1.0 } else { 0.0 });
-                let painter = ui.painter();
-                if is_selected {
-                    painter.fill_rect(rect, theme.radius.sm, theme.color.selection);
-                } else if warmth > 0.0 {
-                    painter.fill_rect(
-                        rect,
-                        theme.radius.sm,
-                        anim::fade(theme.color.surface, warmth),
-                    );
-                }
-                if response.focused {
-                    painter.stroke_rect(
-                        rect,
-                        theme.radius.sm,
-                        theme.control.ring,
-                        theme.color.ring,
-                    );
-                }
-
-                // The name on the left, the index on the right — the label/value row
-                // shape, hand-built because this one has a background behind it.
-                let (px, weight) = theme.text.body.parts();
-                let gap = theme.space.gap;
-                let y = font::centered_top(rect.y, rect.h, px);
-                let name = &objects[index].name;
-                let tag = format!("#{index}");
-                let tag_w = font::text_width(&tag, px, weight);
-                painter.text(rect.x + gap, y, name, px, weight, theme.color.foreground);
-                painter.text(
-                    rect.max_x() - tag_w - gap,
-                    y,
-                    &tag,
-                    px,
-                    weight,
-                    theme.color.muted,
+            let is_selected = selected == Some(index);
+            let warmth = ui.animate(id, "row", if response.hovered { 1.0 } else { 0.0 });
+            let painter = ui.painter();
+            if is_selected {
+                painter.fill_rect(rect, theme.radius.sm, theme.color.selection);
+            } else if warmth > 0.0 {
+                painter.fill_rect(
+                    rect,
+                    theme.radius.sm,
+                    anim::fade(theme.color.surface, warmth),
                 );
             }
+            if response.focused {
+                painter.stroke_rect(rect, theme.radius.sm, theme.control.ring, theme.color.ring);
+            }
+
+            // The name on the left, the index on the right — the label/value row
+            // shape, hand-built because this one has a background behind it.
+            let (px, weight) = theme.text.body.parts();
+            let gap = theme.space.gap;
+            let y = font::centered_top(rect.y, rect.h, px);
+            let name = &objects[index].name;
+            let tag = format!("#{index}");
+            let tag_w = font::text_width(&tag, px, weight);
+            painter.text(rect.x + gap, y, name, px, weight, theme.color.foreground);
+            painter.text(
+                rect.max_x() - tag_w - gap,
+                y,
+                &tag,
+                px,
+                weight,
+                theme.color.muted,
+            );
         },
     );
     chosen
@@ -1018,7 +1142,7 @@ impl Application for EditorDemo {
         // selected *now* rather than the one that was selected a frame ago.
         self.handle_pointer(renderer);
         self.rebuild_instances();
-        (self.ui_pointer, self.ui_keyboard) = self.build_ui(renderer);
+        (self.ui_pointer, self.ui_keyboard) = self.timed_build_ui(renderer);
         self.handle_shortcuts(renderer);
         self.drive_camera(renderer);
 

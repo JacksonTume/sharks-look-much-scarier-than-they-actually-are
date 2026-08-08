@@ -99,6 +99,113 @@ impl Rect {
     }
 }
 
+/// The rows a [`scroll_area_virtual`](crate::Ui::scroll_area_virtual) will place.
+///
+/// A list this size cannot be laid out by walking it — that is the whole point —
+/// so the container is *told* its shape instead of measuring it. Two numbers are
+/// enough to answer everything an ordinary scroll area has to walk its children
+/// for: how tall the content is, which rows the viewport covers, and where each
+/// one goes.
+///
+/// ```
+/// # use slmsttaa_ui::{Anchor, RecordingPainter, Rows, Ui, UiInput, UiState};
+/// # let (mut p, mut s) = (RecordingPainter::default(), UiState::default());
+/// # let mut ui = Ui::new(&mut p, UiInput::default(), &mut s);
+/// # let names: Vec<String> = Vec::new();
+/// # let selected = None;
+/// # ui.panel(Anchor::TopLeft, 300.0, |ui| {
+/// ui.scroll_area_virtual("roster", 300.0, Rows::uniform(names.len(), 22.0).reveal(selected), |ui, index| {
+///     ui.label(&names[index]);
+/// });
+/// # });
+/// ```
+///
+/// **The fields are private on purpose.** A public `count`/`height` pair would
+/// freeze "every row is the same height" into the type, and the next thing to ask
+/// for this is a list whose rows differ. Passing the shape as a value rather than
+/// as two arguments is what lets that arrive as another constructor instead of as
+/// a second container.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rows {
+    count: usize,
+    height: f32,
+    reveal: Option<usize>,
+}
+
+impl Rows {
+    /// `count` rows, every one `height` points tall.
+    ///
+    /// A non-positive `height` is treated as an empty list rather than a panic or
+    /// a division by zero: a caller computing a row height from a theme or a font
+    /// can reach zero legitimately, and a frame that draws nothing is a better
+    /// answer than one that does not run.
+    pub fn uniform(count: usize, height: f32) -> Self {
+        Self {
+            count: if height > 0.0 { count } else { 0 },
+            height,
+            reveal: None,
+        }
+    }
+
+    /// Scroll so row `index` is in view, if it is not already.
+    ///
+    /// The scroll area cannot work this out for itself. It knows where its rows
+    /// are, but a row it did not place has no rectangle to compare against the
+    /// viewport, and the row a consumer wants to reveal is by definition usually
+    /// one that is off-screen. `None` — which is the default — leaves the offset
+    /// alone.
+    ///
+    /// Deliberately an index and not a widget id: this is arithmetic over the
+    /// list's shape, and it knows nothing about focus, keyboards, or the tab
+    /// ring. See [`Ui::scroll_area_virtual`](crate::Ui::scroll_area_virtual) for
+    /// what a virtualized list still cannot do with a keyboard.
+    pub fn reveal(mut self, index: Option<usize>) -> Self {
+        self.reveal = index.filter(|&i| i < self.count);
+        self
+    }
+
+    /// How many rows there are.
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    /// How tall the whole list is, which an ordinary scroll area has to walk its
+    /// children to find out.
+    pub(crate) fn total_height(&self) -> f32 {
+        self.count as f32 * self.height
+    }
+
+    /// The top edge of row `index`, relative to the top of the content.
+    pub(crate) fn top(&self, index: usize) -> f32 {
+        index as f32 * self.height
+    }
+
+    /// How tall one row is.
+    pub(crate) fn height(&self) -> f32 {
+        self.height
+    }
+
+    /// Which row a consumer asked to have brought into view.
+    pub(crate) fn revealed(&self) -> Option<usize> {
+        self.reveal
+    }
+
+    /// The rows a viewport `height` points tall shows at `offset`.
+    ///
+    /// **Floors the start and ceils the end**, so the partly-visible rows at both
+    /// edges are placed. Dropping them would leave a blank strip at the top of
+    /// the viewport for as long as the offset is not an exact multiple of a row —
+    /// which, because the drawn offset eases, is most of the time.
+    pub(crate) fn range(&self, offset: f32, height: f32) -> std::ops::Range<usize> {
+        if self.count == 0 || self.height <= 0.0 || height <= 0.0 {
+            return 0..0;
+        }
+        let first = (offset / self.height).floor().max(0.0) as usize;
+        let last = ((offset + height) / self.height).ceil().max(0.0) as usize;
+        first.min(self.count)..last.min(self.count)
+    }
+}
+
 /// Which way a region hands out space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Dir {

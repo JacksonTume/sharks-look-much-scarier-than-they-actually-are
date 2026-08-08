@@ -31,6 +31,7 @@
 //! reason this type has one.
 
 use crate::Rect;
+use std::collections::HashMap;
 
 /// A keyboard key, as the UI sees it.
 ///
@@ -377,6 +378,16 @@ pub struct UiState {
     /// last frame's measurement. A scroll area sizes its viewport from it; a
     /// section clips a collapse animation to a fraction of it.
     pub(crate) measured: Vec<(u64, f32)>,
+    /// The row a virtualized scroll area was last asked to reveal, keyed by the
+    /// area's id.
+    ///
+    /// Stored so revealing can be **edge-triggered**. A consumer passes the row it
+    /// wants visible on every frame that row is selected, not on the one frame it
+    /// became selected — so acting on the value itself would drag the view back to
+    /// the selection the instant the wheel moved away from it. Acting on a
+    /// *change* is the same rule [`Ui::focus_moved`](crate::Ui) already applies to
+    /// the focus chase, which exists for exactly this reason.
+    pub(crate) revealed: Vec<(u64, usize)>,
     /// One eased float per `(widget, property)` pair — see [`anim`](crate::anim).
     ///
     /// Swept every frame (see [`UiState::begin_frame`]), which is the difference
@@ -384,7 +395,12 @@ pub struct UiState {
     /// panel has a handful; this one gets an entry per *animated property of
     /// every widget declared*, so a consumer that generates rows from changing
     /// labels would grow it without bound if nothing pruned it.
-    pub(crate) anim: Vec<Animated>,
+    ///
+    /// And a real map, for the same reason: a hundred widgets never noticed the
+    /// linear scan, and a few thousand rows each easing a hover made it the single
+    /// largest cost in the frame — 6.5 ms at five thousand, measured, more than
+    /// the layout it was decorating.
+    pub(crate) anim: HashMap<u64, Animated>,
 }
 
 /// Where a text field's caret is, what it has selected, and how far its contents
@@ -443,10 +459,11 @@ fn clamp_boundary(text: &str, index: usize) -> usize {
 }
 
 /// One eased float, and whether anything asked for it this frame.
+///
+/// Stored against its `hash(widget id, property name)` key rather than carrying
+/// it, so the lookup is a hash rather than a walk.
 #[derive(Debug)]
 pub(crate) struct Animated {
-    /// `hash(widget id, property name)`.
-    pub(crate) key: u64,
     /// Where the value is right now.
     pub(crate) value: f32,
     /// Set by [`UiState::animate`], cleared by [`UiState::begin_frame`]. An entry
@@ -534,8 +551,8 @@ impl UiState {
     /// back it should come back settled, not mid-fade from a hover the user has
     /// long since forgotten.
     pub(crate) fn begin_frame(&mut self) {
-        self.anim.retain(|slot| slot.alive);
-        for slot in &mut self.anim {
+        self.anim.retain(|_, slot| slot.alive);
+        for slot in self.anim.values_mut() {
             slot.alive = false;
         }
     }
@@ -547,18 +564,20 @@ impl UiState {
     /// it first appears — a panel would ripple on open, and a section's contents
     /// would fade every time it was expanded.
     pub(crate) fn animate(&mut self, key: u64, target: f32, rate: f32, dt: f32) -> f32 {
-        match self.anim.iter_mut().find(|slot| slot.key == key) {
+        match self.anim.get_mut(&key) {
             Some(slot) => {
                 slot.alive = true;
                 slot.value = crate::anim::approach(slot.value, target, rate, dt);
                 slot.value
             }
             None => {
-                self.anim.push(Animated {
+                self.anim.insert(
                     key,
-                    value: target,
-                    alive: true,
-                });
+                    Animated {
+                        value: target,
+                        alive: true,
+                    },
+                );
                 target
             }
         }
@@ -578,6 +597,25 @@ impl UiState {
         match self.measured.iter_mut().find(|(k, _)| *k == id) {
             Some((_, h)) => *h = height,
             None => self.measured.push((id, height)),
+        }
+    }
+
+    /// Record which row `id` was asked to reveal, and report whether that is a
+    /// change from what it was last asked.
+    ///
+    /// The answer, not the value, is what a scroll area acts on — see
+    /// [`UiState::revealed`](Self::revealed)'s field docs.
+    pub(crate) fn take_reveal(&mut self, id: u64, index: usize) -> bool {
+        match self.revealed.iter_mut().find(|(k, _)| *k == id) {
+            Some((_, i)) => {
+                let changed = *i != index;
+                *i = index;
+                changed
+            }
+            None => {
+                self.revealed.push((id, index));
+                true
+            }
         }
     }
 

@@ -205,8 +205,16 @@ scrolled-away row is genuinely invisible *and* that no run strays under the
 scrollbar; `tests/theme.rs` pins that no widget draws a color or reads a metric the
 theme didn't supply; `tests/typography.rs` pins proportional advances, tabular
 digits, em-linear metrics, and that an unbaked character draws a visible box rather
-than vanishing. All seven drive the crate through its public API only, which
-doubles as a check that a consumer could do the same.
+than vanishing; `tests/virtual_rows.rs` pins that a virtualized list places only
+the rows its viewport covers *and* puts them exactly where a real one would. All of
+them drive the crate through its public API only, which doubles as a check that a
+consumer could do the same.
+
+That last file is the one place the recorder does more than constrain. Everywhere
+else it checks arithmetic a person could also have checked by looking; there, the
+draw list **is** the claim — "these rows were built and no others" is not something
+a screenshot can report, because a virtualized list and a real one are supposed to
+look identical.
 
 They constrain, but they do not replace running the demo. Slice 1's id bug,
 Slice 3's overflowing button label, and Slice 5's readouts running under the

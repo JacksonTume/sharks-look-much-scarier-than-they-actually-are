@@ -786,20 +786,127 @@ it got is honest but small. A demo written to check a fix is weaker evidence tha
 one that hit the wall, and this entry should not be read as proof the process
 works backwards.
 
+## Slice 9 — only lay out the rows you can see ✅ done
+
+*Roadblock:* [`WISHLIST.md` § Virtualization](WISHLIST.md#virtualization), and the
+only wishlist entry that argued waiting was expensive — *"Retrofitting
+virtualization into a scroll container that assumes it lays out all children is
+the expensive version."* Nothing in the repo could show it: the largest list
+anywhere was `examples/editor.rs`'s **six** objects, which do not even overflow
+their own viewport.
+
+So the demo was grown first, and the wall measured before anything was designed.
+`editor.rs` gained a **+1000** button and a `ui` readout in the HUD — milliseconds
+spent building the panel, which is the instrument `fps` cannot be, because vsync
+pins a frame at 16.7 ms until the work exceeds it and hides everything cheaper.
+
+**The wall, and what it was actually made of.** Release, headless, a list shaped
+exactly like the editor's, six rows visible:
+
+| rows | `next_id` | `animate` | layout + interact + paint | total |
+|---:|---:|---:|---:|---:|
+| 500 | 0.110 | 0.085 | 0.271 | **0.42 ms** |
+| 1,000 | 0.283 | 0.262 | 0.491 | **1.10 ms** |
+| 2,000 | 1.105 | 1.114 | 0.931 | **3.48 ms** |
+| 5,000 | 3.648 | 6.512 | 2.107 | **10.98 ms** |
+
+Eleven milliseconds of a 16.7 ms budget to show six rows. **But only the third
+column is the one virtualization removes**, and it was the smallest — the other
+two are quadratic scans, and together they were five times larger. Measuring
+first is the only reason that was known before the design was fixed, and it turned
+"fix the scans if the numbers say so" from a contingency into the larger half of
+the slice.
+
+- **`scroll_area_virtual` / `scroll_area_virtual_headed`**, taking a
+  [`Rows`](src/layout.rs) — a count and a row height — and calling the caller's
+  closure once per **visible** row. `Rows`' fields are private, so the list whose
+  rows differ in height arrives as another constructor rather than as another
+  container.
+- **`Rows::reveal`** replaces the focus chase, which cannot work here: a row that
+  was never placed has no rectangle to compare against the viewport, and the row
+  worth revealing is by definition usually one of those. It names the row instead.
+  Edge-triggered against `UiState::revealed`, because a consumer passes the
+  selected row on every frame it is selected — obeying that literally would drag
+  the view back the instant the wheel moved away.
+- **One implementation, not two.** The header, the gutter, the viewport, the
+  wheel, the easing, the clip, the focus chase and the scrollbar moved into a
+  private `scroll_region`, parameterised by the single thing that differs: an
+  ordinary area **observes** its content height by walking its children, a
+  virtualized one is **told**. Slice 8's lesson, applied one level down.
+- **`Scope.used` became a `HashSet`** and **`UiState::anim` a `HashMap`**. Both
+  were linear scans that nothing noticed at a hundred widgets and that a few
+  thousand rows made the frame.
+
+**What it cost, and what it bought:**
+
+| 5,000 rows | `next_id` | `animate` | layout + paint | total | draw cmds |
+|---|---:|---:|---:|---:|---:|
+| before | 3.648 | 6.512 | 2.107 | **10.98 ms** | 10,005 |
+| the two maps | 0.655 | 0.116 | 2.092 | **2.51 ms** | 10,005 |
+| + virtualized | 0.655 | ~0 | ~0 | **0.71 ms** | **17** |
+
+**Fifteen times faster, and the draw list is now constant** — seventeen commands
+whether the list is five hundred rows or five thousand. The 0.655 ms that remains
+is the *demo's* own choice to hash an id for every row so its arrow keys can name
+one the list has not drawn, and it is now linear rather than quadratic.
+
+**A virtualized area is also correct on its first frame**, which an ordinary one
+is not: it knows `rows × row_h` before anything is placed, where
+[`scroll_area`](src/lib.rs) has to lay its contents out to find out and settles on
+the second frame.
+
+*Proof:* twelve tests in [`tests/virtual_rows.rs`](tests/virtual_rows.rs). The
+load-bearing one is `a_virtual_list_scrolls_to_the_same_place_as_a_real_one` —
+the same two hundred rows built both ways, the same wheel input over the same
+frames, and identical `visible_texts()` at every point in the scroll. All twelve
+were confirmed able to fail: snapping the range to whole rows, which is what
+taking it from the *target* instead of the eased offset amounts to, broke four of
+them including that one. The other 105 tests are untouched, because this adds a
+container rather than changing one.
+
+**The range must come from the eased offset, and that is the whole trap.** What is
+drawn glides toward the wheel's target over a couple of frames, so the offset
+spends most of its life between two rows. Pick the range from where the list is
+heading and the rows are still *drawn* where it is — leaving a strip of nothing at
+the top of the viewport for exactly as long as the glide lasts.
+
+**What it deliberately does not do**, all three named in the rustdoc rather than
+worked around:
+
+- **Tab reaches only the visible rows.** The ring is refilled each frame from
+  whatever called `focusable`, so it holds a screenful rather than a list.
+- **The focus chase cannot fire** for a row that was never placed. `Rows::reveal`
+  is the answer, and it is why that method takes an index.
+- **A row that scrolls away mid-drag stays `active`**, because the claim is
+  released inside `interact`, which an unplaced row never calls.
+
+The first is the honest cost of the bargain and the likeliest driver of a Slice 10:
+a tab ring that a container can extend without every row declaring itself.
+
+**On the verification, which is short of the usual.** The headless half is
+unusually strong here — this is the first slice whose central claim (*only these
+rows were built*) the recording painter can state directly, rather than
+approximating. The interactive half is not: `cargo xtask shoot` is Linux-only and
+refuses on Windows, so **the scrolled list has not been watched on a screen** on
+the machine this was written on. A still frame of the six-object list is correct;
+a glide is not a still frame. Run `cargo run --example editor`, press **+1000**,
+and wheel it hard in both directions before believing the paragraph above.
+
 ---
 
 ## Nothing is scheduled
 
-Slices 7 and 8 answered both roadblocks a second consumer has actually hit — the
-one it could not build around, and the one it could but every consumer after it
-would rediscover. **That is the correct state for this crate to be in**, not a gap
-to fill: every slice above was pulled into existence by something a consumer
-couldn't do, and the list below is what a *future* one would have to ask for
-first.
+Slices 7, 8 and 9 answered every roadblock a second consumer has actually hit, and
+the one this file's own wishlist argued would get more expensive to answer later.
+**That is the correct state for this crate to be in**, not a gap to fill: every
+slice above was pulled into existence by something a consumer couldn't do, and the
+list below is what a *future* one would have to ask for first.
 
 The next UI work should therefore arrive from a demo, not from this file. The
-nearest candidates are recorded in [`WISHLIST.md`](WISHLIST.md) — virtualization
-and the painter additions for charts — and neither has a driver yet.
+nearest candidate recorded in [`WISHLIST.md`](WISHLIST.md) is the painter
+additions for charts, and it has no driver yet. Slice 9 named one of its own — a
+tab ring a virtualized container can extend — which is a roadblock a demo has met
+but no consumer has yet complained about.
 
 ## Waiting on a roadblock
 

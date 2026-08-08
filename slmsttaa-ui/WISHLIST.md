@@ -146,6 +146,33 @@ the same afternoon.
 
 ### Virtualization
 
+> **Built, as [UI Slice 9](ROADMAP.md#slice-9--only-lay-out-the-rows-you-can-see-done)
+> — and this entry was right about the shape and wrong about the size, in a way
+> worth keeping.**
+>
+> It was right that the scroll container had to be designed for it: the load-bearing
+> change was that `content_h` stopped being *observed* (walk the children, read the
+> cursor) and started being *declared*, because every other number — the viewport,
+> the max offset, the scrollbar — is computed from that one.
+>
+> It was wrong about where the cost was, and only measuring found that out. The
+> demo was grown to five thousand rows first, and at that size a list showing six
+> of them cost **11 ms of a 16.7 ms frame** — but the layout this entry blames was
+> **2.1 ms of it**. The other 8.9 were two quadratic scans nothing had noticed:
+> `next_id` checking a `Vec` for duplicate hashes, and `animate` finding an eased
+> value by walking every slot. Virtualization would have removed the smallest
+> share, and a slice that skipped the measurement would have shipped a 15%
+> improvement while believing it had shipped the fix.
+>
+> Both are now maps; the list is now virtual. **10.98 ms → 0.71 ms, and the draw
+> list went from 10,005 commands to a constant 17.**
+>
+> The bargain has a price and it is a keyboard: only placed rows enter the tab
+> ring, so Tab walks a screenful rather than a list, and the focus chase — which
+> compares a row's *rectangle* to the viewport — cannot see a row that was never
+> placed. `Rows::reveal` answers the second by naming the row instead. The first
+> is unanswered and is the likeliest thing to pull a Slice 10.
+
 *Roadblock:* the same roster at world scale — thousands of fighters across
 divisions and history. Slice 1/2's scroll region clips what is drawn, but layout
 still walks every child. At a few thousand rows that is wasted work every frame.
@@ -400,9 +427,12 @@ consequence being that the consumer composes it themselves or goes elsewhere.
 - **A retained-mode tree stays out**, and should. Virtualized tables and keyboard
   focus are both achievable in immediate mode (egui is the existence proof); none
   of the above requires reversing that decision. Noted so the table entry isn't
-  read as an argument for one. **Half of this is now settled rather than
+  read as an argument for one. **Both halves are now settled rather than
   asserted:** keyboard focus shipped in Slice 7 and cost `UiState` one `Vec<u64>`
-  of declaration order per frame. Virtualization is still the open half.
+  of declaration order per frame, and virtualization shipped in Slice 9 and cost
+  it nothing at all — a `Rows` value the caller passes in, and a container that
+  computes where a row *would* be rather than remembering where one was. Neither
+  needed a node, a parent pointer, or a tree.
 - **Zero dependencies vs. real text.** The offline-baked SDF atlas satisfies
   both, which is why Slice 5 already prefers it. Latin-Extended plus two weights
   plus tabular digits grows the baked constant — measure before committing.
@@ -474,3 +504,33 @@ planning in this file.
 > What remains is **virtualization**, the **painter additions** for charts, table
 > **sorting and selection**, **reactive repaint**, and the engine's
 > **per-frame surface log**. Nothing on that list has a driver.
+
+> **Virtualization has since been built too, and it broke this file's pattern in
+> the useful direction.** Slice 8 was pulled by a wishlist entry and the roadmap
+> recorded the weakness honestly: the demo came *after* the fix, to check it
+> rather than to discover the need, and a demo written that way supplies no
+> surprise.
+>
+> [Slice 9](ROADMAP.md#slice-9--only-lay-out-the-rows-you-can-see-done) was pulled
+> by the same entry and did **not** repeat that, because the demo went first
+> anyway — `examples/editor.rs` grew a **+1000** button and a millisecond readout,
+> and the wall was measured before a line of the container was designed. The
+> surprise arrived on schedule: **eight of the eleven milliseconds were not the
+> thing this file was complaining about.** They were two linear scans in `next_id`
+> and `animate` that had been quadratic since Slice 1 and that nothing with a
+> hundred widgets could ever have revealed.
+>
+> That is the lesson worth keeping, and it generalises past this entry: a wishlist
+> can name the *bottleneck it believes in*, and it will sometimes be right about
+> the mechanism and wrong about the magnitude. Building the demo first cost an
+> afternoon and turned a 15% improvement into a 15× one. **The stopping rule is
+> not only about whether to build a thing — it is about finding out what the thing
+> actually is.**
+>
+> What remains is the **painter additions** for charts, table **sorting and
+> selection**, **reactive repaint**, and the engine's **per-frame surface log** —
+> plus one new entry Slice 9 created rather than closed: **a tab ring a
+> virtualized container can extend**, so a long list is walkable by keyboard
+> without every row declaring itself. That last one is the only item here found by
+> a demo rather than recognized in advance, which is exactly the pedigree this
+> file cannot give anything.

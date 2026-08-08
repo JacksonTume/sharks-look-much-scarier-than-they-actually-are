@@ -98,12 +98,13 @@ mod widgets;
 
 pub use font::Weight;
 pub use interact::{Event, Key, KeyEvent, Modifiers, Response, UiInput, UiState};
-pub use layout::Rect;
+pub use layout::{Rect, Rows};
 pub use painter::{Color, DrawCmd, Layer, Painter, RecordingPainter};
 pub use theme::{Motion, Size, Theme, TypeStep, Variant};
 pub use widgets::{Button, Slider, SliderLayout, TextField};
 
 use layout::{Dir, Region};
+use std::collections::HashSet;
 
 /// Which corner of the window a panel is pinned to.
 ///
@@ -158,9 +159,51 @@ impl Anchor {
 /// Ids are `hash(scope, label)` — no position, so a widget survives rows
 /// appearing above it. `used` exists only to catch the resulting collision when
 /// one scope declares the same label twice.
+///
+/// A set rather than a `Vec`, unlike the by-container maps on
+/// [`UiState`](interact::UiState), and for the opposite reason: those hold a
+/// handful of panels and sections, where this holds an entry per *widget*. A
+/// linear scan made [`Ui::next_id`] quadratic in the widgets a scope declares —
+/// 3.6 ms a frame at five thousand rows, measured, which is most of a frame spent
+/// checking that a hash nobody duplicated was not a duplicate.
 struct Scope {
     id: u64,
-    used: Vec<u64>,
+    used: HashSet<u64>,
+}
+
+/// Where a scroll area's body may draw, and how far it has been scrolled.
+///
+/// Handed to the body closure so the two kinds of body — the one that walks its
+/// children and the one that computes where they would be — share every number
+/// rather than each deriving its own. Deriving them twice is the mistake
+/// [`Ui::scroll_area_headed`] was written to prevent, one level down.
+#[derive(Clone, Copy)]
+struct ScrollBody {
+    /// The visible rectangle, at the region's **full** width — the scrollbar is
+    /// drawn inside its right edge.
+    viewport: Rect,
+    /// How wide contents may be: the viewport less the scrollbar gutter.
+    content_w: f32,
+    /// How far the contents are drawn *above* the viewport's top. Eased, so it
+    /// is fractional for the couple of frames a wheel notch takes to glide.
+    offset: f32,
+    /// How much room the enclosing region had left, which a body that lays out
+    /// in the ordinary way needs for its own region's height.
+    line_h: f32,
+}
+
+/// A band of content a caller asked to have scrolled into view.
+///
+/// In content space — points from the top of the content, not from the top of
+/// the viewport — because the caller knows where its rows are and the container
+/// knows where the viewport is, and this is the seam between them.
+#[derive(Clone, Copy)]
+struct RevealBand {
+    /// Which row it is, so the ask can be edge-triggered rather than obeyed
+    /// every frame. See [`UiState::revealed`](interact::UiState).
+    index: usize,
+    top: f32,
+    height: f32,
 }
 
 /// One frame of the immediate-mode UI.
@@ -268,7 +311,7 @@ impl<'a> Ui<'a> {
             regions: vec![Region::vertical(Rect::new(0.0, 0.0, vw, vh))],
             scopes: vec![Scope {
                 id: 0,
-                used: Vec::new(),
+                used: HashSet::new(),
             }],
             next_size: None,
             panels: Vec::new(),
@@ -559,10 +602,9 @@ impl<'a> Ui<'a> {
         let mut id = interact::hash_id(scope.id, label);
         // Deterministic re-hash chain, so the Nth duplicate is always the same
         // id for the same N.
-        while scope.used.contains(&id) {
+        while !scope.used.insert(id) {
             id = interact::hash_id(id, "\u{1}dup");
         }
-        scope.used.push(id);
         id
     }
 
@@ -586,7 +628,7 @@ impl<'a> Ui<'a> {
     pub(crate) fn push_scope(&mut self, id: u64) {
         self.scopes.push(Scope {
             id,
-            used: Vec::new(),
+            used: HashSet::new(),
         });
     }
 
@@ -675,7 +717,7 @@ impl<'a> Ui<'a> {
         let id = self.next_id(anchor.key());
         self.scopes.push(Scope {
             id,
-            used: Vec::new(),
+            used: HashSet::new(),
         });
 
         // Narrower than its own padding would be a panel with negative content
@@ -983,6 +1025,192 @@ impl<'a> Ui<'a> {
         header: impl FnOnce(&mut Ui<'a>) -> H,
         add_contents: impl FnOnce(&mut Ui<'a>) -> R,
     ) -> R {
+        self.scroll_region(label, max_height, header, None, None, |ui, body| {
+            // Lay the contents out in their own region, shifted up by the offset.
+            // Because it is a child region, the enclosing panel's cursor never
+            // moves — so the panel's height is measured from the viewport, not
+            // from however far the contents actually ran.
+            //
+            // `content_w` is the same number the header was laid out at. The
+            // viewport itself keeps the full width, because the bar is drawn
+            // *inside* its right edge.
+            ui.regions.push(Region::vertical(Rect::new(
+                body.viewport.x,
+                body.viewport.y - body.offset,
+                body.content_w,
+                body.line_h,
+            )));
+            let result = add_contents(ui);
+            let content_h = ui
+                .regions
+                .pop()
+                .expect("scroll area pushed a region")
+                .consumed_height();
+            (content_h, result)
+        })
+    }
+
+    /// A scroll area that places only the rows you can actually see.
+    ///
+    /// [`scroll_area`](Ui::scroll_area) lays its contents out in full and lets the
+    /// painter clip what overflows — which is correct, and costs a frame's work
+    /// per row whether or not that row is on screen. At a few hundred rows nobody
+    /// notices. At a few thousand it is the frame: a list of 5,000 showing six of
+    /// them spent **11 ms** of a 16.7 ms budget before this existed.
+    ///
+    /// The trade is that the container has to be *told* its shape instead of
+    /// measuring it, which is what [`Rows`] carries. In exchange it knows the
+    /// content height before anything is placed, so unlike a plain scroll area it
+    /// is also correct on its **first** frame rather than settling on the second.
+    ///
+    /// ```
+    /// # use slmsttaa_ui::{Anchor, RecordingPainter, Rows, Theme, Ui, UiInput, UiState};
+    /// # let (mut p, mut s) = (RecordingPainter::default(), UiState::default());
+    /// # let mut ui = Ui::new(&mut p, UiInput::default(), &mut s);
+    /// # let fighters: Vec<String> = Vec::new();
+    /// const ROW_H: f32 = 22.0;
+    /// # ui.panel(Anchor::TopLeft, Theme::default().panel_w, |ui| {
+    /// ui.scroll_area_virtual("roster", 300.0, Rows::uniform(fighters.len(), ROW_H), |ui, index| {
+    ///     let id = ui.next_id(&format!("fighter {index}"));
+    ///     let rect = ui.allocate([0.0, ROW_H]);
+    ///     if ui.interact(rect, id).clicked {
+    ///         // ...
+    ///     }
+    /// });
+    /// # });
+    /// ```
+    ///
+    /// # What a virtualized list cannot do
+    ///
+    /// A row that is not placed does not exist as far as the rest of the toolkit
+    /// is concerned, and three things follow. None of them is a bug you can work
+    /// around from outside; they are the price, and they are named here so the
+    /// price is visible before it is paid.
+    ///
+    /// - **Tab reaches only the visible rows.** The ring is refilled every frame
+    ///   from whatever called [`focusable`](Ui::focusable), so it holds a
+    ///   screenful rather than a list, and Tab wraps at the bottom of the viewport
+    ///   instead of walking on. Prefer driving selection from your own state,
+    ///   keyed by index, over putting thousands of rows in the tab ring.
+    /// - **The focus chase cannot fire.** [`scroll_area`](Ui::scroll_area) brings a
+    ///   keyboard-focused row into view by comparing its rectangle against the
+    ///   viewport, and a row that was never placed has no rectangle.
+    ///   [`Rows::reveal`] is the replacement: it says *which row* rather than
+    ///   waiting to be shown where one landed.
+    /// - **A row that scrolls away mid-drag stays `active`.** The claim is
+    ///   released inside [`interact`](Ui::interact), which an unplaced row never
+    ///   calls. Rare, because scrolling with a button held is rare, and worth
+    ///   knowing before it is puzzling.
+    pub fn scroll_area_virtual(
+        &mut self,
+        label: &str,
+        max_height: f32,
+        rows: Rows,
+        row: impl FnMut(&mut Ui<'a>, usize),
+    ) {
+        self.scroll_area_virtual_headed(label, max_height, rows, |_| {}, row);
+    }
+
+    /// A [`scroll_area_virtual`](Ui::scroll_area_virtual) with a **sticky header**
+    /// above it, on the same terms as
+    /// [`scroll_area_headed`](Ui::scroll_area_headed): the header is laid out at
+    /// exactly the body's width, so a column and its heading cannot drift apart.
+    ///
+    /// This is the combination a table actually wants — the reason virtualization
+    /// is worth having is a roster, and a roster has a header.
+    ///
+    /// ```
+    /// # use slmsttaa_ui::{Anchor, RecordingPainter, Rows, Theme, Ui, UiInput, UiState};
+    /// # let (mut p, mut s) = (RecordingPainter::default(), UiState::default());
+    /// # let mut ui = Ui::new(&mut p, UiInput::default(), &mut s);
+    /// # let rows: Vec<(String, String)> = Vec::new();
+    /// # ui.panel(Anchor::TopLeft, Theme::default().panel_w, |ui| {
+    /// ui.scroll_area_virtual_headed(
+    ///     "roster",
+    ///     300.0,
+    ///     Rows::uniform(rows.len(), 22.0),
+    ///     |ui| { ui.columns(2, |ui, i| { ui.label(["rank", "name"][i]); }); },
+    ///     |ui, index| {
+    ///         let (rank, name) = &rows[index];
+    ///         ui.columns(2, |ui, i| { ui.label([rank, name][i]); });
+    ///     },
+    /// );
+    /// # });
+    /// ```
+    pub fn scroll_area_virtual_headed<H>(
+        &mut self,
+        label: &str,
+        max_height: f32,
+        rows: Rows,
+        header: impl FnOnce(&mut Ui<'a>) -> H,
+        mut row: impl FnMut(&mut Ui<'a>, usize),
+    ) {
+        // The two numbers a plain scroll area has to walk its children to learn.
+        let known_content = Some(rows.total_height());
+        let reveal = rows.revealed().map(|index| RevealBand {
+            index,
+            top: rows.top(index),
+            height: rows.height(),
+        });
+
+        self.scroll_region(
+            label,
+            max_height,
+            header,
+            known_content,
+            reveal,
+            |ui, body| {
+                // The range comes from the **eased** offset, not from the stored
+                // target. They differ for the couple of frames a wheel notch takes to
+                // glide, and using the target would leave a blank strip at the top of
+                // the viewport for exactly as long as the glide lasts — the one bug
+                // this is genuinely easy to write.
+                let visible = rows.range(body.offset, body.viewport.h);
+                let top = body.viewport.y - body.offset;
+
+                for index in visible {
+                    // One region per row, sized to exactly the height the caller
+                    // declared. A shared cursor would let a row that allocated the
+                    // wrong height drift every row beneath it out of position and out
+                    // of agreement with the scrollbar; here the geometry is the
+                    // container's, which is the same argument the scrollbar gutter
+                    // settled one slice ago.
+                    ui.regions.push(Region::vertical(Rect::new(
+                        body.viewport.x,
+                        top + rows.top(index),
+                        body.content_w,
+                        rows.height(),
+                    )));
+                    row(ui, index);
+                    ui.regions.pop().expect("a row pushed a region");
+                }
+
+                (rows.total_height(), ())
+            },
+        )
+    }
+
+    /// Everything both scroll areas do, which is everything except how the body
+    /// finds out how tall it is.
+    ///
+    /// An ordinary scroll area **observes** its content height by walking its
+    /// children and reading the cursor afterwards. A virtualized one is **told**,
+    /// because walking is the thing it exists not to do. That single difference is
+    /// `known_content`; the header, the gutter, the viewport, the wheel, the
+    /// easing, the clip, the focus chase and the scrollbar are identical, and
+    /// copying them into a second container is how the two would drift apart.
+    ///
+    /// The body returns `(content_h, R)` — the height it wants remembered, and
+    /// whatever the caller's closure produced.
+    fn scroll_region<H, R>(
+        &mut self,
+        label: &str,
+        max_height: f32,
+        header: impl FnOnce(&mut Ui<'a>) -> H,
+        known_content: Option<f32>,
+        reveal: Option<RevealBand>,
+        body: impl FnOnce(&mut Ui<'a>, ScrollBody) -> (f32, R),
+    ) -> R {
         let id = self.next_id(label);
 
         // The content width is measured **once**, here, and handed to both the
@@ -1016,7 +1244,13 @@ impl<'a> Ui<'a> {
         // a scrollbar is needed. A scroll area that has never been laid out
         // simply takes its full height on the first frame and settles on the
         // second — invisible in practice, because nothing has scrolled yet.
-        let previous_content = self.state.measured(id).max(0.0);
+        //
+        // A virtualized area skips that entirely: it knows its height as
+        // `rows * row_h` before anything is placed, so it is right on frame one
+        // and there is nothing to settle.
+        let previous_content = known_content
+            .unwrap_or_else(|| self.state.measured(id))
+            .max(0.0);
         let viewport_h = if previous_content > 0.0 {
             previous_content.min(max_height)
         } else {
@@ -1040,6 +1274,21 @@ impl<'a> Ui<'a> {
             let speed = self.theme.control.scroll_speed;
             target = (target - self.input.scroll_delta * speed).clamp(0.0, max_offset);
         }
+        // A row a caller asked to have brought into view, if that ask is new.
+        // Unlike the focus chase below, this needs no rectangle — it is arithmetic
+        // over a band the caller named — so it can land *this* frame rather than
+        // next.
+        if let Some(band) = reveal {
+            if self.state.take_reveal(id, band.index) {
+                let bottom = band.top + band.height;
+                if band.top < target {
+                    target = band.top;
+                } else if bottom > target + viewport_h {
+                    target = bottom - viewport_h;
+                }
+                target = target.clamp(0.0, max_offset);
+            }
+        }
         self.state.set_scroll_offset(id, target);
 
         // What is *drawn* eases toward that target, so a wheel notch glides its
@@ -1050,28 +1299,21 @@ impl<'a> Ui<'a> {
         let rate = self.theme.motion.expand;
         let offset = self.animate_with(id, "scroll", target, rate);
 
-        // Lay the contents out in their own region, shifted up by the offset and
-        // clipped to the viewport. Because it is a child region, the enclosing
-        // panel's cursor never moves — so the panel's height is measured from
-        // the viewport, not from however far the contents actually ran.
-        //
-        // `content_w` is the same number the header was laid out at, computed
-        // once above. The viewport itself keeps the full width, because the bar
-        // is drawn *inside* its right edge.
+        // The body places its contents, clipped to the viewport, and reports how
+        // tall it considers itself. Whether it found that out by walking its
+        // children or by multiplying two numbers is the only thing the two kinds
+        // of scroll area disagree about.
         let focused_before = self.focused_rect.is_some();
         self.painter.push_clip(viewport);
-        self.regions.push(Region::vertical(Rect::new(
-            line.x,
-            top - offset,
-            content_w,
-            line.h,
-        )));
-        let result = add_contents(self);
-        let content_h = self
-            .regions
-            .pop()
-            .expect("scroll area pushed a region")
-            .consumed_height();
+        let (content_h, result) = body(
+            self,
+            ScrollBody {
+                viewport,
+                content_w,
+                offset,
+                line_h: line.h,
+            },
+        );
         self.painter.pop_clip();
 
         // If the keyboard just put focus on a row inside here, chase it. Without
