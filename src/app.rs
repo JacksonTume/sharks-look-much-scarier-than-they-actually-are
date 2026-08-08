@@ -95,9 +95,14 @@ impl App {
 
 impl ApplicationHandler<Renderer> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // Read once, here: this configures the window rather than driving it.
+        let config = self.application.config();
         let attributes = Window::default_attributes()
-            .with_title("SLMSTTAA")
-            .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0));
+            .with_title(config.window_title())
+            .with_inner_size(winit::dpi::LogicalSize::new(config.size.0, config.size.1))
+            .with_resizable(config.resizable)
+            .with_decorations(config.decorations)
+            .with_maximized(config.maximized);
 
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
@@ -117,6 +122,21 @@ impl ApplicationHandler<Renderer> for App {
             use winit::platform::web::WindowExtWebSys;
 
             let web_window = web_sys::window().expect("no global window");
+
+            // Name the tab, but only if the consumer asked for a name.
+            //
+            // winit will not do this: its web backend puts `with_title` on the
+            // canvas's `alt` attribute, which is accessibility text rather than
+            // a caption, so `Config::title` would otherwise be silently inert
+            // for the one thing anyone expects it to do. Skipping `None` is the
+            // load-bearing half — writing `DEFAULT_TITLE` here would replace
+            // whatever `web/index.html` says with a generic engine string on
+            // every page that never asked to be renamed.
+            if let Some(title) = &config.title {
+                if let Some(document) = web_window.document() {
+                    document.set_title(title);
+                }
+            }
 
             web_window
                 .document()

@@ -6,6 +6,7 @@
 //! consumer implements [`Application`] and the engine calls *into* it. The
 //! engine never sees anything more than `dyn Application`.
 
+use crate::config::Config;
 use crate::renderer::Renderer;
 
 /// A consumer of the engine.
@@ -18,6 +19,28 @@ use crate::renderer::Renderer;
 /// the GPU plumbing. (As the engine grows — driveable camera, input — this
 /// context is the natural place to expand, and may earn a dedicated name then.)
 pub trait Application {
+    /// Called once, before the window is created, to describe the window this
+    /// consumer wants. The default is [`Config::default`] — a 1280x720 window
+    /// titled "SLMSTTAA".
+    ///
+    /// This is read exactly once, at startup: it configures the window rather
+    /// than driving it, so returning a different value later has no effect.
+    ///
+    /// ```
+    /// # use slmsttaa::{Application, Config, Renderer};
+    /// # struct Demo;
+    /// impl Application for Demo {
+    ///     fn config(&self) -> Config {
+    ///         Config::default().with_title("Terrain")
+    ///     }
+    ///
+    ///     fn init(&mut self, _renderer: &mut Renderer) {}
+    /// }
+    /// ```
+    fn config(&self) -> Config {
+        Config::default()
+    }
+
     /// Called once, after the renderer exists. Upload initial geometry here.
     fn init(&mut self, renderer: &mut Renderer);
 

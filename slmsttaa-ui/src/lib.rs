@@ -778,6 +778,26 @@ impl<'a> Ui<'a> {
     /// This is the button-row primitive. The rows below it start beneath the
     /// *tallest* column, so columns of different lengths don't overlap anything.
     ///
+    /// # This is not a grid, and it is the first thing a table reaches for
+    ///
+    /// Two properties make it the wrong tool, and neither is a defect — they are
+    /// what a button row wants:
+    ///
+    /// - **Widths are equal.** There is no column model, so a `rank` column and
+    ///   a `name` column come out the same size. On a stat-comparison row of
+    ///   equal thirds, a number lands some 300 points from its own label.
+    /// - **Layout is column-major.** `cell` runs once per *column* and stacks
+    ///   downward inside it, so a **row is not a thing that exists** — which
+    ///   makes row hover, row striping and row selection inexpressible here, not
+    ///   merely awkward.
+    ///
+    /// For a table, build the row yourself: [`Ui::allocate`] a full-width strip,
+    /// [`Ui::interact`] with it for hover and clicks, and split it with
+    /// [`font::text_width`](crate::font::text_width) for proportional columns and
+    /// truncation. That is not a gap in the toolkit — it is the seam working, and
+    /// it is how every table built on this crate so far has been written.
+    /// [`Ui::scroll_area_headed`] keeps such a header aligned with its body.
+    ///
     /// ```
     /// # use slmsttaa_ui::{Anchor, RecordingPainter, Theme, Ui, UiInput, UiState};
     /// # let (mut p, mut s) = (RecordingPainter::default(), UiState::default());
@@ -914,7 +934,81 @@ impl<'a> Ui<'a> {
         max_height: f32,
         add_contents: impl FnOnce(&mut Ui<'a>) -> R,
     ) -> R {
+        self.scroll_area_headed(label, max_height, |_| {}, add_contents)
+    }
+
+    /// A [`scroll_area`](Ui::scroll_area) with a **sticky header** above it: the
+    /// header stays put while the body scrolls under it.
+    ///
+    /// The header is laid out at exactly the body's width, which is the entire
+    /// reason this exists. A scroll area insets its contents by a gutter so
+    /// nothing runs underneath the scrollbar, so a header written *outside* one
+    /// spans the region's full width and every column ends up a few points out
+    /// of line with its own heading. Nothing warns you, it is invisible in a
+    /// screenshot, and it reads as sloppiness rather than as a bug — and every
+    /// consumer building a table rediscovers it. Laying both out here is what
+    /// makes the misalignment unrepresentable.
+    ///
+    /// `max_height` bounds the **body**; the header sits above it and is always
+    /// drawn in full. The header is outside the clip and is never scrolled, but
+    /// the wheel still works over it — the two are one scrollable thing to a
+    /// reader. It shares the enclosing id scope exactly as the body does, so a
+    /// heading and a cell may carry the same label without colliding, on the
+    /// usual terms (see [`Ui::push_id`]).
+    ///
+    /// ```
+    /// # use slmsttaa_ui::{Anchor, RecordingPainter, Theme, Ui, UiInput, UiState};
+    /// # let (mut p, mut s) = (RecordingPainter::default(), UiState::default());
+    /// # let mut ui = Ui::new(&mut p, UiInput::default(), &mut s);
+    /// # let rows: [(&str, &str); 0] = [];
+    /// # ui.panel(Anchor::TopLeft, Theme::default().panel_w, |ui| {
+    /// ui.scroll_area_headed(
+    ///     "roster",
+    ///     300.0,
+    ///     |ui| {
+    ///         ui.columns(2, |ui, i| { ui.label(["rank", "name"][i]); });
+    ///     },
+    ///     |ui| {
+    ///         for (rank, name) in rows {
+    ///             ui.columns(2, |ui, i| { ui.label([rank, name][i]); });
+    ///         }
+    ///     },
+    /// );
+    /// # });
+    /// ```
+    pub fn scroll_area_headed<H, R>(
+        &mut self,
+        label: &str,
+        max_height: f32,
+        header: impl FnOnce(&mut Ui<'a>) -> H,
+        add_contents: impl FnOnce(&mut Ui<'a>) -> R,
+    ) -> R {
         let id = self.next_id(label);
+
+        // The content width is measured **once**, here, and handed to both the
+        // header and the body. Subtracting the gutter in two places would let
+        // them disagree, which is the exact bug this method exists to prevent.
+        let head_line = self.region().next_line();
+        let content_w = (head_line.w - self.scroll_gutter()).max(0.0);
+
+        // The header is laid out in the parent's flow — no clip, no offset — so
+        // it stays put while the body scrolls beneath it. A no-op header (which
+        // is what `scroll_area` passes) consumes nothing and advances nothing,
+        // so the plain case is geometrically identical to what it was.
+        self.regions.push(Region::vertical(Rect::new(
+            head_line.x,
+            head_line.y,
+            content_w,
+            head_line.h,
+        )));
+        header(self);
+        let header_h = self
+            .regions
+            .pop()
+            .expect("scroll header pushed a region")
+            .consumed_height();
+        self.region_mut().advance_block(header_h);
+
         let line = self.region().next_line();
         let top = line.y;
 
@@ -932,9 +1026,17 @@ impl<'a> Ui<'a> {
 
         // Wheel input, applied before laying out so the contents land in their
         // scrolled position this frame rather than next.
+        //
+        // The wheel is caught over the **header as well as the body**. A sticky
+        // header is part of the same scrollable thing as far as a reader is
+        // concerned, and a notch that does nothing because the pointer drifted
+        // one row too high is the same class of papercut this method exists to
+        // remove. With no header `header_h` is zero and this is exactly the
+        // viewport, which is why the plain case is untouched.
+        let wheel_area = Rect::new(line.x, top - header_h, line.w, header_h + viewport_h);
         let max_offset = (previous_content - max_height).max(0.0);
         let mut target = self.state.scroll_offset(id).clamp(0.0, max_offset);
-        if max_offset > 0.0 && self.input.hits(viewport) {
+        if max_offset > 0.0 && self.input.hits(wheel_area) {
             let speed = self.theme.control.scroll_speed;
             target = (target - self.input.scroll_delta * speed).clamp(0.0, max_offset);
         }
@@ -953,26 +1055,15 @@ impl<'a> Ui<'a> {
         // panel's cursor never moves — so the panel's height is measured from
         // the viewport, not from however far the contents actually ran.
         //
-        // The region is narrower than the viewport by a **gutter**: the scrollbar
-        // is drawn inside the viewport's right edge, and content laid out to that
-        // edge would run underneath it. Through Slice 4 nothing noticed, because
-        // the 8x8 bitmap font left a quarter of every glyph cell empty on the
-        // right and the ink never actually reached the bar. Inter's `0` has about
-        // a point of side bearing, so the bar started eating the last digit of
-        // every right-aligned readout the moment the font became a real one.
-        //
-        // Reserved unconditionally rather than only when the bar is visible. A
-        // conditional gutter would reflow every row the moment one more row tipped
-        // the area into overflowing — and worse, once anything here wraps, a
-        // narrower region could *grow* the content height, which would toggle the
-        // bar on and off forever.
-        let gutter = self.theme.control.scrollbar_w + self.theme.space.gap;
+        // `content_w` is the same number the header was laid out at, computed
+        // once above. The viewport itself keeps the full width, because the bar
+        // is drawn *inside* its right edge.
         let focused_before = self.focused_rect.is_some();
         self.painter.push_clip(viewport);
         self.regions.push(Region::vertical(Rect::new(
             line.x,
             top - offset,
-            (line.w - gutter).max(0.0),
+            content_w,
             line.h,
         )));
         let result = add_contents(self);
@@ -1015,6 +1106,29 @@ impl<'a> Ui<'a> {
             self.draw_scrollbar(viewport, offset, content_h);
         }
         result
+    }
+
+    /// The width a scroll area reserves beside its contents for the scrollbar.
+    ///
+    /// The bar is drawn inside the viewport's right edge, so content laid out to
+    /// that edge would run underneath it. Through Slice 4 nothing noticed,
+    /// because the 8x8 bitmap font left a quarter of every glyph cell empty on
+    /// the right and the ink never actually reached the bar. Inter's `0` has
+    /// about a point of side bearing, so the bar started eating the last digit
+    /// of every right-aligned readout the moment the font became a real one.
+    ///
+    /// Reserved unconditionally rather than only when the bar is visible. A
+    /// conditional gutter would reflow every row the moment one more row tipped
+    /// the area into overflowing — and worse, once anything here wraps, a
+    /// narrower region could *grow* the content height, which would toggle the
+    /// bar on and off forever.
+    ///
+    /// Deliberately private. A public accessor would let a consumer subtract it
+    /// by hand, which is the thing that goes wrong;
+    /// [`Ui::scroll_area_headed`] is how a header gets the right width without
+    /// anyone having to know this number exists.
+    fn scroll_gutter(&self) -> f32 {
+        self.theme.control.scrollbar_w + self.theme.space.gap
     }
 
     /// The slim overflow indicator drawn inside a scroll area's right edge.

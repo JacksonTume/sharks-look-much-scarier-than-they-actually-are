@@ -343,3 +343,94 @@ fn a_consumer_can_drive_focus_itself() {
     });
     assert_eq!(focus_flags(chosen), vec![false, false, true]);
 }
+
+/// A long list of focusable rows inside a scroll area with a sticky header,
+/// reporting each row's id and the y it was drawn at.
+fn headed_list(ui: &mut Ui) -> Vec<(u64, f32)> {
+    let mut out = Vec::new();
+    ui.scroll_area_headed(
+        "list",
+        VIEWPORT_H,
+        |ui| {
+            ui.label("HEAD");
+        },
+        |ui| {
+            for i in 0..20 {
+                let id = ui.next_id(&format!("row {i}"));
+                ui.focusable(id);
+                let rect = ui.allocate([0.0, LIST_ROW_H]);
+                ui.interact(rect, id);
+                out.push((id, rect.y));
+            }
+        },
+    );
+    out
+}
+
+const LIST_ROW_H: f32 = 20.0;
+const VIEWPORT_H: f32 = LIST_ROW_H * 6.0;
+
+#[test]
+fn a_headed_scroll_area_still_chases_keyboard_focus() {
+    // Slice 7 made a scroll area bring a keyboard-focused row into view —
+    // without it, a tab ring is only usable as far as the first screenful.
+    // Slice 8 moved the viewport down by a header, and that chase compares the
+    // focused rect against the viewport. Nothing in this suite covered it, so
+    // this is the test that says the header did not break it.
+    let mut painter = RecordingPainter::default();
+    let mut state = UiState::default();
+
+    // Frame one measures the content so there is somewhere to scroll to.
+    let ids = frame(&mut painter, &mut state, UiInput::default(), headed_list);
+    let far = ids[15].0;
+
+    // Where the header and the top row sit before anything scrolls.
+    let head_y = |p: &RecordingPainter| {
+        p.cmds
+            .iter()
+            .find_map(|c| match c {
+                slmsttaa_ui::DrawCmd::Text { text, y, .. } if text == "HEAD" => Some(*y),
+                _ => None,
+            })
+            .expect("the header was drawn")
+    };
+    painter.clear();
+    let before = frame(&mut painter, &mut state, UiInput::default(), headed_list);
+    let header_before = head_y(&painter);
+    let viewport_top = before[0].1;
+
+    // Drive focus to row 15, well past the six visible rows, the way a
+    // consumer's own arrow-key handling would.
+    for _ in 0..6 {
+        painter.clear();
+        let mut ui = Ui::new(&mut painter, UiInput::default(), &mut state);
+        ui.panel(Anchor::TopLeft, PANEL_W, |ui| {
+            ui.set_focus(Some(far));
+            headed_list(ui)
+        });
+    }
+
+    painter.clear();
+    let after = frame(&mut painter, &mut state, UiInput::default(), headed_list);
+
+    // The focused row is now inside the viewport rather than far below it.
+    let row_15 = after[15].1;
+    let viewport_bottom = viewport_top + VIEWPORT_H;
+    assert!(
+        row_15 >= viewport_top - 0.5 && row_15 + LIST_ROW_H <= viewport_bottom + 0.5,
+        "row 15 should have been scrolled into [{viewport_top}, {viewport_bottom}], got {row_15}"
+    );
+    // …and the contents genuinely moved to do it.
+    assert!(
+        after[0].1 < before[0].1,
+        "the list must have scrolled ({} vs {})",
+        after[0].1,
+        before[0].1
+    );
+    // The header did not move with them.
+    assert_eq!(
+        head_y(&painter),
+        header_before,
+        "the sticky header must stay put while the body scrolls under it"
+    );
+}

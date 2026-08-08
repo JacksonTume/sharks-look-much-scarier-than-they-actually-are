@@ -233,6 +233,182 @@ fn a_scroll_area_keeps_its_contents_clear_of_the_scrollbar() {
     }
 }
 
+/// The x of every run whose text satisfies `pick`, in draw order.
+fn xs_of(painter: &RecordingPainter, pick: impl Fn(&str) -> bool) -> Vec<f32> {
+    painter
+        .cmds
+        .iter()
+        .filter_map(|c| match c {
+            DrawCmd::Text { x, text, .. } if pick(text) => Some(*x),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_header_outside_a_scroll_area_does_not_line_up_with_its_body() {
+    // The bug `scroll_area_headed` exists to prevent, asserted so the test below
+    // is known to be testing something real. A header laid out in the panel gets
+    // the full content width; the body inside the area is inset by the gutter,
+    // so their columns diverge.
+    let mut painter = RecordingPainter::default();
+    let mut state = UiState::default();
+
+    {
+        let mut ui = Ui::new(&mut painter, UiInput::default(), &mut state);
+        ui.panel(Anchor::TopLeft, PANEL_W, |ui| {
+            ui.columns(2, |ui, i| {
+                ui.label(["RANK", "NAME"][i]);
+            });
+            ui.scroll_area("body", 100.0, |ui| {
+                for r in 0..20 {
+                    ui.columns(2, |ui, i| {
+                        ui.label(&format!("{}{r}", ["a", "b"][i]));
+                    });
+                }
+            });
+        });
+    }
+
+    let head = xs_of(&painter, |t| t == "RANK" || t == "NAME");
+    let first_row = xs_of(&painter, |t| t == "a0" || t == "b0");
+    assert_eq!(head.len(), 2);
+    assert_eq!(first_row.len(), 2);
+    assert_eq!(head[0], first_row[0], "the left edge is shared either way");
+    assert_ne!(
+        head[1], first_row[1],
+        "the second column must drift — that is the bug"
+    );
+}
+
+#[test]
+fn a_headed_scroll_area_lays_its_header_out_at_the_bodys_width() {
+    let mut painter = RecordingPainter::default();
+    let mut state = UiState::default();
+
+    {
+        let mut ui = Ui::new(&mut painter, UiInput::default(), &mut state);
+        ui.panel(Anchor::TopLeft, PANEL_W, |ui| {
+            ui.scroll_area_headed(
+                "roster",
+                100.0,
+                |ui| {
+                    ui.columns(2, |ui, i| {
+                        ui.label(["RANK", "NAME"][i]);
+                    })
+                },
+                |ui| {
+                    for r in 0..20 {
+                        ui.columns(2, |ui, i| {
+                            ui.label(&format!("{}{r}", ["a", "b"][i]));
+                        });
+                    }
+                },
+            );
+        });
+    }
+
+    let head = xs_of(&painter, |t| t == "RANK" || t == "NAME");
+    let first_row = xs_of(&painter, |t| t == "a0" || t == "b0");
+    assert_eq!(
+        head, first_row,
+        "every heading must sit exactly above its own column"
+    );
+}
+
+#[test]
+fn a_headed_scroll_area_keeps_its_header_still_and_unclipped() {
+    let mut painter = RecordingPainter::default();
+    let mut state = UiState::default();
+
+    let frame = |input: UiInput, p: &mut RecordingPainter, s: &mut UiState| {
+        p.clear();
+        let mut ui = Ui::new(p, input, s);
+        ui.panel(Anchor::TopLeft, PANEL_W, |ui| {
+            ui.scroll_area_headed(
+                "roster",
+                100.0,
+                |ui| ui.label("HEAD"),
+                |ui| {
+                    for r in 0..20 {
+                        ui.label(&format!("row {r}"));
+                    }
+                },
+            );
+        });
+    };
+
+    let head_of = |p: &RecordingPainter| {
+        p.cmds
+            .iter()
+            .find_map(|c| match c {
+                DrawCmd::Text { text, y, .. } if text == "HEAD" => Some((*y, c.clip())),
+                _ => None,
+            })
+            .expect("the header was drawn")
+    };
+    let first_row_of = |p: &RecordingPainter| {
+        p.cmds
+            .iter()
+            .find_map(|c| match c {
+                DrawCmd::Text { text, y, .. } if text == "row 0" => Some(*y),
+                _ => None,
+            })
+            .expect("the body was drawn")
+    };
+
+    // Frame one measures the content; frame two knows there is somewhere to go.
+    frame(UiInput::default(), &mut painter, &mut state);
+    let (head_y, head_clip) = head_of(&painter);
+    let row_y = first_row_of(&painter);
+    assert!(head_clip.is_none(), "the header is outside the clip");
+    assert!(head_y < row_y, "the header sits above the body");
+
+    // `wheel` parks the pointer in the header band, deliberately: a sticky
+    // header catches the wheel on the body's behalf.
+    for _ in 0..4 {
+        frame(wheel(-2.0), &mut painter, &mut state);
+    }
+    let (scrolled_head_y, scrolled_head_clip) = head_of(&painter);
+    assert_eq!(scrolled_head_y, head_y, "the header must not scroll away");
+    assert!(scrolled_head_clip.is_none());
+    assert!(
+        first_row_of(&painter) < row_y,
+        "…while the body underneath it did scroll"
+    );
+}
+
+#[test]
+fn an_empty_header_costs_a_scroll_area_nothing() {
+    // `scroll_area` is `scroll_area_headed` with a no-op header, so the two must
+    // be geometrically identical. This is what stops the plain case regressing.
+    let rows = |ui: &mut Ui| {
+        for r in 0..20 {
+            ui.label(&format!("row {r}"));
+        }
+    };
+
+    let mut plain = RecordingPainter::default();
+    let mut plain_state = UiState::default();
+    {
+        let mut ui = Ui::new(&mut plain, UiInput::default(), &mut plain_state);
+        ui.panel(Anchor::TopLeft, PANEL_W, |ui| {
+            ui.scroll_area("body", 100.0, rows);
+        });
+    }
+
+    let mut headed = RecordingPainter::default();
+    let mut headed_state = UiState::default();
+    {
+        let mut ui = Ui::new(&mut headed, UiInput::default(), &mut headed_state);
+        ui.panel(Anchor::TopLeft, PANEL_W, |ui| {
+            ui.scroll_area_headed("body", 100.0, |_| {}, rows);
+        });
+    }
+
+    assert_eq!(plain.cmds, headed.cmds);
+}
+
 #[test]
 fn a_scroll_area_does_not_swallow_the_panels_height() {
     // The scroll area lays its contents out in a child region, shifted by the

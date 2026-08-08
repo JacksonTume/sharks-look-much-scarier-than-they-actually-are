@@ -271,14 +271,23 @@ fn shoot(
     checkpoints.sort_unstable();
     checkpoints.dedup();
 
+    // Checked before the build, because a three-minute compile followed by
+    // "could not run `Xvfb`" wastes the time and buries the actual reason. The
+    // harness needs all three: an X server to render into, `import` to
+    // photograph it, and `xdotool` to click it.
+    require_capture_tools();
+
     println!("==> building `{example}`");
     cargo(&root, &build_args(example, release, false));
 
+    // `EXE_SUFFIX` is "" on Unix and ".exe" on Windows. Without it this looked
+    // for `examples/terrain` on a machine that had just built `terrain.exe`,
+    // and reported a missing binary that was sitting right there.
     let bin = root
         .join("target")
         .join(profile)
         .join("examples")
-        .join(example);
+        .join(format!("{example}{}", std::env::consts::EXE_SUFFIX));
     if !bin.exists() {
         eprintln!("error: expected binary at {}", bin.display());
         exit(1);
@@ -390,6 +399,55 @@ fn shoot(
 /// Returns the handle to kill later and the `DISPLAY` value everything else must
 /// be given — the example, `import` and `xdotool` alike. That sharing is the
 /// whole point; see [`shoot`] for what happens without it.
+/// Whether `tool` is runnable at all, asked with a flag that prints and exits
+/// rather than doing any work — `Xvfb` with no arguments would start a server.
+fn have_tool(tool: &str, probe: &str) -> bool {
+    Command::new(tool)
+        .arg(probe)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+}
+
+/// Fail early, once, naming **every** missing prerequisite.
+///
+/// The harness is X11-only by construction: it owns an `Xvfb` display, and
+/// `import` and `xdotool` both talk to one. That is a fine constraint — the
+/// point is a pinned, reproducible frame, and a virtual display is how you get
+/// one — but it means `shoot` cannot work on a bare Windows or macOS box, and
+/// the failure should say so instead of surfacing as a missing binary or a
+/// spawn error partway through.
+fn require_capture_tools() {
+    const TOOLS: [(&str, &str, &str); 3] = [
+        ("Xvfb", "-help", "apt-get install xvfb"),
+        ("import", "-version", "apt-get install imagemagick"),
+        ("xdotool", "--version", "apt-get install xdotool"),
+    ];
+
+    let missing: Vec<&(&str, &str, &str)> = TOOLS
+        .iter()
+        .filter(|(tool, probe, _)| !have_tool(tool, probe))
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+
+    eprintln!("error: `cargo xtask shoot` cannot run here — it needs an X11 display.");
+    eprintln!();
+    for (tool, _, install) in &missing {
+        eprintln!("  missing `{tool}`  ({install})");
+    }
+    eprintln!();
+    eprintln!("The harness renders into an Xvfb display, photographs it with");
+    eprintln!("ImageMagick's `import`, and clicks it with `xdotool`, so it is");
+    eprintln!("Linux-only. On Windows or macOS, run the demo and look at it:");
+    eprintln!();
+    eprintln!("  cargo run --example <name>");
+    exit(1);
+}
+
 fn start_xvfb(w: u32, h: u32) -> (std::process::Child, String) {
     for number in 99..120 {
         let socket = format!("/tmp/.X11-unix/X{number}");

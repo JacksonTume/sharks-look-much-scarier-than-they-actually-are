@@ -718,19 +718,88 @@ is not typing — with `Ctrl+Alt` deliberately exempt, because that is AltGr on 
 European layout and it types real characters. No test in this crate could have
 caught it: the toolkit believed what the host told it, and the host was wrong.
 
+## Slice 8 — a header that lines up with its body ✅ done
+
+*Roadblock:* [`WISHLIST.md` § A sticky header has to shed the scrollbar gutter by
+hand](WISHLIST.md#a-sticky-header-has-to-shed-the-scrollbar-gutter-by-hand),
+found by a second consumer building a table and named there as "the one piece of
+it that is squarely this crate's". A `scroll_area` insets its contents by
+`scrollbar_w + gap` so nothing runs under the bar (the live bug UI Slice 5
+uncovered). A header row written *outside* one gets the region's full width, so
+every column sits a few points out of line with its own heading. Nothing warns
+you; it is invisible in a screenshot and obvious on a screen.
+
+- `scroll_area_headed` — a header closure laid out at the body's width.
+- `columns` documents what it is not, which is the other half of the same
+  afternoon that consumer lost.
+
+*Proof:* `examples/editor.rs`'s scene list has a `name` / `#` header whose `#`
+shares a right edge with the `#0`–`#5` tags beneath it, both clear of the
+scrollbar. Four tests in `tests/clipping.rs`, one of which asserts the **bug**
+— a header outside a scroll area — so the alignment test is known to be testing
+something. Native and wasm both build.
+
+**What shipped, and what it cost:**
+
+- **The width is computed once and handed to both.** Subtracting the gutter in
+  two places would let them disagree, which is the bug wearing a different hat.
+  The header and the body are laid out from the same `content_w`, so alignment
+  is a property of the code rather than of two subtractions agreeing.
+- **`scroll_area` became `scroll_area_headed` with a no-op header**, rather than
+  the two sharing a copied body. A test asserts the plain path emits a
+  byte-identical draw list, which is what keeps the common case from regressing
+  while the headed one grows.
+- **The gutter stayed private, deliberately.** A public accessor was the smaller
+  change and was declined: it would let a consumer subtract it by hand, and
+  subtracting it by hand is the thing that goes wrong. This is the
+  unprivileged-widget rule pointed at a *number* — the toolkit owns the
+  arithmetic, and a consumer never learns the number exists.
+- **The wheel grew to cover the header, which was not in the plan.** The first
+  test written for it failed: the pointer sat in the header band, so the wheel
+  hit-tested the viewport and nothing scrolled. A sticky header is part of the
+  same scrollable thing to a reader, and a notch that does nothing because the
+  pointer drifted one row too high is the same class of papercut this slice
+  exists to remove. With no header the hit rect is exactly the viewport, so the
+  plain case is untouched.
+- **It exposed a hole in the *existing* suite, not a bug.** Slice 7's scroll area
+  chases keyboard focus into view, and that chase compares the focused rect
+  against the viewport — which this slice moved down by a header. `grep scroll
+  tests/keyboard.rs` returned nothing: the behaviour had **no test at all**, and
+  the only reason to look was that this slice touched the geometry underneath
+  it. `a_headed_scroll_area_still_chases_keyboard_focus` now covers it, and was
+  confirmed live by disabling the chase and watching it fail (row 15 at y=346,
+  viewport `[46, 166]`) before being restored. The chase was already correct;
+  what was missing was any way to know that.
+- **`columns` gained a "this is not a grid" section**, naming both properties
+  that make it wrong for a table: equal widths, and column-major layout, which
+  means a *row* is not a thing that exists and row hover and selection are
+  inexpressible rather than merely awkward. It points at building the row from
+  `allocate` / `interact` / `painter` instead — which is what every table built
+  on this crate has actually done.
+
+**This is the first slice pulled by a wishlist entry rather than by a demo**, and
+it is worth saying what that changed. The roadblock was found somewhere this
+project cannot run, so the demo had to be written *afterward* to check the fix
+rather than to discover the need. That is the reverse of the usual order and it
+showed: the editor's list did not want a header for its own sake, and the header
+it got is honest but small. A demo written to check a fix is weaker evidence than
+one that hit the wall, and this entry should not be read as proof the process
+works backwards.
+
 ---
 
 ## Nothing is scheduled
 
-Slice 7 answered the only roadblock a second consumer has actually hit. **That is
-the correct state for this crate to be in**, not a gap to fill: every slice above
-was pulled into existence by something a demo couldn't do, and the list below is
-what a *future* consumer would have to ask for first.
+Slices 7 and 8 answered both roadblocks a second consumer has actually hit — the
+one it could not build around, and the one it could but every consumer after it
+would rediscover. **That is the correct state for this crate to be in**, not a gap
+to fill: every slice above was pulled into existence by something a consumer
+couldn't do, and the list below is what a *future* one would have to ask for
+first.
 
 The next UI work should therefore arrive from a demo, not from this file. The
-nearest candidates are recorded in [`WISHLIST.md`](WISHLIST.md) — virtualization,
-the sticky-header gutter, and the painter additions for charts — and none of them
-has a driver yet.
+nearest candidates are recorded in [`WISHLIST.md`](WISHLIST.md) — virtualization
+and the painter additions for charts — and neither has a driver yet.
 
 ## Waiting on a roadblock
 

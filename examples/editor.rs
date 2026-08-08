@@ -823,83 +823,117 @@ fn object_list(
     }
 
     let mut chosen = None;
-    ui.scroll_area("objects", ROW_H * 6.0, |ui| {
-        let theme = *ui.theme();
-
-        // Ids up front, in one pass, so the walk below can name a row the eye
-        // has not reached yet. `next_id` is called exactly once per row either
-        // way — what changes is that all of them are known before any is drawn.
-        let ids: Vec<u64> = matching
-            .iter()
-            .map(|index| ui.next_id(&format!("object {index}")))
-            .collect();
-
-        // Arrow keys move focus, but only when focus is already *in* the list —
-        // otherwise they belong to the camera. This is the same "who gets the
-        // input" question `wants_pointer` answers for the mouse, decided here by
-        // the consumer because the list is the consumer's.
-        let cursor = ids.iter().position(|id| Some(*id) == ui.focused());
-        if let Some(cursor) = cursor {
-            ui.capture_keyboard();
-            let mut target = cursor;
-            for event in ui.input().key_presses() {
-                match event.key {
-                    UiKey::Up => target = target.saturating_sub(1),
-                    UiKey::Down => target = (target + 1).min(ids.len() - 1),
-                    UiKey::Home => target = 0,
-                    UiKey::End => target = ids.len() - 1,
-                    UiKey::Enter => chosen = Some(matching[cursor]),
-                    _ => {}
-                }
-            }
-            if target != cursor {
-                ui.set_focus(Some(ids[target]));
-            }
-        }
-
-        for (&index, &id) in matching.iter().zip(ids.iter()) {
-            ui.focusable(id);
+    ui.scroll_area_headed(
+        "objects",
+        ROW_H * 6.0,
+        |ui| {
+            // The scroll area lays this out itself, at exactly the width its
+            // rows get. Written as an ordinary row *above* the area instead, it
+            // would span the full panel — because the body is inset by the
+            // gutter the scrollbar sits in — and `#` would float a few points
+            // right of the tags it heads. That is invisible in a screenshot and
+            // obvious on a screen, which is why the toolkit owns it rather than
+            // documenting it.
+            let theme = *ui.theme();
             let rect = ui.allocate([0.0, ROW_H]);
-            let response = ui.interact(rect, id);
-            if response.clicked {
-                chosen = Some(index);
-            }
-
-            let is_selected = selected == Some(index);
-            let warmth = ui.animate(id, "row", if response.hovered { 1.0 } else { 0.0 });
-            let painter = ui.painter();
-            if is_selected {
-                painter.fill_rect(rect, theme.radius.sm, theme.color.selection);
-            } else if warmth > 0.0 {
-                painter.fill_rect(
-                    rect,
-                    theme.radius.sm,
-                    anim::fade(theme.color.surface, warmth),
-                );
-            }
-            if response.focused {
-                painter.stroke_rect(rect, theme.radius.sm, theme.control.ring, theme.color.ring);
-            }
-
-            // The name on the left, the index on the right — the label/value row
-            // shape, hand-built because this one has a background behind it.
-            let (px, weight) = theme.text.body.parts();
+            let (px, weight) = theme.text.small.parts();
             let gap = theme.space.gap;
             let y = font::centered_top(rect.y, rect.h, px);
-            let name = &objects[index].name;
-            let tag = format!("#{index}");
-            let tag_w = font::text_width(&tag, px, weight);
-            painter.text(rect.x + gap, y, name, px, weight, theme.color.foreground);
+            let tag_w = font::text_width("#", px, weight);
+            let painter = ui.painter();
+            painter.text(rect.x + gap, y, "name", px, weight, theme.color.muted);
             painter.text(
                 rect.max_x() - tag_w - gap,
                 y,
-                &tag,
+                "#",
                 px,
                 weight,
                 theme.color.muted,
             );
-        }
-    });
+        },
+        |ui| {
+            let theme = *ui.theme();
+
+            // Ids up front, in one pass, so the walk below can name a row the eye
+            // has not reached yet. `next_id` is called exactly once per row either
+            // way — what changes is that all of them are known before any is drawn.
+            let ids: Vec<u64> = matching
+                .iter()
+                .map(|index| ui.next_id(&format!("object {index}")))
+                .collect();
+
+            // Arrow keys move focus, but only when focus is already *in* the list —
+            // otherwise they belong to the camera. This is the same "who gets the
+            // input" question `wants_pointer` answers for the mouse, decided here by
+            // the consumer because the list is the consumer's.
+            let cursor = ids.iter().position(|id| Some(*id) == ui.focused());
+            if let Some(cursor) = cursor {
+                ui.capture_keyboard();
+                let mut target = cursor;
+                for event in ui.input().key_presses() {
+                    match event.key {
+                        UiKey::Up => target = target.saturating_sub(1),
+                        UiKey::Down => target = (target + 1).min(ids.len() - 1),
+                        UiKey::Home => target = 0,
+                        UiKey::End => target = ids.len() - 1,
+                        UiKey::Enter => chosen = Some(matching[cursor]),
+                        _ => {}
+                    }
+                }
+                if target != cursor {
+                    ui.set_focus(Some(ids[target]));
+                }
+            }
+
+            for (&index, &id) in matching.iter().zip(ids.iter()) {
+                ui.focusable(id);
+                let rect = ui.allocate([0.0, ROW_H]);
+                let response = ui.interact(rect, id);
+                if response.clicked {
+                    chosen = Some(index);
+                }
+
+                let is_selected = selected == Some(index);
+                let warmth = ui.animate(id, "row", if response.hovered { 1.0 } else { 0.0 });
+                let painter = ui.painter();
+                if is_selected {
+                    painter.fill_rect(rect, theme.radius.sm, theme.color.selection);
+                } else if warmth > 0.0 {
+                    painter.fill_rect(
+                        rect,
+                        theme.radius.sm,
+                        anim::fade(theme.color.surface, warmth),
+                    );
+                }
+                if response.focused {
+                    painter.stroke_rect(
+                        rect,
+                        theme.radius.sm,
+                        theme.control.ring,
+                        theme.color.ring,
+                    );
+                }
+
+                // The name on the left, the index on the right — the label/value row
+                // shape, hand-built because this one has a background behind it.
+                let (px, weight) = theme.text.body.parts();
+                let gap = theme.space.gap;
+                let y = font::centered_top(rect.y, rect.h, px);
+                let name = &objects[index].name;
+                let tag = format!("#{index}");
+                let tag_w = font::text_width(&tag, px, weight);
+                painter.text(rect.x + gap, y, name, px, weight, theme.color.foreground);
+                painter.text(
+                    rect.max_x() - tag_w - gap,
+                    y,
+                    &tag,
+                    px,
+                    weight,
+                    theme.color.muted,
+                );
+            }
+        },
+    );
     chosen
 }
 

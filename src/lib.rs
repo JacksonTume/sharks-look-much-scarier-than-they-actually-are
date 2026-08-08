@@ -8,6 +8,7 @@
 //!
 //! - [`application`] — the [`Application`] trait a consumer implements.
 //! - [`app`]     — windowing + event loop glue (winit `ApplicationHandler`).
+//! - [`config`]  — the window a consumer asks for, via [`Application::config`].
 //! - [`renderer`] — the wgpu device/surface/pipeline plumbing.
 //! - [`camera`]  — a minimal perspective camera producing a view-projection matrix.
 //! - [`input`]   — per-frame keyboard/mouse state, decoupled from winit.
@@ -26,6 +27,7 @@ pub mod app;
 pub mod application;
 pub mod camera;
 mod clipboard;
+pub mod config;
 pub mod input;
 pub mod renderer;
 pub mod time;
@@ -51,6 +53,7 @@ pub use slmsttaa_ui as ui;
 pub use app::App;
 pub use application::Application;
 pub use camera::{Camera, Ray};
+pub use config::Config;
 pub use input::{Input, Key, MouseButton};
 pub use renderer::{Instance, Material, Mesh, MeshHandle, RenderMode, Renderer, Transform, Vertex};
 pub use time::Timeline;

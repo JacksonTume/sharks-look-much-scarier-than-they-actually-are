@@ -71,9 +71,9 @@ Each names the screen that would pull it into existence.
 >
 > So the grid is content, by the same argument this file already applies to cell
 > renderers and charts, and the "keystone" framing below overstates what the
-> toolkit owes. What it does owe is the gutter fix directly beneath this entry.
-> Sorting and selection remain unbuilt, and look consumer-shaped for the same
-> reason.
+> toolkit owes. What it did owe is the gutter fix directly beneath this entry,
+> and that has since shipped. Sorting and selection remain unbuilt, and look
+> consumer-shaped for the same reason.
 
 Nothing in the current roadmap approaches this, and it is the single
 highest-value widget for a data-dense consumer. Not a styled grid of labels: a
@@ -108,6 +108,22 @@ does. But **every consumer that writes a table will rediscover it**, which is th
 usual sign that the toolkit should own it — either a scroll area that can report
 its own gutter, or a way to lay a header out in the same region as the body.
 
+> **Done, as the second of the two options.** [UI Slice
+> 8](ROADMAP.md#slice-8--a-header-that-lines-up-with-its-body--done) added
+> `scroll_area_headed`, which lays a header out at the body's width from a
+> single measurement handed to both. The first option — reporting the gutter —
+> was deliberately **declined**: it is the smaller change, and it would leave a
+> consumer subtracting the number by hand, which is the thing that goes wrong.
+> The gutter is still private. That is this file's own unprivileged-widget
+> argument pointed at a *number* rather than a widget, and it is the fourth time
+> the answer has been "the toolkit owns the arithmetic, the consumer never
+> learns it exists".
+>
+> One thing came out of it that this entry did not anticipate: the wheel had to
+> learn to cover the header too, because a sticky header is part of the same
+> scrollable thing to a reader. The first test written for the feature failed on
+> exactly that.
+
 ### `columns` is not a grid primitive, and that is worth saying out loud
 
 Not a defect — `columns` is documented as the button-row primitive and does that
@@ -121,6 +137,12 @@ The consumer hit this twice — once building the rankings table, and again on a
 bout screen's stat comparison, where equal thirds put each number some 300 points
 from its own label. Worth one line in the docs so the next author does not spend
 the same afternoon.
+
+> **Done**, and it came to rather more than one line — `columns` now names both
+> properties under a heading of their own, and points at building the row from
+> `allocate` / `interact` / `painter` instead. Shipped alongside the gutter fix
+> in [UI Slice 8](ROADMAP.md#slice-8--a-header-that-lines-up-with-its-body--done),
+> because they are the same afternoon.
 
 ### Virtualization
 
@@ -321,9 +343,24 @@ on the rest of this file:
 Two more the same consumer has now hit, both small and both squarely the
 engine's:
 
-- **A consumer cannot name its own window.** `run(app)` takes no configuration,
-  so a shipped game's window says "SLMSTTAA". Trivial, and it will be noticed by
-  every player of anything built on this.
+- ~~**A consumer cannot name its own window.**~~ **Done, as [engine Slice
+  20](../ROADMAP.md#slice-20--a-consumers-own-window--done).** `run(app)` still
+  takes no configuration; the answer went on the trait instead, as a defaulted
+  `Application::config()` returning a `Config` — the same inversion
+  `quit_on_escape` already used, and a consumer that doesn't care writes
+  nothing. It carries the initial size and three window flags as well as the
+  title, of which only the title had this consumer behind it; the rest are
+  labeled speculative in `Config`'s own docs rather than filed as
+  infrastructure.
+  
+  This entry called it trivial, and **it was trivial on native and not on the
+  web** — which is the one thing worth keeping. winit puts a web window's title
+  on the canvas's `alt` attribute rather than in `document.title`, so the first
+  version of this shipped a config field that named a title bar and left the
+  *tab* saying whatever the page's HTML said. That is the same complaint this
+  entry filed, surviving its own fix. `title` is now `Option<String>` and the
+  engine sets `document.title` itself, but only when a consumer actually asked —
+  writing the default there would have overwritten every page's own caption.
 - **A per-frame failure is logged every frame.** A surface that fails validation
   logs one line per attempt: the consumer's first run of its table screen
   produced **170,897 lines and 512 KiB in about eighteen minutes** and never
@@ -415,3 +452,25 @@ planning in this file.
 > list without the toolkit growing a list. That is the third time the
 > unprivileged-widget rule has answered a question this file expected to cost a
 > widget.
+
+> **The gutter fix has since landed too**, along with the `columns` note and the
+> window title — the three small, already-demanded items, taken together as [UI
+> Slice 8](ROADMAP.md#slice-8--a-header-that-lines-up-with-its-body--done) and
+> [engine Slice 20](../ROADMAP.md#slice-20--a-consumers-own-window--done). Two
+> things about how they went are worth keeping:
+>
+> - **The gutter was answered by taking a number away, not by adding one.** The
+>   obvious fix was to publish `scrollbar_w + gap`; what shipped keeps it
+>   private and moves the arithmetic into the toolkit. A public number a
+>   consumer must remember to subtract is not a fix, it is the same bug with
+>   documentation.
+> - **Slice 8 is the first thing this file has pulled directly**, and it exposed
+>   a weakness in doing so. The roadblock was found in a consumer this project
+>   cannot run, so the demo was written *after* the fix, to check it rather than
+>   to discover the need. That is the reverse of the usual order and it produced
+>   a smaller, more dutiful demo. A wishlist entry can say what to build; it
+>   still cannot supply the thing a demo supplies, which is the surprise.
+>
+> What remains is **virtualization**, the **painter additions** for charts, table
+> **sorting and selection**, **reactive repaint**, and the engine's
+> **per-frame surface log**. Nothing on that list has a driver.

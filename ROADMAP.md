@@ -115,6 +115,25 @@ no screenshot tool until something installs them.
 looking: it photographs what the engine draws, and a picture nobody looks at
 proves only that the pixels did not change.
 
+**It is Linux-only, and it now says so.** The harness owns an `Xvfb` display and
+drives it with ImageMagick's `import` and `xdotool`, none of which exist on a
+bare Windows or macOS box. Two things made that land badly, both fixed while
+verifying Slice 20 from a Windows workstation:
+
+- The example path was built without `std::env::consts::EXE_SUFFIX`, so on
+  Windows it looked for `examples/terrain` on a machine that had just finished
+  building `terrain.exe` and reported a missing binary that was sitting right
+  there. A platform bug that only the harness's *own* portability depended on,
+  which is why nothing caught it.
+- The prerequisite check happened three steps in, after a full build. It now
+  runs **before** the build and names every missing tool at once, rather than
+  spending minutes compiling to arrive at `could not run Xvfb`.
+
+Neither changes what the harness does where it works. They are worth the entry
+because a verification tool that fails confusingly is worse than one that is
+merely unavailable: the first time this was hit, the error read as a build
+problem rather than as "wrong operating system".
+
 ### What it does
 
 ```sh
@@ -1703,6 +1722,91 @@ The engine's answer to both is the same answer terrain got: you compute it, we
 draw it. What we owe such a consumer is the list above — transforms, lighting,
 materials, primitives, a time model — and nothing that knows what the objects
 *mean*.
+
+## Slice 20 — a consumer's own window ✅ done
+
+*Roadblock:* the smallest one yet, and the first taken directly from a shipping
+consumer rather than from a demo. [UI `WISHLIST.md` §
+Engine-side](slmsttaa-ui/WISHLIST.md#engine-side-not-this-crate) records it in one
+line: **`run(app)` takes no configuration, so a shipped game's window says
+"SLMSTTAA".** Trivial, and noticed by every player of anything built on this.
+
+- `Config` — title, initial size, and three window flags.
+- A defaulted `Application::config()` the engine reads once, before the window
+  exists.
+- `app::resumed` stops hard-coding a title and a size.
+
+*Proof:* four tests in `src/config.rs`, one of which pins `Config::default()` to
+the exact string and numbers `app::resumed` used to carry — so this slice cannot
+silently move an existing consumer's window. Native and wasm both build.
+
+**What shipped, and what it cost:**
+
+- **It went on the trait, not on `run`.** `Application` already had a defaulted
+  `quit_on_escape()`, so the convention existed and a second `run_with` entry
+  point would have been two functions doing one job. The engine asks
+  `dyn Application` and a consumer it has never heard of answers — the same
+  inversion everything else here uses.
+- **The default is the old hard-coded values, exactly.** Adopting this changes
+  nothing until a field is set, which is why no existing example was touched.
+- **Three of the five fields are speculative, and are labeled as such.** Only
+  `title` had a consumer behind it; `size` came along because it was hard-coded
+  on the adjacent line; `resizable` / `decorations` / `maximized` were added
+  because introducing a struct is the cheapest moment to add fields. That is the
+  stopping rule bent rather than followed, so it is written down in `Config`'s
+  own rustdoc rather than filed as infrastructure.
+- **`title` is `Option<String>`, and the `None` is the interesting part.**
+  Natively `None` and `Some("SLMSTTAA")` are the same window. On the web they
+  are not: the engine writes `document.title` only for `Some`, so a page keeps
+  the `<title>` its own HTML gave it unless a consumer actually asked to be
+  renamed. Writing the default there instead would have replaced
+  `web/index.html`'s caption with a blander engine string on every demo — the
+  fix making the thing it fixed worse. A test pins the two apart.
+- **Naming the tab is the engine's three lines, not winit's.** winit's web
+  backend puts `with_title` on the canvas's `alt` attribute — accessibility
+  text, not a caption — so `Config::title` would have been silently inert for
+  the one thing anyone expects it to do. `size` is ignored there twice over
+  (winit drops `with_inner_size` on the web, and the canvas is viewport-sized),
+  and the three flags describe a decoration a page does not have.
+
+**What verifying it exposed — two things, neither of them this slice's fault.**
+
+- **A consumer cannot quit on the web; it can only crash.** `request_exit` sets a
+  flag, the loop calls `event_loop.exit()`, and on wasm winit unwinds by
+  *throwing* the sentinel exception documented under
+  [ARCHITECTURE § Gotchas](ARCHITECTURE.md). `web/index.html` catches that
+  exception around `init()` — but this throw happens inside an animation-frame
+  callback, which that catch does not cover, so it surfaces as an uncaught error.
+  This predates the slice by a long way: every demo with the default
+  `quit_on_escape` has behaved this way on the web since exit existed, and
+  `editor.rs` only makes it visible because it rebinds quit to `Q`. The real
+  question underneath is what "quit" should *mean* in a tab, where nothing can
+  close the page — most likely a no-op with a logged warning rather than an
+  unwind. Recorded rather than fixed, because it is a behaviour decision and not
+  a bug in this slice.
+- **A plausible platform claim in `Config`'s own docs was wrong, and it was
+  hiding half a feature.** The docs said the title "crossed over" to the web.
+  Checked against winit 0.30's source rather than assumed: its web backend sets
+  the canvas's `alt` attribute, not `document.title`. So the slice as first
+  written left the wishlist item **half solved** — a shipped game's *tab* still
+  said whatever `index.html` said, which is the exact complaint the item was
+  filed about. It was caught because the tab was looked at, the title on it was
+  correct, and the correctness turned out to be a coincidence: it came from a
+  static `<title>` in `web/index.html`, and the demo being served had no
+  override to observe in the first place. **A verification that cannot fail is
+  not a verification** — this one passed by construction and would have
+  certified nothing. The fix is above; the general lesson is to check what the
+  observed value is actually produced *by*.
+
+**No bundled example overrides its title, and that is a constraint rather than an
+oversight.** `cargo xtask shoot` finds the window with `import -window SLMSTTAA`
+(`xtask/src/main.rs`), an exact-name match — so renaming any demo's window breaks
+the capture harness. Making the harness resolve the window by id through
+`xdotool` first would remove the coupling and is worth doing; it was not done here
+because it cannot be exercised from a Windows workstation, and changing
+verification infrastructure you cannot run is how you find out later. The feature
+is proven by the trait and its tests; the demos are still called SLMSTTAA because
+they *are* SLMSTTAA.
 
 ## The UI split (post-Slice 6)
 
