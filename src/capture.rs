@@ -46,16 +46,33 @@
 //! `Application::update` and `Input::end_frame`, and calls only
 //! `Renderer::render`. Three consequences, all load-bearing:
 //!
-//! - The window **keeps presenting the same picture**, so an external grab
-//!   (`import`) has something to photograph. A blocking read here instead would
-//!   stop the event loop and, with no compositor, the framebuffer contents would
-//!   be whatever the X server last had.
+//! - The window **keeps presenting the same picture**, so an external grab has
+//!   something to photograph. A blocking read here instead would stop the event
+//!   loop and, with no compositor, the framebuffer contents would be whatever the
+//!   window system last had.
 //! - `begin_frame` is what clears the overlay, so the UI's vertices survive the
 //!   freeze rather than the panels vanishing from the screenshot.
 //! - `Input::end_frame` is what clears press edges — so a click delivered *while
 //!   frozen* still has its edge set when the next real frame runs. The freeze is
 //!   an input window for free, which is what lets a harness click a specific
 //!   thing on a specific frame.
+//!
+//! On resume the harness's own pointer *motion* is thrown away
+//! ([`Input::discard_motion`](crate::Input)), because warping the cursor across
+//! the screen would otherwise arrive as one enormous delta and spin any camera
+//! that orbits by it. Press edges and the **wheel** deliberately survive that:
+//! both are input a script asked for rather than a side effect of aiming.
+//!
+//! # The one thing a script author has to know
+//!
+//! A frozen frame runs no `update`, so **anything a consumer derives from the
+//! previous frame's update is stale for as long as it is parked**. The sharp
+//! case is a demo that asks the UI whether the pointer is over a panel — that
+//! answer is a frame old by design (see `examples/editor.rs`'s `ui_pointer`), and
+//! while frozen it is older still. Move the pointer on an *earlier* frame than
+//! you click or scroll with it, so a real update runs in between. Getting this
+//! wrong looks exactly like the feature being broken: the first script written
+//! against a scroll area sent its wheel to the camera instead.
 
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 

@@ -178,13 +178,19 @@ slmsttaa-ui/          The UI toolkit, as its own zero-dependency workspace membe
                       against RecordingPainter. No GPU, no window, no async.
 
 xtask/                Dev tooling (a separate workspace member, no deps). `cargo
-└── src/main.rs       xtask serve [example]` builds the example natively and for
-                      wasm, runs wasm-bindgen into web/pkg/ as app.js, and serves
-                      web/ from a built-in static server. No Python required.
-                      `cargo xtask shoot [example]` starts its own Xvfb, runs the
-                      example against it, and photographs the window at exact
-                      frame numbers — optionally clicking things in between.
-                      See ROADMAP.md, "The harness".
+├── src/main.rs       xtask serve [example]` builds the example natively and for
+│                     wasm, runs wasm-bindgen into web/pkg/ as app.js, and serves
+│                     web/ from a built-in static server. No Python required.
+│                     `cargo xtask shoot [example]` photographs the example at
+│                     exact frame numbers — optionally driving it in between.
+│                     See ROADMAP.md, "The harness".
+└── src/harness/      Where to render, how to photograph, how to poke: the only
+                      platform-specific part of `shoot`, behind one seam so the
+                      command itself has no #[cfg]. x11.rs owns an Xvfb display
+                      and shells out to import/xdotool; win32.rs talks to Win32
+                      directly (no deps), parking the window off the desktop and
+                      posting input to it rather than moving the real pointer;
+                      png.rs writes the result, uncompressed, in ~100 lines.
 ```
 
 ## Frame lifecycle

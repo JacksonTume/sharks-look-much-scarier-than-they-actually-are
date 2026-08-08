@@ -80,13 +80,13 @@ it's going and why.
 | `examples/scene.rs`      | Articulated figures from engine primitives: transforms, materials, joints. |
 | `examples/gallery.rs`    | Scene switcher: web buttons swap demos; native cycles.   |
 | `examples/grid.rs`       | Orbitable terrain grid: the input + camera seam.         |
-| `examples/editor.rs`     | Pick and move objects with the pointer: `pointer_ray` + an inspector. |
+| `examples/editor.rs`     | Pick and move objects with the pointer: `pointer_ray`, an inspector, and a scene list of thousands that only lays out the rows you can see. |
 | `examples/workspace.rs`  | Application layout: the scene as one pane beside UI panels (`set_scene_rect`). |
 | `examples/terrain.rs`    | **Capstone**: Perlin + stream-power erosion as a scrubbable time axis, contoured water, live panel. |
 | `slmsttaa-ui/src/`       | The UI toolkit crate (zero deps): `Painter`, `Theme`, widgets. |
-| `slmsttaa-ui/tests/`     | Layout, hit-testing, theming, typography + animation tests (headless recording painter). |
+| `slmsttaa-ui/tests/`     | Layout, hit-testing, theming, typography, animation + virtualized-row tests (headless recording painter). |
 | `web/index.html`         | Browser harness for the wasm build (loads `pkg/app.js`). |
-| `xtask/`                 | `cargo xtask serve`: build native + web and host it.     |
+| `xtask/`                 | `cargo xtask serve`: build native + web and host it. `shoot`: photograph a demo at exact frames, on Linux or Windows. |
 
 ## Run it (standalone)
 
@@ -137,19 +137,23 @@ across examples), and hosts `web/` from a tiny built-in static server. See
 ```sh
 cargo xtask shoot workspace                                    # one PNG at frame 120
 cargo xtask shoot terrain --frames 400 --size 1280x720
-cargo xtask shoot workspace --script capture/workspace.script  # clicks between shots
+cargo xtask shoot workspace --script capture/workspace.script  # drives it between shots
 ```
 
-`shoot` starts its own `Xvfb`, runs the example against it, and photographs the
-window at **exact frame numbers** rather than after a guessed delay. The engine
-pins its frame clock while capturing, so two runs of the same commit are
-pixel-identical and `compare -metric AE a.png b.png` is a meaningful answer — the
-point being that a screenshot becomes a regression test rather than a souvenir.
-A `--script` drives clicks and keys at chosen frames, which is how an interaction
-like picking gets verified without a person in the loop.
+`shoot` runs the example and photographs it at **exact frame numbers** rather than
+after a guessed delay. The engine pins its frame clock while capturing, so two
+runs of the same commit are pixel-identical and `compare -metric AE a.png b.png`
+is a meaningful answer — the point being that a screenshot becomes a regression
+test rather than a souvenir. A `--script` adds `move` / `click` / `wheel` / `key`
+steps at chosen frames, which is how an interaction like picking or scrolling
+gets verified without a person in the loop.
 
-Needs `Xvfb`, ImageMagick's `import`, and `xdotool`. See `ROADMAP.md`,
-"The harness".
+Runs on **Linux and Windows**, by two quite different routes: Linux renders into
+an `Xvfb` display and drives it with ImageMagick's `import` and `xdotool`;
+Windows parks the window off the desktop, asks the compositor for its contents,
+and posts input to the window rather than moving the real pointer. So on Windows
+it needs nothing installed, and a capture running in the background stays in the
+background. See `ROADMAP.md`, "The harness".
 
 ## Write your own
 
