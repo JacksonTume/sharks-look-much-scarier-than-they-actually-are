@@ -23,9 +23,17 @@
 # at, and the pair (parked, selected) is what a diff should show a cage between.
 260  shot  parked
 
-# Click the cyan sphere. If `pointer_ray` ever goes back to unprojecting through
-# the whole window instead of the scene rect, this misses it — which is exactly
-# the regression worth catching, and exactly the one no compile check can.
+# Click the prop just left of centre. If `pointer_ray` ever goes back to
+# unprojecting through the whole window instead of the scene rect, this misses it
+# — which is exactly the regression worth catching, and exactly the one no
+# compile check can.
+#
+# The check is "the cage lands on the thing you can see at these coordinates",
+# not "on a named prop". It was the cyan sphere when this was written under Xvfb;
+# run on Windows the ring parks a little further round and the same click takes
+# the pink pill (`selected #5`). Either answer proves the same thing — a shot
+# that selected *nothing* is the failure. Two runs on one platform are
+# byte-identical, which is the property that makes a diff meaningful.
 300  move  414 368
 300  click
 340  shot  selected
