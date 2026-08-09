@@ -548,6 +548,27 @@ shading terms off and back on one at a time under `cargo xtask shoot` — with a
 four off the ribbons were already clean, which said the field was fine and the
 material was not.
 
+*And under that, a third one: dashes.* With the shading honest, what was left was
+short bright stubs lying across the valley floors. `area >= river_area` is a hard
+threshold and it cuts through a crowd — 212 cells just under the line and 192 just
+over, at pass 129 — so a fan of near-identical headwater threads has a few members
+switch on at full minimum width while their neighbours stay invisible. Thirty of
+the seventy-six drawn threads ran four cells or less before merging. `RIVER_FADE`
+makes the threshold soft *in space*: at the threshold and above nothing changes, and
+below it a channel is faint rather than absent, so a thread tapers out instead of
+starting on a grid cell. Scored on how abruptly a drawn thread begins — its wetness
+minus the most it has one cell upstream — the hard rule left 63 of 76 threads
+starting above `0.5`; the fade leaves 12, for 20% more drawn cells, all of them
+faint tails. Slice 14 designed a soft threshold for the *temporal* popping case and
+correctly did not build it; this is the spatial case, and it needed it.
+
+*Three bugs, one symptom, and they were found in the wrong order.* "The water looks
+like lines" was a routing bug, a shading bug and a drawing-rule bug stacked on each
+other, and the first fix was verified against a top-down dump of the field — which
+was by then correct, and which is exactly why it looked fixed and wasn't. **The
+measurement has to be taken through the thing the complaint is about.** The field
+was the right instrument for the router and the wrong one for the other two.
+
 *Deferred out of this slice, on purpose:*
 
 - **Animating it.** The original plan for this slice was the erosion *running* on

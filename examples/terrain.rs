@@ -381,6 +381,30 @@ const RIVER_HALF_WIDTH: f32 = 0.9;
 /// without bound and read as a lake with straight sides.
 const RIVER_HALF_WIDTH_MAX: f32 = 2.4;
 
+/// Fraction of the drainage-area threshold at which a channel *starts* to show,
+/// fading to full strength as it reaches the threshold proper.
+///
+/// **A hard threshold was drawing dashes.** `area >= river_area` is a clean rule
+/// and it cuts straight through a crowd: a headless count at pass 129 puts 212
+/// cells just under the line and 192 just over it, so a fan of near-identical
+/// parallel headwater threads has a few members switch on at full minimum width
+/// while their neighbours stay invisible. Thirty of the seventy-six drawn threads
+/// ran four cells or less before merging — stubs, and they read as a comb of
+/// dashes lying across the valley floor rather than as streams.
+///
+/// Measured on how *abruptly* a drawn thread begins — its wetness minus the most
+/// it has one cell upstream, where `1.0` is a dash out of dry ground — the hard
+/// rule left 63 of those 76 threads starting at over `0.5`, mean `0.82`. At `0.4`
+/// it is 12 threads and mean `0.21`, for 20% more drawn cells (3875 → 4666), all
+/// of them faint tails. `0.3` buys two more percent of that and another 300 cells,
+/// which is where it stops being worth it.
+///
+/// Nothing about which cells carry water changes here: this is the *drawing* rule,
+/// and at the threshold and above it is exactly what it was. Below it a channel is
+/// merely faint instead of absent, so a thread tapers out where it stops carrying
+/// enough to see rather than ending on a grid cell.
+const RIVER_FADE: f32 = 0.4;
+
 /// Defaults for the two ripple knobs. Strength is a normal tilt, not a height;
 /// chop is the spatial frequency of the largest wave in world units.
 const RIPPLE_STRENGTH_DEFAULT: f32 = 0.45;
@@ -897,7 +921,9 @@ impl TerrainDemo {
     /// The water blends the same way, and that turned out to be enough on its own:
     /// only 0.2–0.6% of cells change wet/dry in a pass (rivers usually under 0.1%),
     /// so lerping depth and area retreats a lake edge smoothly instead of popping
-    /// it. A soft threshold was planned for the river network and never needed.
+    /// it. A soft threshold was planned for the river network and never needed —
+    /// *in time*. It was needed in **space**, for an unrelated reason, and
+    /// [`RIVER_FADE`] is it.
     fn resolve(&mut self, alpha: f32) {
         // At the end of the axis there is nothing ahead to blend toward.
         let t = if self.pass >= MAX_PASS {
@@ -1136,18 +1162,27 @@ impl TerrainDemo {
             // it. Splatting regardless costs nothing: the combine below is a
             // `max`, and a channel drawn across a lake that is already fully wet
             // changes not one pixel.
-            if self.water.area[c] < river_area {
+            let ratio = self.water.area[c] / river_area;
+            if ratio < RIVER_FADE {
                 continue;
             }
             let r = self.water.receiver[c];
             if r == c {
                 continue;
             }
+            // How strongly this link draws. One at the threshold and above, so a
+            // real river is untouched; fading to nothing over the approach to it,
+            // so a headwater tapers out instead of starting on a grid cell. See
+            // `RIVER_FADE`.
+            let strength = smoothstep(((ratio - RIVER_FADE) / (1.0 - RIVER_FADE)).clamp(0.0, 1.0));
             // Physically a channel widens with the square root of its discharge,
             // which is also what reads correctly: doubling the catchment should be
-            // visible but not dramatic.
-            let half = (RIVER_HALF_WIDTH * (self.water.area[c] / river_area).sqrt())
-                .clamp(RIVER_HALF_WIDTH, RIVER_HALF_WIDTH_MAX);
+            // visible but not dramatic. The floor is the narrowest ribbon the grid
+            // can carry, so below the threshold the channel stops getting *fainter*
+            // rather than thinner — a sub-cell ribbon would fall between samples and
+            // break up, which is the artifact this is here to remove.
+            let half =
+                (RIVER_HALF_WIDTH * ratio.sqrt()).clamp(RIVER_HALF_WIDTH, RIVER_HALF_WIDTH_MAX);
 
             let (ax, ay) = ((c % n) as f32, (c / n) as f32);
             let (bx, by) = ((r % n) as f32, (r / n) as f32);
@@ -1160,7 +1195,7 @@ impl TerrainDemo {
             for gy in lo_y..=hi_y {
                 for gx in lo_x..=hi_x {
                     let d = point_segment_distance(gx as f32, gy as f32, ax, ay, bx, by);
-                    let v = 1.0 - d / half;
+                    let v = strength * (1.0 - d / half);
                     if v > 0.0 {
                         let slot = &mut wet[gy * n + gx];
                         // `max`, not `+`: two links overlapping at a confluence
