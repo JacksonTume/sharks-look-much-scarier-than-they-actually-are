@@ -499,6 +499,15 @@ Two properties of that list matter more than the terms themselves:
   same waves lived in terrain's *mesh* first and cost 10 ms a frame in
   `sin_cos` over ~50,000 vertices — and they *banded*, because a normal per
   vertex interpolated across triangles far larger than a ripple draws stripes.
+  Being shading, they need a shading answer to the *other* end of the same
+  problem: **the ripple fades out where a pixel is wider than the waves in it.**
+  A normal perturbation has no mip chain, so past Nyquist it draws the aliasing
+  pattern rather than the ripples, which reads as a fixed lattice welded to the
+  surface. Invisible while the only water was rivers and ponds a few pixels
+  across; the first open ocean made it the most obvious thing on screen. The
+  fragment takes `fwidth` of its own world position and fades the perturbation
+  below two pixels a wavelength — the same reasoning as a mip level, for the same
+  reason.
   Moving them into the fragment shader made them free and made their detail
   per-pixel rather than per-tessellation. This is why the frame clock is in the
   uniform at all: without a clock in the shader, a consumer whose surface detail

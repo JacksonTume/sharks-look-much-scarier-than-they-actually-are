@@ -49,8 +49,7 @@
 //!
 //! So the batch call is gone and [`step`] is public in its place. The caller runs
 //! passes one at a time, keeps the ones it wants, and treats the sequence as what
-//! it is — a history. [`water_of`] reads the water off any state without advancing
-//! it, which is what lets a caller show a pass it did not just compute.
+//! it is — a history.
 //!
 //! ## The water
 //!
@@ -110,6 +109,19 @@ pub struct ErosionParams {
     /// which is worth doing once just to see the difference.
     pub deposition: f32,
 
+    /// Sea level, in the same normalized `[0, 1]` height units as the terrain.
+    ///
+    /// **The base level the whole model drains to.** Every cell at or below it is
+    /// ocean: it routes to itself, never incises, never takes sediment, and comes
+    /// back from [`step`] carrying `sea_level - z` of standing water. The flood
+    /// therefore grows inland from the coastline as well as from the map border,
+    /// which is what lets a river *arrive* somewhere instead of running off the
+    /// edge of the world.
+    ///
+    /// Zero restores the old behaviour exactly — no cell is ever at or below zero
+    /// once the heightmap is normalized, so the map border is again the only outlet.
+    pub sea_level: f32,
+
     /// Whether the thermal (talus relaxation) pass runs each timestep.
     pub thermal: bool,
     /// Critical slope (talus angle, rise/run) above which material slides.
@@ -125,6 +137,7 @@ impl Default for ErosionParams {
             erodibility: 0.004,
             m: 0.5,
             deposition: 0.05,
+            sea_level: 0.22,
             // Off by default: a strong thermal pass rounds the dendritic detail
             // back into blobs. It's available as a finishing touch.
             thermal: false,
@@ -171,23 +184,6 @@ impl Water {
     }
 }
 
-/// The water standing on `heights` right now, without advancing anything.
-///
-/// [`step`] hands back the water it was *driven* by, which covers a caller walking
-/// the timeline forward. This covers the one that isn't walking: showing a pass it
-/// did not just compute — a scrub backwards into a stored state, or the raw base
-/// heightmap at pass zero. Raw Perlin noise is full of depressions, and they hold
-/// just as much water for never having been eroded.
-///
-/// It is the expensive half of a pass (the Priority-Flood) and none of the cheap
-/// half, so a caller that can get its water from [`step`] should.
-pub fn water_of(heights: &[f32], n: usize) -> Water {
-    if n < 3 {
-        return Water::empty(heights.len());
-    }
-    analyze(heights, n).1
-}
-
 /// Advance `heights` by **one** timestep of flow-routed stream-power incision,
 /// siltation, and optional thermal relaxation, returning the [`Water`] that drove
 /// it. See the module docs for the model.
@@ -202,7 +198,8 @@ pub fn step(heights: &mut [f32], n: usize, params: &ErosionParams) -> Water {
     if n < 3 {
         return Water::empty(heights.len());
     }
-    let (flow, water) = analyze(heights, n);
+    let sea = params.sea_level;
+    let (flow, water) = analyze(heights, n, sea);
 
     // Implicit stream-power incision, downstream-first so each receiver is
     // already at its new height when we solve the cell above it:
@@ -227,7 +224,9 @@ pub fn step(heights: &mut [f32], n: usize, params: &ErosionParams) -> Water {
         // What still erodes is the lake's *outlet*, which is dry and drains
         // downhill like anything else — so spillways cut down over the run and
         // lakes partly drain themselves, without that being put in by hand.
-        if water.depth[c] > MIN_POND || heights[r] >= heights[c] {
+        // ...and a third: the sea. An ocean cell is base level, not a landscape
+        // being carved, so it is left exactly where it is.
+        if heights[c] <= sea || water.depth[c] > MIN_POND || heights[r] >= heights[c] {
             continue;
         }
         let f = params.erodibility * water.area[c].powf(params.m) / flow.dist[c];
@@ -240,10 +239,14 @@ pub fn step(heights: &mut [f32], n: usize, params: &ErosionParams) -> Water {
     // lake loses a fraction of its depth to sediment each pass. Lakes shrink from
     // the shallows inward, spill, and hand their basin to the drainage network.
     // See [`ErosionParams::deposition`] for why this term is load-bearing.
+    // The sea is exempt, and that exemption is load-bearing rather than a detail:
+    // the ocean is by far the deepest standing water on the map, so silting it at
+    // the same rate as a pond would fill the whole basin in a couple of dozen
+    // passes and hand back the square of drained rock this was meant to replace.
     let fill = params.deposition.clamp(0.0, 1.0);
     if fill > 0.0 {
         for (h, &d) in heights.iter_mut().zip(&water.depth) {
-            if d > MIN_POND {
+            if d > MIN_POND && *h > sea {
                 *h += fill * d;
             }
         }
@@ -258,8 +261,8 @@ pub fn step(heights: &mut [f32], n: usize, params: &ErosionParams) -> Water {
 
 /// The shared first half of a pass: route the flow, accumulate drainage area, and
 /// read the standing water off the filled surface.
-fn analyze(z: &[f32], n: usize) -> (Flow, Water) {
-    let mut flow = flow_route(z, n);
+fn analyze(z: &[f32], n: usize, sea: f32) -> (Flow, Water) {
+    let mut flow = flow_route(z, n, sea);
     // The receiver tree moves into the `Water`, which is what gets handed to the
     // caller: it is as much a description of where the water *is* as the depths
     // are, and the renderer needs it to draw a river as a channel rather than as
@@ -278,11 +281,18 @@ fn analyze(z: &[f32], n: usize) -> (Flow, Water) {
 
     // How far the flood had to lift each cell to drain it — zero almost
     // everywhere, and a lake wherever it isn't.
+    //
+    // The sea joins in through the same expression rather than beside it. An ocean
+    // cell was seeded as its own outlet so the flood never raised it, leaving
+    // `filled == z` and a depth of zero; taking the max against the sea level gives
+    // it the water it is actually under. One field then describes a puddle, a lake
+    // and an ocean, and everything downstream — the wetness field, the surface
+    // mesh, the absorption, the minimap — draws all three without knowing which.
     let depth = flow
         .filled
         .iter()
         .zip(z)
-        .map(|(f, h)| (f - h).max(0.0))
+        .map(|(f, h)| (f.max(sea) - h).max(0.0))
         .collect();
 
     (
@@ -420,24 +430,25 @@ const D8: [(isize, isize, f32); 8] = [
 /// the long parallel diagonal lines across every drained basin. Filling honestly
 /// leaves the depression exactly level and hands the direction problem to
 /// [`resolve_flats`], which is where it belongs.
-fn fill_depressions(z: &[f32], n: usize) -> Vec<f32> {
+fn fill_depressions(z: &[f32], n: usize, sea: f32) -> Vec<f32> {
     let count = n * n;
     let mut filled = vec![0.0f32; count];
     let mut visited = vec![false; count];
     let mut heap = BinaryHeap::with_capacity(4 * n);
 
-    // Seed every boundary cell at its own height: the grid drains off its edges.
-    for y in 0..n {
-        for x in 0..n {
-            if x == 0 || y == 0 || x == n - 1 || y == n - 1 {
-                let c = y * n + x;
-                filled[c] = z[c];
-                visited[c] = true;
-                heap.push(HeapNode {
-                    elev: z[c],
-                    idx: c as u32,
-                });
-            }
+    // Seed every cell that is already at base level, at its own height. That is
+    // the map border, which drains off the edge, **and every cell under the sea**
+    // — so the flood grows inland from the coastline too, and an inland basin
+    // spills toward the nearest shore rather than toward the border.
+    for c in 0..count {
+        let (x, y) = (c % n, c / n);
+        if x == 0 || y == 0 || x == n - 1 || y == n - 1 || z[c] <= sea {
+            filled[c] = z[c];
+            visited[c] = true;
+            heap.push(HeapNode {
+                elev: z[c],
+                idx: c as u32,
+            });
         }
     }
 
@@ -477,17 +488,21 @@ fn neighbors(c: usize, n: usize) -> impl Iterator<Item = (usize, f32)> {
 /// ordinary D8 answer. Everywhere else is *level* — the interior of a filled
 /// depression — and has no steepest anything; [`resolve_flats`] gives those a
 /// direction. [`downstream_order`] then walks the resulting forest.
-fn flow_route(z: &[f32], n: usize) -> Flow {
+fn flow_route(z: &[f32], n: usize, sea: f32) -> Flow {
     let count = n * n;
-    let filled = fill_depressions(z, n);
+    let filled = fill_depressions(z, n, sea);
     let mut receiver = vec![usize::MAX; count];
     let mut dist = vec![1.0f32; count];
 
     for y in 0..n {
         for x in 0..n {
             let c = y * n + x;
-            // The boundary is base level: it drains off the map, to itself.
-            if x == 0 || y == 0 || x == n - 1 || y == n - 1 {
+            // Base level drains to itself: the map border, and the sea. Routing
+            // *within* the ocean would be meaningless — it is one flat body of
+            // water, not a surface flow converges over — and leaving it out keeps
+            // the drainage area of a river the size of its catchment on land
+            // rather than the size of the sea it empties into.
+            if x == 0 || y == 0 || x == n - 1 || y == n - 1 || z[c] <= sea {
                 receiver[c] = c;
                 continue;
             }

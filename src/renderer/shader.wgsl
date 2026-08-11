@@ -294,13 +294,32 @@ fn trace_reflection(origin: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
 // The shading normal: the geometric one, plus animated ripples if asked for.
 fn shading_normal(in: VertexOutput) -> vec3<f32> {
     var normal = normalize(in.world_normal);
+
+    // How much ground one pixel covers here, in world units. Taken **outside the
+    // branch below**, because a derivative has to be evaluated in uniform control
+    // flow and that branch is per-instance.
+    let footprint = max(fwidth(in.world_position.x), fwidth(in.world_position.z));
+
     let ripple_strength = in.shading.w;
     if (ripple_strength > 0.0) {
+        // Fade the ripples out where a pixel is wider than the waves it is being
+        // asked to show. Below two pixels a wavelength there is no wave left to
+        // resolve, and perturbing the normal anyway does not read as water at a
+        // distance — it reads as a fixed lattice laid over the surface, because
+        // what is actually being drawn is the aliasing pattern rather than the
+        // ripples. That stayed invisible while the only water was rivers and ponds
+        // a few pixels across; the first open ocean made it the most obvious thing
+        // on the screen. Nyquist, in other words, applied to a normal instead of a
+        // texture — and the same reasoning as a mip level, for the same reason.
+        let wavelength = 1.0 / max(in.ripple_scale, 1e-3);
+        let resolvable = wavelength / max(2.0 * footprint, 1e-6);
+        let fade = smoothstep(1.0, 2.5, resolvable);
+        let strength = ripple_strength * fade;
         let slope = ripple_slope(in.world_position.xz, camera.frame.x, in.ripple_scale);
         // The perturbation is a horizontal tilt of an up-facing surface, which is
         // what a ripple on water is. Adding rather than replacing keeps whatever
         // the geometry itself was doing.
-        normal = normalize(normal + vec3<f32>(-slope.x, 0.0, -slope.y) * ripple_strength);
+        normal = normalize(normal + vec3<f32>(-slope.x, 0.0, -slope.y) * strength);
     }
     return normal;
 }

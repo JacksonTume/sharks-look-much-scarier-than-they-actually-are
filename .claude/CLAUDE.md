@@ -31,7 +31,10 @@ UI-shaped — and see the placement rule under *Conventions*.
 
 ```sh
 # Native
-cargo run --example terrain            # the capstone: layered Perlin + stream-power erosion
+cargo run --example terrain            # the capstone: a continent baked out of layered
+                                       # Perlin + stream-power erosion, with a sea for
+                                       # its rivers to reach. 32²–2048² (Grid > detail);
+                                       # a 2048² bake is 4.2M cells and takes minutes.
 cargo run --example workspace          # the scene inset in a UI pane (set_scene_rect)
 cargo run --example editor             # click/drag to pick and move objects (pointer_ray);
                                        # "+1000" grows the scene list to where a

@@ -28,6 +28,21 @@ pub struct NoiseParams {
     /// sharpens peaks (a cheap way to get plains + mountains rather than uniform
     /// bumpiness); `1.0` leaves the noise untouched.
     pub ridge: f32,
+
+    /// How far out the land holds its height before falling away to the sea, as a
+    /// fraction of the distance from the centre to the edge of the map.
+    ///
+    /// This is what turns a square of noise into a **continent**. Without it the
+    /// landmass runs to all four edges and the map border is the only base level,
+    /// so every river ends by falling off the world. With it the rim is pulled
+    /// down under [`ErosionParams::sea_level`], the coastline lands where the
+    /// eroded terrain happens to cross that level — ragged, because the noise is
+    /// still there where the falloff is partial — and rivers reach an actual sea.
+    ///
+    /// Measured from the centre in units where `1.0` is the middle of an edge, so
+    /// the corners (at `√2`) drown first and the landmass reads as round rather
+    /// than as a square with soft edges. `1.0` disables it.
+    pub coast: f32,
 }
 
 impl Default for NoiseParams {
@@ -39,6 +54,7 @@ impl Default for NoiseParams {
             lacunarity: 2.0,
             persistence: 0.5,
             ridge: 1.4,
+            coast: 0.45,
         }
     }
 }
@@ -55,17 +71,41 @@ pub struct Heightmap {
 
 impl Heightmap {
     /// Generate an `n × n` heightmap by sampling fractal Perlin noise across the
-    /// unit square, then normalizing the result to `[0, 1]`.
-    pub fn generate(n: usize, params: &NoiseParams) -> Self {
+    /// map, then normalizing the result to `[0, 1]` and cutting a coastline into
+    /// it.
+    ///
+    /// `span` is **how many reference map-widths across this map is**, and a bigger
+    /// map answers it by widening the *spectrum* rather than by tiling more of the
+    /// same noise.
+    ///
+    /// The obvious reading — sample `span` times as much noise, so a hill keeps its
+    /// size and the map holds more of them — was built first and was wrong on
+    /// screen. Sixteen times the land came out as sixteen times as many hills of
+    /// exactly the same size, with nothing larger than a hill anywhere on it: from
+    /// the one view that can see the whole map it read as fur. A continent is not a
+    /// lot of hills, it is *structure at every scale* — belts and basins spanning
+    /// the whole landmass, ranges inside those, hills inside those.
+    ///
+    /// So the lowest octave always spans the map, whatever the map is, and growing
+    /// it adds octaves at the **fine** end: two per doubling of `span`, which is
+    /// what keeps the smallest landform the same handful of cells across that it is
+    /// at the reference size. The result is self-similar — a 2048² continent has
+    /// the same texture as the 128² one, with four times the range of feature sizes
+    /// between its biggest and smallest — and `span == 1.0` reproduces the original
+    /// map exactly.
+    pub fn generate(n: usize, span: f32, params: &NoiseParams) -> Self {
         let mut heights = vec![0.0f32; n * n];
         let inv = 1.0 / n as f32;
+        // Two octaves per doubling: one to cover the ground the map gained, one to
+        // spend the cells it gained on detail finer than it could hold before.
+        let extra = (2.0 * span.max(1.0).log2()).round() as u32;
 
         let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
         for y in 0..n {
             for x in 0..n {
                 let fx = x as f32 * inv;
                 let fy = y as f32 * inv;
-                let h = fbm(fx, fy, params);
+                let h = fbm(fx, fy, params, extra);
                 heights[y * n + x] = h;
                 lo = lo.min(h);
                 hi = hi.max(h);
@@ -80,6 +120,21 @@ impl Heightmap {
             *h = t.powf(params.ridge.max(0.05));
         }
 
+        // Drown the rim: scale the land toward zero as it approaches the edge, so
+        // what is left is a continent with a sea around it. See `NoiseParams::coast`.
+        let inner = params.coast.clamp(0.0, 0.999);
+        if inner < 1.0 {
+            let mid = (n as f32 - 1.0).max(1.0) / 2.0;
+            for y in 0..n {
+                for x in 0..n {
+                    let (nx, ny) = ((x as f32 - mid) / mid, (y as f32 - mid) / mid);
+                    let r = (nx * nx + ny * ny).sqrt();
+                    let t = ((r - inner) / (1.0 - inner)).clamp(0.0, 1.0);
+                    heights[y * n + x] *= 1.0 - fade(t);
+                }
+            }
+        }
+
         Self { n, heights }
     }
 }
@@ -88,11 +143,14 @@ impl Heightmap {
 
 /// Fractional Brownian motion: octaves of Perlin noise at rising frequency and
 /// falling amplitude, summed. Returns roughly `[-1, 1]` before normalization.
-fn fbm(x: f32, y: f32, p: &NoiseParams) -> f32 {
+///
+/// `extra` octaves are appended past the ones the caller asked for — the finer
+/// detail a bigger map has the cells to carry. See [`Heightmap::generate`].
+fn fbm(x: f32, y: f32, p: &NoiseParams, extra: u32) -> f32 {
     let mut sum = 0.0;
     let mut amp = 1.0;
     let mut freq = p.frequency.max(0.01);
-    for o in 0..p.octaves.max(1) {
+    for o in 0..p.octaves.max(1) + extra {
         sum += amp
             * perlin(
                 x * freq,

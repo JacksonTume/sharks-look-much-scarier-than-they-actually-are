@@ -15,19 +15,40 @@
 //! discarded at the end of each pass. Now they come back out of the erosion and
 //! get drawn, translucent, on a second mesh.
 //!
-//! ## Erosion is a time axis you can scrub
+//! ## A continent, baked once
 //!
-//! The demo does not compute *an* eroded landscape any more — it walks a timeline
-//! and draws where it is standing. One erosion pass is one fixed simulation step
-//! ([`Application::fixed_update`]), so the whole run plays, pauses, single-steps,
-//! and **rewinds**, and what you watch is a flooded landscape draining into a
-//! river network over about fourteen seconds.
+//! The demo does not compute *an* eroded landscape — it runs the erosion in front
+//! of you and stops when the landscape is mature. One erosion pass is one fixed
+//! simulation step ([`Application::fixed_update`]), so the run plays, pauses and
+//! single-steps, and what you watch is a raw fractal island turning into a
+//! continent with a drainage network on it.
 //!
-//! Rewinding is the part that needed a decision. Erosion has no inverse — you
-//! cannot un-cut a valley — so the landscape at every pass is simply *kept*
-//! ([`TerrainDemo::history`]). Recomputing instead was measured and rejected: it
-//! costs 2.7 s in a debug build, which is the build this demo is usually run
-//! under, and every drag of the slider would have been a freeze.
+//! **There is a sea, and it is what makes the water go anywhere.** Every cell at
+//! or below [`ErosionParams::sea_level`] is base level: the flood grows inland
+//! from the coastline as well as from the map border, so a river ends by reaching
+//! an ocean rather than by falling off the edge of the world. The landmass itself
+//! is cut by [`NoiseParams::coast`], which drowns the rim; what is left is an
+//! island with bays, headlands and offshore rocks, and lakes inland that silt up
+//! and drain over the run while the sea does not.
+//!
+//! **The rewind is gone, and that was the trade that bought the size.** This demo
+//! used to keep the landscape at *every* pass so the scrub slider could run
+//! backwards by array index. That is `4·n²` bytes a pass: 9.6 MB at the old 128²
+//! default and **2.4 GB** at 2048², which is simply not a thing a demo can
+//! allocate. Erosion has no inverse, so a rewind is either stored or impossible —
+//! and a map sixteen times the size turned out to be worth more than a slider that
+//! ran backwards. What is left keeps one pass ahead ([`TerrainDemo::ahead`]) and
+//! nothing else.
+//!
+//! ## Size is a control, and everything scales off it
+//!
+//! [`RESOLUTIONS`] runs from 32² to 2048² in octaves, and [`span`] is the one
+//! number the rest is quoted against: the world's extent and vertical scale, the
+//! number of noise octaves, the river drawing threshold and width, the camera's
+//! orbit distance, and the length of the run. A 128² map is exactly the map this
+//! demo has always had; every larger one holds proportionally more land *and*
+//! more cells per unit of ground, and looks like the same landscape seen from
+//! further away rather than a different one.
 //!
 //! This is the payoff demo for the project's thesis: *a developer writes their
 //! algorithm and a few engine calls, and never touches `wgpu`/`winit`.*
@@ -39,16 +60,15 @@
 //! - lets us drive the orbit camera ([`Renderer::camera_mut`] + [`Renderer::input`]),
 //! - draws our parameter panel and HUD ([`Renderer::ui`]),
 //! - hands us a frame delta ([`Renderer::dt`]) for the FPS readout, and
-//! - paces the simulation ([`Renderer::time`]) — a fixed step, a pause, and the
-//!   sub-step fraction the two stored passes are blended by.
+//! - paces the simulation ([`Renderer::time`]) — a fixed step and a pause.
 //!
 //! Controls: **drag the left mouse button** over the 3D view to orbit, **scroll**
-//! to zoom, arrow keys also orbit. The panel's *Time* section plays, pauses,
-//! single-steps and scrubs the erosion; dragging *pass* backwards is a real
-//! rewind. Everything below it edits the process rather than the position, and
-//! changing any of it rebuilds the axis from the base once the drag ends. The
-//! pass number doubles as a wetness reading — lakes silt up as the landscape
-//! matures, so early passes have lakes and late ones only rivers. Toggle
+//! to zoom, arrow keys also orbit. The panel's *Bake* section plays, pauses and
+//! single-steps the erosion, reports how far along it is, and starts it again.
+//! Everything below it edits the process rather than the position, and changing
+//! any of it re-bakes from the base once the drag ends. The pass number doubles as
+//! a wetness reading — inland lakes silt up as the landscape matures, so early
+//! passes have lakes and late ones only rivers and the sea. Toggle
 //! **wireframe** to inspect the underlying grid, **click a section heading** to
 //! collapse it, and **reset all** at the bottom of the panel throws every
 //! parameter back to its default.
@@ -196,6 +216,32 @@ fn log_slider(ui: &mut Ui, label: &str, value: &mut f32, min: f32, max: f32) -> 
     response
 }
 
+/// A bare progress bar, `0..=1`, drawn from the same tokens the built-in slider
+/// uses.
+///
+/// Demo-side rather than a toolkit widget, for the reason the conventions file
+/// gives: nothing in `slmsttaa-ui` needed it, and a widget with no roadblock
+/// behind it is polish. It is the slider's track with the knob left off, which is
+/// exactly what "reports but does not steer" should look like.
+fn progress_bar(ui: &mut Ui, t: f32) {
+    let theme = *ui.theme();
+    let track_h = theme.control.track_h;
+    let row = ui.allocate([0.0, track_h + 6.0]);
+    let y = row.y + (row.h - track_h) * 0.5;
+    let cap = track_h * 0.5;
+    let painter = ui.painter();
+    painter.fill_rect(
+        Rect::new(row.x, y, row.w, track_h),
+        cap,
+        theme.color.surface,
+    );
+    painter.fill_rect(
+        Rect::new(row.x, y, row.w * t.clamp(0.0, 1.0), track_h),
+        cap,
+        theme.color.accent,
+    );
+}
+
 /// A plot of one or more series against the erosion time axis, written *here*
 /// rather than in the toolkit — a chart is content, and content belongs in the
 /// consumer.
@@ -327,10 +373,45 @@ fn plot(
     }
 }
 
-/// Half-extent of the rendered terrain in world units (spans `[-HALF, HALF]`).
-const HALF: f32 = 2.5;
-/// Vertical scale: normalized `[0, 1]` heights map into `[0, VHEIGHT]` world units.
-const VHEIGHT: f32 = 1.3;
+/// The grid the demo's world scale is quoted against. A `RES_REFERENCE²` map is
+/// exactly the map this demo had before it grew: same extent, same feature size,
+/// same timeline length.
+const RES_REFERENCE: usize = 128;
+
+/// How many reference map-widths across an `n`-cell map is.
+///
+/// **The one number the whole scaling story hangs off.** Cells go up as `n²` and
+/// the world goes up as `span²`, so `span = √(n / RES_REFERENCE)` splits the
+/// growth evenly between the two: at 2048² the map holds sixteen times the land
+/// *and* four times the cells per unit of ground. More world and more detail,
+/// rather than either one alone.
+///
+/// Everything that has to hold still as the map grows is quoted in terms of this:
+/// the noise frequency (so a hill stays a hill), the vertical scale (so the
+/// relief stays proportionate rather than flattening into a pancake), the river
+/// drawing threshold and width (both measured in *cells*, and a river of a given
+/// real size covers `span²` of them), and the length of the erosion run.
+fn span(n: usize) -> f32 {
+    (n as f32 / RES_REFERENCE as f32).sqrt()
+}
+
+/// Half-extent of the *reference* map in world units.
+const HALF_BASE: f32 = 2.5;
+/// Vertical scale of the reference map: normalized `[0, 1]` heights map into
+/// `[0, VHEIGHT_BASE]` world units.
+const VHEIGHT_BASE: f32 = 1.3;
+
+/// Half-extent of an `n`-cell map in world units (it spans `[-half, half]`).
+fn half(n: usize) -> f32 {
+    HALF_BASE * span(n)
+}
+
+/// Vertical scale of an `n`-cell map. Grows with the map so a mountain keeps its
+/// proportions — hold it fixed and a sixteen-times-wider continent reads as a
+/// tidal flat.
+fn vheight(n: usize) -> f32 {
+    VHEIGHT_BASE * span(n)
+}
 
 /// Map a normalized height to world units.
 ///
@@ -343,8 +424,8 @@ const VHEIGHT: f32 = 1.3;
 /// eroded terrain quietly cancels out the fact that erosion *lowered* it.
 ///
 /// The base heightmap arrives normalized to `[0, 1]`, so nothing needs fitting.
-fn disp(h: f32) -> f32 {
-    h.clamp(0.0, 1.0) * VHEIGHT
+fn disp(h: f32, vheight: f32) -> f32 {
+    h.clamp(0.0, 1.0) * vheight
 }
 
 /// How far the water surface floats above the terrain it covers, in world units.
@@ -443,26 +524,45 @@ const WATER_ABSORPTION: f32 = 5.5;
 /// the sky. Full strength: where the trace finds a bank, that is what a mirror
 /// would show, and where it does not it has already faded back to sky on its own.
 const WATER_REFLECTION: f32 = 1.0;
-/// The last pass on the time axis — where the scrub slider tops out, and where
-/// the simulation stops advancing.
+/// How long the bake runs **at the reference grid**; [`max_pass`] scales it.
 ///
 /// **Measured, not guessed.** A headless probe over 150 passes at 128² says the
 /// landscape has three acts: per-pass movement decays six-fold over the first
-/// forty passes, lake coverage falls from 22.6% to zero by about pass 110, and
-/// past that the terrain lowers at a flat 0.019% of its relief per pass with no
-/// standing water left to change. So the axis ends a little past the last thing
-/// worth looking at, and the run has a genuine end rather than trailing off.
-const MAX_PASS: usize = 150;
+/// forty passes, inland lake coverage falls from 22.6% to zero by about pass 110,
+/// and past that the terrain lowers at a flat 0.019% of its relief per pass with
+/// no standing fresh water left to change. So the run ends a little past the last
+/// thing worth looking at, and has a genuine end rather than trailing off.
+const MAX_PASS_BASE: usize = 150;
 
-/// How many passes a second the timeline pays out by default.
+/// How many passes the bake runs at grid `n`.
 ///
-/// The whole visible arc is the lakes draining over ~110 passes, so this is
-/// really "how long is the show": eight a second makes it about fourteen seconds,
-/// which is long enough to watch a basin silt up and short enough to sit through
-/// twice. It is a slider because the honest answer depends on the grid size.
+/// **Fewer as the map grows, and that is the model's arithmetic rather than a
+/// concession to the clock.** The stream power is `K·Aᵐ / L` with `A` counted in
+/// *cells* and `L` a cell step, so quadrupling the cells per unit of ground
+/// multiplies `A` by sixteen and, at the default `m = 0.5`, multiplies the cut per
+/// pass by four. A pass at 2048² does four passes' worth of work, so the same
+/// landscape arrives in a quarter of the passes. Scaling the count down keeps the
+/// *amount* of erosion fixed across resolutions — which is the property that lets
+/// the resolution control add detail instead of also winding the clock forward.
+///
+/// The floor keeps a small grid from finishing before anything has happened.
+fn max_pass(n: usize) -> usize {
+    ((MAX_PASS_BASE as f32 / span(n)).round() as usize).max(24)
+}
+
+/// How many passes a second the bake aims for.
+///
+/// The visible arc is the inland lakes draining, so this is really "how long is
+/// the show": eight a second makes the reference run about fourteen seconds, long
+/// enough to watch a basin silt up and short enough to sit through twice.
+///
+/// **A target, not a promise**, and increasingly so as the map grows. The bake
+/// takes at most one pass per frame (see `fixed_update`), and a pass at 2048²
+/// costs about 1.6 s — so past about 512² this stops being the thing that decides
+/// the pace and the machine starts deciding it instead.
 const PASS_HZ_DEFAULT: f32 = 8.0;
 /// Bounds on that slider. The floor is a crawl for watching one basin; the ceiling
-/// is past the point where blending has anything left to smooth.
+/// is past the point where a frame can keep up at any interesting size.
 const PASS_HZ_MIN: f32 = 1.0;
 const PASS_HZ_MAX: f32 = 30.0;
 /// Default drainage area (in cells) at which a channel is drawn as a river.
@@ -526,11 +626,26 @@ const SHAPE_PRESETS: [(&str, f32, u32, f32); 3] = [
     ("peaks", 5.0, 7, 2.2),
 ];
 
-/// Grid resolution bounds (cells per side); snapped to a multiple of 8.
-const RES_MIN: f32 = 32.0;
-const RES_MAX: f32 = 256.0;
+/// Grid resolutions the demo offers, in cells per side.
+///
+/// **A list, not a range, because the steps are octaves.** A slider that could
+/// land on 1500² would offer a hundred sizes nobody wants between two that matter,
+/// and each step here quadruples the cell count — which is the granularity the
+/// costs actually come in. The slider snaps to an index into this.
+///
+/// The top of the list is where the demo stops being a thing you scrub and starts
+/// being a world you bake once and look at; see [`TerrainDemo::bake`].
+const RESOLUTIONS: [usize; 7] = [32, 64, 128, 256, 512, 1024, 2048];
 /// The resolution the demo starts at, and the one "reset all" returns to.
-const RES_DEFAULT: usize = 128;
+const RES_DEFAULT: usize = 512;
+
+/// Index into [`RESOLUTIONS`] of the nearest listed resolution to `n`.
+fn res_index(n: usize) -> usize {
+    RESOLUTIONS
+        .iter()
+        .position(|r| *r >= n)
+        .unwrap_or(RESOLUTIONS.len() - 1)
+}
 
 /// The terrain consumer: owns the layer parameters, the heightmaps, and the
 /// orbit-camera state.
@@ -543,28 +658,22 @@ struct TerrainDemo {
     /// re-erode without re-running the (separate) noise generation.
     base: Vec<f32>,
 
-    /// **The time axis: the landscape at every pass, indexed by pass number.**
-    /// `history[0]` is the un-eroded base.
+    /// **The landscape one pass ahead of the one on screen.**
     ///
-    /// This is the whole trick behind a scrub that runs *backwards*. Erosion is
-    /// irreversible — there is no inverse pass — so the only way to show pass 30
-    /// after reaching pass 90 is to have pass 30 written down. Recomputing it
-    /// instead was measured and rejected: 150 passes at 128² costs 336 ms in a
-    /// release build and **2.7 s in a debug one**, which is the build the demo is
-    /// normally run under, so every drag of the slider would have been a freeze.
+    /// This demo used to keep the *whole* time axis — every pass, indexed by pass
+    /// number — so the scrub slider could run backwards by array index. That is
+    /// `4·n²` bytes a pass, which was 9.6 MB at 128² and is **2.4 GB at 2048²**,
+    /// and it is the reason the map could not grow. Trading the rewind for the
+    /// world was the deal; see [`TerrainDemo::bake`].
     ///
-    /// Storing it costs `4·n²` bytes a pass — 9.6 MB across the whole axis at the
-    /// default 128², 39 MB at the 256² maximum. That is a lot of memory to spend
-    /// on a demo and it is the right trade by a wide margin: it turns a rewind
-    /// into an array index, which is instant in *any* build.
-    ///
-    /// Water is deliberately **not** stored alongside. It is another `8·n²` bytes
-    /// a pass (three times the total), and it is only ever needed for the two
-    /// passes currently on screen — see [`TerrainDemo::snap_water`].
-    history: Vec<Vec<f32>>,
-    /// **Two readings per computed pass**, aligned with [`TerrainDemo::history`]:
-    /// mean standing depth and mean height moved. `series[_][k]` describes pass
-    /// `k`, so it exists as soon as `history[k + 1]` does.
+    /// What is left is one buffer instead of a hundred and fifty, and it exists for
+    /// a smaller reason: [`erosion::step`] returns the water belonging to the
+    /// heights it was *given*, not the ones it produces. Keeping the next pass
+    /// pre-computed means the pair on screen is always a state and its own water,
+    /// at one flow routing per pass rather than two.
+    ahead: Vec<f32>,
+    /// **Two readings per baked pass**: mean standing depth and mean height moved.
+    /// `series[_][k]` describes pass `k`.
     ///
     /// Two vectors rather than one of pairs, so each is a `&[f32]` the plot can
     /// be handed without copying it apart first.
@@ -577,33 +686,31 @@ struct TerrainDemo {
     /// discarded on every pass since Slice 13.
     ///
     /// Both are means rather than totals so the vertical scale means the same
-    /// thing at 32² and at 256², which matters because the resolution slider
-    /// throws the axis away and rebuilds it.
+    /// thing at 32² and at 2048², which matters because the resolution control
+    /// throws the run away and starts it again.
     series: [Vec<f32>; 2],
-    /// Which pass the blend starts from; the head of the time axis.
+    /// How many passes have been baked — the pass currently on screen.
     pass: usize,
-    /// The water at `pass` and at `pass + 1` — the two ends of the blend.
-    ///
-    /// Kept as a pair rather than recomputed because flow routing is the expensive
-    /// half of a pass. Walking forward, the far end becomes the near end and only
-    /// one new routing is needed; a scrub, which can land anywhere, pays for two.
-    snap_water: [erosion::Water; 2],
-    /// The `(pass, alpha)` the render buffers below were last filled for. Skips the
-    /// per-frame rebuild when neither has moved — which is every frame while paused.
-    resolved: Option<(usize, f32)>,
+    /// Whether the bake is running. Cleared when it reaches [`max_pass`], and by
+    /// the pause button.
+    baking: bool,
+    /// Whether this frame has already run a pass — see `fixed_update`.
+    baked_this_frame: bool,
+    /// The pass the meshes were last built for. Skips the rebuild on every frame
+    /// the world did not move, which is every frame once the bake has finished.
+    resolved: Option<usize>,
 
-    /// The heights actually rendered (`n * n`): the two bracketing passes lerped
-    /// by [`Timeline::alpha`]. Reused between frames rather than reallocated.
+    /// The landscape on screen (`n * n`), at pass [`TerrainDemo::pass`].
     heights: Vec<f32>,
-    /// The water actually rendered, blended from [`TerrainDemo::snap_water`] the
-    /// same way.
+    /// The water standing on exactly those heights.
     water: erosion::Water,
 
-    /// Passes per second the timeline pays out — the fixed-step rate.
+    /// Passes per second the bake aims for, when it can keep up.
     pass_hz: f32,
     /// Grid side length.
     n: usize,
-    /// Resolution slider value, snapped to a multiple of 8.
+    /// Resolution control value: an index into [`RESOLUTIONS`], as a float because
+    /// the slider deals in floats.
     res: f32,
 
     /// Draw the water surface at all.
@@ -691,21 +798,22 @@ impl TerrainDemo {
         let n = RES_DEFAULT;
         let params = NoiseParams::default();
         let erosion = ErosionParams::default();
-        let hm = Heightmap::generate(n, &params);
+        let hm = Heightmap::generate(n, span(n), &params);
         let mut demo = Self {
             params,
             erosion,
             base: hm.heights,
-            history: Vec::new(),
+            ahead: Vec::new(),
             series: [Vec::new(), Vec::new()],
             pass: 0,
-            snap_water: [erosion::Water::default(), erosion::Water::default()],
+            baking: true,
+            baked_this_frame: false,
             resolved: None,
             heights: Vec::new(),
             water: erosion::Water::default(),
             pass_hz: PASS_HZ_DEFAULT,
             n: hm.n,
-            res: n as f32,
+            res: res_index(n) as f32,
             show_water: true,
             river_area: RIVER_AREA_DEFAULT,
             water_alpha: WATER_ALPHA_DEFAULT,
@@ -719,79 +827,89 @@ impl TerrainDemo {
             pending_erode: false,
             yaw: 0.7,
             pitch: 0.62,
-            distance: 6.5,
+            distance: 6.5 * span(n),
             fps: 60.0,
             handles: None,
             minimap: None,
             minimap_rgba: vec![0; MINIMAP_N * MINIMAP_N * 4],
             minimap_for: None,
         };
-        demo.reset_history();
-        demo.resolve(0.0);
+        demo.restart_bake();
         demo
     }
 
     /// Regenerate the Perlin base heightmap (layer 1) at the current parameters
-    /// and resolution, then re-erode it. Called when a noise/grid control changes.
+    /// and resolution, then start the bake again. Called when a noise/grid control
+    /// changes.
     fn regenerate_base(&mut self) {
-        let hm = Heightmap::generate(self.n, &self.params);
+        let hm = Heightmap::generate(self.n, span(self.n), &self.params);
         self.n = hm.n;
         self.base = hm.heights;
-        self.reset_history();
+        self.restart_bake();
     }
 
-    /// Throw the time axis away and rebuild it up to the current pass.
+    /// Put the world back to pass zero and set the bake running.
     ///
-    /// Every erosion parameter is baked into the history the moment a pass is
-    /// computed, so changing one invalidates all of it — there is no partial
-    /// update, and pretending otherwise would leave passes computed under a `K` the
-    /// panel no longer shows. This is the expensive path (60 passes is ~120 ms
-    /// release, ~1 s debug), which is why the panel debounces it to mouse-release
-    /// exactly as it did when it was one batch `erode` call.
-    fn reset_history(&mut self) {
-        self.history.clear();
+    /// Every erosion parameter is fixed into the landscape the moment a pass is
+    /// computed, so changing one invalidates everything computed so far — there is
+    /// no partial update, and pretending otherwise would leave a landscape carved
+    /// half under a `K` the panel no longer shows.
+    fn restart_bake(&mut self) {
         self.series[0].clear();
         self.series[1].clear();
-        self.history.push(self.base.clone());
-        let pass = self.pass;
         self.pass = 0;
-        self.seek_pass(pass);
+        self.baking = true;
+        self.resolved = None;
+
+        self.heights.clear();
+        self.heights.extend_from_slice(&self.base);
+        // Prime the pipeline: `ahead` becomes pass 1, and the water that falls out
+        // is the water standing on pass 0 — which is what goes on screen with it.
+        self.ahead.clear();
+        self.ahead.extend_from_slice(&self.base);
+        self.water = erosion::step(&mut self.ahead, self.n, &self.erosion);
     }
 
-    /// Grow the history until pass `target` exists, capped at the end of the axis.
+    /// Advance the bake by one pass, if it has not finished.
     ///
-    /// Each iteration steps a clone of the newest state, which is the cheap way
-    /// round: [`erosion::step`] hands back the water belonging to the state it was
-    /// *given*, so walking forward never routes the same flow twice.
-    ///
-    /// That return value is also where [`TerrainDemo::series`] comes from. It was
-    /// discarded here for three slices; reading it costs two sums over the grid
-    /// and no second flow routing, which is the difference between a plot of the
-    /// whole time axis and a freeze every time one is drawn.
-    fn extend_to(&mut self, target: usize) {
-        let target = target.min(MAX_PASS);
-        let cells = (self.n * self.n).max(1) as f32;
-        while self.history.len() <= target {
-            let prev = self.history.len() - 1;
-            let mut next = self.history[prev].clone();
-            let water = erosion::step(&mut next, self.n, &self.erosion);
-
-            // The water belongs to `history[prev]`, so both readings describe
-            // pass `prev` and `series` stays index-aligned with `history`.
-            let lake = water.depth.iter().sum::<f32>() / cells;
-            // Halved because a sum of |dz| counts every grain twice: once where
-            // it was cut and once where it landed.
-            let moved = self.history[prev]
-                .iter()
-                .zip(&next)
-                .map(|(a, b)| (b - a).abs())
-                .sum::<f32>()
-                / (2.0 * cells);
-            self.series[0].push(lake);
-            self.series[1].push(moved);
-
-            self.history.push(next);
+    /// The pair on screen is always a landscape and the water standing on *it*.
+    /// [`erosion::step`] hands back the water belonging to the heights it was
+    /// given, so the state one pass ahead is kept pre-computed and this is a swap
+    /// plus one flow routing — never two, and never a re-analysis of a state
+    /// already seen.
+    fn bake_pass(&mut self) -> bool {
+        if self.pass >= max_pass(self.n) {
+            self.baking = false;
+            return false;
         }
+        let cells = (self.n * self.n).max(1) as f32;
+
+        // The water on screen belongs to the pass being left behind, so both
+        // readings describe it and `series[k]` stays aligned with pass `k`.
+        let lake = self.water.depth.iter().sum::<f32>() / cells;
+        // Halved because a sum of |dz| counts every grain twice: once where it was
+        // cut and once where it landed.
+        let moved = self
+            .heights
+            .iter()
+            .zip(&self.ahead)
+            .map(|(a, b)| (b - a).abs())
+            .sum::<f32>()
+            / (2.0 * cells);
+        self.series[0].push(lake);
+        self.series[1].push(moved);
+
+        std::mem::swap(&mut self.heights, &mut self.ahead);
+        self.ahead.clear();
+        self.ahead.extend_from_slice(&self.heights);
+        self.water = erosion::step(&mut self.ahead, self.n, &self.erosion);
+
+        self.pass += 1;
+        self.resolved = None;
+        if self.pass >= max_pass(self.n) {
+            self.baking = false;
+        }
+        true
     }
 
     /// Reshade the minimap from the heights and water currently on screen.
@@ -810,6 +928,7 @@ impl TerrainDemo {
         if n < 2 || self.heights.len() < n * n {
             return;
         }
+        let sea = self.erosion.sea_level;
         let scale = (n - 1) as f32 / (MINIMAP_N - 1) as f32;
         let wet = !self.water.depth.is_empty();
 
@@ -827,14 +946,14 @@ impl TerrainDemo {
                     - bilinear(&self.heights, n, fx - 1.0, fy);
                 let dy = bilinear(&self.heights, n, fx, fy + 1.0)
                     - bilinear(&self.heights, n, fx, fy - 1.0);
-                let cell = 2.0 * HALF / (n - 1) as f32;
-                let gx = dx * VHEIGHT / (2.0 * cell);
-                let gy = dy * VHEIGHT / (2.0 * cell);
+                let cell = 2.0 * half(n) / (n - 1) as f32;
+                let gx = dx * vheight(n) / (2.0 * cell);
+                let gy = dy * vheight(n) / (2.0 * cell);
                 let inv = 1.0 / (1.0 + gx * gx + gy * gy).sqrt();
 
                 // `1 - normal.y`: 0 flat, 1 vertical. The same number
                 // `terrain_mesh` hands the palette.
-                let mut rgb = palette(h.clamp(0.0, 1.0), 1.0 - inv.clamp(0.0, 1.0));
+                let mut rgb = palette(h.clamp(0.0, 1.0), 1.0 - inv.clamp(0.0, 1.0), sea);
 
                 // Relief shading from a north-west sun, which is the cartographic
                 // convention and the reason a printed contour map reads as
@@ -871,95 +990,6 @@ impl TerrainDemo {
                 self.minimap_rgba[i + 3] = 255;
             }
         }
-    }
-
-    /// The water on a stored pass, clamped to the end of the axis.
-    fn water_at(&self, index: usize) -> erosion::Water {
-        let index = index.min(self.history.len().saturating_sub(1));
-        erosion::water_of(&self.history[index], self.n)
-    }
-
-    /// Move the head to `pass`, computing whatever the axis and the blend pair need.
-    ///
-    /// The jump case: both ends of the blend are unknown, so both are routed. Used
-    /// by the scrub slider, which can land anywhere including behind us.
-    fn seek_pass(&mut self, pass: usize) {
-        self.pass = pass.min(MAX_PASS);
-        self.extend_to(self.pass + 1);
-        self.snap_water = [self.water_at(self.pass), self.water_at(self.pass + 1)];
-        self.resolved = None;
-    }
-
-    /// Step one pass along the axis — the common case, and the cheap one.
-    ///
-    /// The state being moved onto was the *far* end of last frame's blend, so its
-    /// water has already been routed; only the new far end is unknown. That is what
-    /// keeps a playing timeline at one flow routing per pass instead of two.
-    fn advance_pass(&mut self) {
-        if self.pass >= MAX_PASS {
-            return;
-        }
-        self.pass += 1;
-        self.extend_to(self.pass + 1);
-        self.snap_water.swap(0, 1);
-        self.snap_water[1] = self.water_at(self.pass + 1);
-        self.resolved = None;
-    }
-
-    /// Fill the render buffers by blending the bracketing passes.
-    ///
-    /// **This is the half of [`Timeline::alpha`] no consumer had exercised.**
-    /// `scene.rs` renders between steps by evaluating a pose function at a sub-step
-    /// instant, which a landscape cannot do — there is no closed form for "pass
-    /// 43.6". So this is the other case the engine's docs name: a consumer holding
-    /// two snapshots and interpolating them.
-    ///
-    /// It is load-bearing rather than polish. The probe says a single cell moves up
-    /// to 0.0147 of the height range in the first pass — about half a grid cell —
-    /// so at eight passes a second the early landscape visibly jumps without it.
-    ///
-    /// The water blends the same way, and that turned out to be enough on its own:
-    /// only 0.2–0.6% of cells change wet/dry in a pass (rivers usually under 0.1%),
-    /// so lerping depth and area retreats a lake edge smoothly instead of popping
-    /// it. A soft threshold was planned for the river network and never needed —
-    /// *in time*. It was needed in **space**, for an unrelated reason, and
-    /// [`RIVER_FADE`] is it.
-    fn resolve(&mut self, alpha: f32) {
-        // At the end of the axis there is nothing ahead to blend toward.
-        let t = if self.pass >= MAX_PASS {
-            0.0
-        } else {
-            alpha.clamp(0.0, 1.0)
-        };
-        if self.resolved == Some((self.pass, t)) {
-            return;
-        }
-        self.resolved = Some((self.pass, t));
-
-        let far = (self.pass + 1).min(self.history.len().saturating_sub(1));
-        let (a, b) = (&self.history[self.pass], &self.history[far]);
-        let lerp = |x: &f32, y: &f32| x + (y - x) * t;
-
-        self.heights.clear();
-        self.heights
-            .extend(a.iter().zip(b).map(|(x, y)| lerp(x, y)));
-
-        let (wa, wb) = (&self.snap_water[0], &self.snap_water[1]);
-        self.water.depth.clear();
-        self.water
-            .depth
-            .extend(wa.depth.iter().zip(&wb.depth).map(|(x, y)| lerp(x, y)));
-        self.water.area.clear();
-        self.water
-            .area
-            .extend(wa.area.iter().zip(&wb.area).map(|(x, y)| lerp(x, y)));
-        // The receiver tree is taken from the near pass rather than blended,
-        // because a link is an *index* and there is no halfway between flowing
-        // north and flowing east. Nothing is lost: the network's topology changes
-        // in well under a tenth of a percent of cells per pass, so the channel a
-        // river is drawn along is the same one at both ends of the blend.
-        self.water.receiver.clear();
-        self.water.receiver.extend_from_slice(&wa.receiver);
     }
 
     /// Upload the current terrain, and the water on it, as the engine's draw-list.
@@ -1028,7 +1058,11 @@ impl TerrainDemo {
                         .with_alpha(self.water_alpha)
                         .with_specular(self.water_specular, WATER_SHININESS)
                         .with_fresnel(WATER_FRESNEL_F0, WATER_REFLECTION_TINT)
-                        .with_ripples(self.ripple_strength, self.ripple_scale)
+                        // Waves are quoted per world unit, so a map four times wider
+                        // would carry four times as many of them across the same
+                        // view. Dividing by `span` keeps a wave the size it looks
+                        // at the reference scale, whatever the map grew to.
+                        .with_ripples(self.ripple_strength, self.ripple_scale / span(self.n))
                         .with_refraction(WATER_REFRACTION, WATER_ABSORPTION)
                         .with_reflection(WATER_REFLECTION),
                 ),
@@ -1051,17 +1085,20 @@ impl TerrainDemo {
         // Displayed height per cell, in world units, on the fixed scale — see
         // `disp`. Erosion lowering the terrain is now something you can *see*
         // rather than something a refitted range quietly cancels out.
-        let disp = |i: usize| disp(self.heights[i]);
+        let vheight = vheight(n);
+        let half = half(n);
+        let sea = self.erosion.sea_level;
+        let disp = |i: usize| disp(self.heights[i], vheight);
 
-        let step = (2.0 * HALF) / (n as f32 - 1.0);
+        let step = (2.0 * half) / (n as f32 - 1.0);
         let cell_world = step; // horizontal spacing for slope/normal estimates
 
         let mut vertices = Vec::with_capacity(n * n);
         for y in 0..n {
             for x in 0..n {
                 let i = y * n + x;
-                let wx = -HALF + x as f32 * step;
-                let wz = -HALF + y as f32 * step;
+                let wx = -half + x as f32 * step;
+                let wz = -half + y as f32 * step;
                 let wy = disp(i);
 
                 // Central-difference normal from displayed heights.
@@ -1076,13 +1113,13 @@ impl TerrainDemo {
                 ]);
                 let slope = 1.0 - normal[1].clamp(0.0, 1.0); // 0 flat → 1 vertical
 
-                let t = (wy / VHEIGHT).clamp(0.0, 1.0);
+                let t = (wy / vheight).clamp(0.0, 1.0);
 
                 vertices.push(Vertex {
                     position: [wx, wy, wz],
                     normal,
                     color: {
-                        let c = palette(t, slope);
+                        let c = palette(t, slope, sea);
                         [c[0], c[1], c[2], 1.0]
                     },
                 });
@@ -1149,7 +1186,17 @@ impl TerrainDemo {
         // That is what makes a river follow its own diagonal instead of
         // staircasing along the grid, and what lets a trunk be wider than the
         // tributaries feeding it.
-        let river_area = self.river_area.max(1.0);
+        // Both of the river's numbers are in **cells**, and a cell is not a fixed
+        // amount of ground once the resolution moves, so both are quoted at the
+        // reference grid and scaled here. A catchment of a given real size covers
+        // `span²` cells, and a channel of a given real width spans `span` of them.
+        // Without this the same landscape at 2048² would be threaded by rivers a
+        // quarter as wide draining catchments a sixteenth as large — every gully
+        // promoted to a river, and each one drawn as a hairline.
+        let span = span(n);
+        let river_area = self.river_area.max(1.0) * span * span;
+        let narrow = RIVER_HALF_WIDTH * span;
+        let widest = RIVER_HALF_WIDTH_MAX * span;
         for c in 0..n * n {
             // Deliberately *not* skipping cells that are already lake, which is
             // the obvious optimisation and punches holes in the rivers. A cell
@@ -1181,8 +1228,7 @@ impl TerrainDemo {
             // can carry, so below the threshold the channel stops getting *fainter*
             // rather than thinner — a sub-cell ribbon would fall between samples and
             // break up, which is the artifact this is here to remove.
-            let half =
-                (RIVER_HALF_WIDTH * ratio.sqrt()).clamp(RIVER_HALF_WIDTH, RIVER_HALF_WIDTH_MAX);
+            let half = (narrow * ratio.sqrt()).clamp(narrow, widest);
 
             let (ax, ay) = ((c % n) as f32, (c / n) as f32);
             let (bx, by) = ((r % n) as f32, (r / n) as f32);
@@ -1259,10 +1305,10 @@ impl TerrainDemo {
             .heights
             .iter()
             .zip(&self.water.depth)
-            .map(|(h, d)| disp(h + d))
+            .map(|(h, d)| disp(h + d, vheight(n)))
             .collect();
 
-        let step = (2.0 * HALF) / (n as f32 - 1.0);
+        let step = (2.0 * half(n)) / (n as f32 - 1.0);
         let mut vertices: Vec<Vertex> = Vec::with_capacity(cap_v);
         let mut indices: Vec<u32> = Vec::with_capacity(cap_i);
         let mut poly: Vec<(f32, f32)> = Vec::with_capacity(4);
@@ -1287,17 +1333,46 @@ impl TerrainDemo {
             [(1, 0), (0, 1), (1, 1)], // b, d, c
         ];
 
+        // A grid point's vertex, made once and shared by every cell that wants it.
+        // `u32::MAX` means "not built yet"; the wet interior is the overwhelming
+        // majority of a map with an ocean on it, so nearly every vertex is made
+        // once and used six times.
+        //
+        // **This is what lets the map reach 2048².** Every clipped polygon carries
+        // its own corners, which is unavoidable along a shoreline and pure waste in
+        // open water: a fully submerged cell emits six vertices that its neighbours
+        // emit again. An all-ocean 2048² map asked for a 780 MB vertex buffer and
+        // wgpu refused it — the default `max_buffer_size` is 256 MB — so the biggest
+        // world was not a memory problem to be tuned around, it simply would not
+        // start. Sharing the interior takes the same geometry to 168 MB.
+        let mut shared = vec![u32::MAX; n * n];
+
         for y in 0..n - 1 {
             let row = y * n;
             for x in 0..n - 1 {
-                // Reject the whole cell before touching either triangle. Water
-                // covers well under a fifth of the map, so this skips most of the
-                // grid on one comparison chain instead of six.
-                if wet[row + x] < WET_EPS
-                    && wet[row + x + 1] < WET_EPS
-                    && wet[row + n + x] < WET_EPS
-                    && wet[row + n + x + 1] < WET_EPS
-                {
+                // Reject the whole cell before touching either triangle. On a
+                // landlocked map water covers well under a fifth of the grid, so
+                // this skips most of it on one comparison chain instead of six.
+                let corners = [row + x, row + x + 1, row + n + x, row + n + x + 1];
+                if corners.iter().all(|&i| wet[i] < WET_EPS) {
+                    continue;
+                }
+                // The whole cell is under water: it needs no clipping, and its four
+                // corners are grid points the neighbours will want too.
+                if corners.iter().all(|&i| wet[i] >= WET_EPS) {
+                    for tri in TRIS {
+                        for (dx, dy) in tri {
+                            let (gx, gy) = (x + dx, y + dy);
+                            let slot = gy * n + gx;
+                            if shared[slot] == u32::MAX {
+                                shared[slot] = vertices.len() as u32;
+                                vertices.push(
+                                    self.water_vertex(gx as f32, gy as f32, step, &wet, &surface),
+                                );
+                            }
+                            indices.push(shared[slot]);
+                        }
+                    }
                     continue;
                 }
                 for tri in TRIS {
@@ -1351,7 +1426,11 @@ impl TerrainDemo {
         let height = sample_triangulated(surface, n, fx, fy);
 
         Vertex {
-            position: [-HALF + fx * step, height + WATER_LIFT, -HALF + fy * step],
+            position: [
+                -half(n) + fx * step,
+                height + WATER_LIFT,
+                -half(n) + fy * step,
+            ],
             // Flat. **The ripples are not here any more** — they are a per-fragment
             // normal perturbation on the material, which is both cheaper and
             // better: this function used to evaluate four `sin_cos` per vertex and
@@ -1378,11 +1457,11 @@ impl TerrainDemo {
         // the renderer, and written back after it is dropped — the same shape
         // `scene.rs` uses, for the same borrow reason.
         let mut paused = renderer.time().is_paused();
-        let mut scrub = self.pass as f32;
         let mut pass_hz = self.pass_hz;
         let mut single_step = false;
-        let mut scrubbed = false;
+        let mut rebake = false;
         let pass = self.pass;
+        let last_pass = max_pass(self.n);
 
         // Borrowed before the UI takes the renderer, and read only inside the
         // panel closure. `self` and `renderer` are disjoint, so these live
@@ -1390,7 +1469,7 @@ impl TerrainDemo {
         let lake_series: &[f32] = &self.series[0];
         let moved_series: &[f32] = &self.series[1];
         // Where along the axis the landscape on screen is sitting, in `0..=1`.
-        let scrub_t = pass as f32 / MAX_PASS as f32;
+        let scrub_t = pass as f32 / last_pass as f32;
         let minimap = self.minimap;
 
         let mut ui = renderer.ui();
@@ -1416,7 +1495,7 @@ impl TerrainDemo {
                     // First in the panel because it is what the demo now *is*: the
                     // landscape is a position on this axis, and everything below
                     // describes the process that generated it.
-                    ui.section("Time", |ui| {
+                    ui.section("Bake", |ui| {
                         // Two buttons need `columns`, not `horizontal` — a button
                         // allocates whatever is left of the line, so in a row the
                         // first takes all of it and the second is clipped off the
@@ -1433,17 +1512,30 @@ impl TerrainDemo {
                                     ui.button("step").variant(Variant::Secondary).show().clicked;
                             }
                         });
-                        // The scrub, and the reason this slice picked a stored
-                        // history over a recomputed one: dragging this backwards is
-                        // an array index, so it is as cheap as dragging it forwards.
-                        scrubbed = ui
-                            .slider("pass", &mut scrub, 0.0, MAX_PASS as f32)
-                            .decimals(0)
-                            .show()
-                            .changed;
+                        // A readout and a bar, not a slider. There is no history to
+                        // scrub back into any more — that memory is what bought the
+                        // map its size — so this reports rather than steers.
+                        ui.label_value("pass", &format!("{pass}/{last_pass}"));
+                        progress_bar(ui, scrub_t);
+                        // Every row here is unconditional, and that is a layout
+                        // requirement rather than a simplification. The first shape
+                        // this took swapped the rate slider for a button when the
+                        // bake ended — and moved every row beneath it at the moment
+                        // a *background process* finished, which reflowed the panel
+                        // out from under a capture script's own coordinates. That is
+                        // the trap `capture/editor-list.script` was written to
+                        // record, arriving from a new direction: not a click that
+                        // moves what it is about to click, but a panel that moves on
+                        // its own. The rate stays live because "bake again" will use
+                        // it.
                         ui.slider("passes/sec", &mut pass_hz, PASS_HZ_MIN, PASS_HZ_MAX)
                             .decimals(0)
                             .show();
+                        rebake = ui
+                            .button("bake again")
+                            .variant(Variant::Secondary)
+                            .show()
+                            .clicked;
                     });
                     ui.separator();
 
@@ -1460,7 +1552,7 @@ impl TerrainDemo {
                             r,
                             &[lake_series, moved_series],
                             &[theme.color.accent, theme.color.heading],
-                            MAX_PASS,
+                            last_pass,
                             Some(scrub_t),
                             true,
                         );
@@ -1490,6 +1582,10 @@ impl TerrainDemo {
                     // --- Layer 1: the Perlin base shape ---
                     let mut base = false;
                     let mut preset = None;
+                    // Sea level is shaped like a base-shape control and behaves like
+                    // an erosion one, so it is declared out here and folded into
+                    // `erode` below.
+                    let mut erode_sea = false;
                     ui.section("Base shape", |ui| {
                         // The button row. Each cell is its own column, so the
                         // three hit-test to their own thirds of the width.
@@ -1532,11 +1628,24 @@ impl TerrainDemo {
                             .slider("ridge (peaks)", &mut self.params.ridge, 0.5, 3.0)
                             .show()
                             .changed;
+                        // The two that decide there is a coastline at all. `coast`
+                        // shapes the land and so regenerates the noise; `sea level`
+                        // only moves the base level the erosion drains to, so it is
+                        // a re-bake and not a re-roll — the same continent, drowned
+                        // to a different line.
+                        base |= ui
+                            .slider("coast", &mut self.params.coast, 0.2, 1.0)
+                            .show()
+                            .changed;
+                        erode_sea = ui
+                            .slider("sea level", &mut self.erosion.sea_level, 0.0, 0.6)
+                            .show()
+                            .changed;
                     });
                     ui.separator();
 
                     // --- Layer 2: erosion ---
-                    let mut erode = false;
+                    let mut erode = erode_sea;
                     ui.section("Fluvial erosion", |ui| {
                         // "passes" used to live here, as the headline knob. It is
                         // gone from this section on purpose: a pass count is a
@@ -1631,9 +1740,24 @@ impl TerrainDemo {
                     // --- Grid ---
                     let mut new_seed = false;
                     ui.section("Grid", |ui| {
-                        ui.slider("resolution", &mut self.res, RES_MIN, RES_MAX)
+                        // The slider runs over *indices* into `RESOLUTIONS`, so the
+                        // steps are octaves and every one of them is a size worth
+                        // having. The label carries the real number, because "4" is
+                        // not a grid size anybody recognises.
+                        let idx = (self.res.round().max(0.0) as usize).min(RESOLUTIONS.len() - 1);
+                        let cells = RESOLUTIONS[idx];
+                        ui.label_value("resolution", &format!("{cells}x{cells}"));
+                        ui.slider("detail", &mut self.res, 0.0, (RESOLUTIONS.len() - 1) as f32)
                             .decimals(0)
                             .show();
+                        // What that resolution buys, in the two units that matter
+                        // and neither of which is cells: how much ground the map
+                        // covers, and how long the bake will take.
+                        ui.label_muted(&format!(
+                            "{:.0}x the land, {} passes",
+                            span(cells) * span(cells),
+                            max_pass(cells)
+                        ));
                         new_seed = ui.button("new seed").show().clicked;
                     });
                     ui.separator();
@@ -1666,7 +1790,7 @@ impl TerrainDemo {
         ui.panel(Anchor::TopRight, HUD_W, |ui| {
             ui.label_value("fps", &format!("{fps:.0}"));
             ui.label_value("grid", &format!("{n}x{n}"));
-            ui.label_value("pass", &format!("{pass}/{MAX_PASS}"));
+            ui.label_value("pass", &format!("{pass}/{last_pass}"));
             // The same routine as the panel's, at a quarter the height and with
             // the annotations off. Two call sites is the check that the demo's
             // chart code generalised rather than being fitted to one rectangle.
@@ -1676,7 +1800,7 @@ impl TerrainDemo {
                 r,
                 &[lake_series],
                 &[theme.color.accent],
-                MAX_PASS,
+                last_pass,
                 Some(scrub_t),
                 false,
             );
@@ -1701,21 +1825,15 @@ impl TerrainDemo {
         if single_step {
             renderer.time_mut().step_once();
         }
-        if scrubbed {
-            // A seek the engine explicitly says it cannot do for you: its clock
-            // moves, and rewinding the *consumer* is the consumer's problem. This
-            // demo can solve it only because it wrote every pass down — which is
-            // the whole design, stated as one line of code.
-            self.seek_pass(scrub.round().max(0.0) as usize);
-            renderer
-                .time_mut()
-                .seek(self.pass as f32 / pass_hz.max(1.0));
+        if rebake {
+            self.restart_bake();
+            renderer.time_mut().seek(0.0);
         }
 
         if reset {
             self.params = NoiseParams::default();
             self.erosion = ErosionParams::default();
-            self.res = RES_DEFAULT as f32;
+            self.res = res_index(RES_DEFAULT) as f32;
             self.show_water = true;
             self.river_area = RIVER_AREA_DEFAULT;
             self.water_alpha = WATER_ALPHA_DEFAULT;
@@ -1777,9 +1895,14 @@ impl TerrainDemo {
         if down {
             self.pitch -= KEY_STEP;
         }
-        self.distance -= scroll * 0.5;
+        // Everything the camera does is in world units, so all of it scales with
+        // the map. Left fixed, the wheel moved a sixteenth as far per notch on the
+        // big continent and the orbit's outer stop sat *inside* the mountains —
+        // the 1024² world's first screenshot was taken from between two peaks.
+        let span = span(self.n);
+        self.distance -= scroll * 0.5 * span;
         self.pitch = self.pitch.clamp(0.08, 1.5);
-        self.distance = self.distance.clamp(2.5, 18.0);
+        self.distance = self.distance.clamp(2.5 * span, 18.0 * span);
 
         let (sp, cp) = self.pitch.sin_cos();
         let (sy, cy) = self.yaw.sin_cos();
@@ -1791,7 +1914,7 @@ impl TerrainDemo {
         // Aim slightly above the base so the framed terrain sits centered.
         renderer
             .camera_mut()
-            .look_from_to(eye, [0.0, VHEIGHT * 0.35, 0.0]);
+            .look_from_to(eye, [0.0, vheight(self.n) * 0.35, 0.0]);
     }
 }
 
@@ -1802,7 +1925,7 @@ impl Application for TerrainDemo {
         self.shade_minimap();
         self.minimap =
             Some(renderer.create_image(MINIMAP_N as u32, MINIMAP_N as u32, &self.minimap_rgba));
-        self.minimap_for = self.resolved.map(|(pass, _)| pass);
+        self.minimap_for = self.resolved;
     }
 
     /// One erosion pass, and nothing else.
@@ -1811,15 +1934,31 @@ impl Application for TerrainDemo {
     /// controls above: the landscape advances only when the engine says a fixed
     /// step is due, so pausing genuinely stops geology rather than merely freezing
     /// a camera. Nothing in [`Application::update`] moves the terrain — it only
-    /// decides how to *draw* whatever pass the axis is currently sitting on.
+    /// decides how to *draw* whatever pass the bake has reached.
     ///
     /// `dt` is ignored, and that is honest rather than lazy. A pass is not defined
     /// in seconds: the model's timestep is folded into the erodibility `K` (see
     /// [`ErosionParams::erodibility`]), so a pass *is* the unit of simulation time.
     /// The step rate is set to the pass rate for exactly this reason, which makes
     /// `dt` a constant the hook has no use for.
+    ///
+    /// **At most one pass per fixed step, and the engine is told to stop asking
+    /// for more.** A pass at 2048² takes over a second, so a clock that tries to
+    /// make up the passes it owes would never catch up and would take the frame
+    /// rate down with it. Capping the rate at what the machine actually delivered
+    /// turns "too slow" into "bakes more slowly", which is the failure mode a
+    /// person can sit through.
     fn fixed_update(&mut self, _renderer: &mut Renderer, _dt: f32) {
-        self.advance_pass();
+        // The engine will call this up to eight times in one frame when it is
+        // behind. Take only the first: eight passes at 2048² is a twelve-second
+        // frame, and the clock discards the backlog anyway, so obeying it would
+        // buy nothing but a stall. One pass per frame makes "the machine cannot
+        // keep up" mean "the bake runs slower", which is a thing to watch rather
+        // than a hang.
+        if self.baking && !self.baked_this_frame {
+            self.baked_this_frame = true;
+            self.bake_pass();
+        }
     }
 
     fn update(&mut self, renderer: &mut Renderer) {
@@ -1833,7 +1972,7 @@ impl Application for TerrainDemo {
         // long as the panels are being built, so an image cannot be uploaded from
         // inside a panel closure. Gated on the same `(pass, alpha)` the meshes
         // are, so a paused frame reshades nothing.
-        let shaded_for = self.resolved.map(|(pass, _)| pass);
+        let shaded_for = self.resolved;
         if self.minimap_for != shaded_for {
             self.shade_minimap();
             if let Some(id) = self.minimap {
@@ -1846,9 +1985,11 @@ impl Application for TerrainDemo {
         self.pending_base |= outcome.regen_base;
         self.pending_erode |= outcome.reerode;
 
-        // Snap the resolution slider; a resolution change needs a full rebuild.
-        let target_n = ((self.res / 8.0).round() as usize * 8).clamp(32, 256);
-        self.res = target_n as f32;
+        // Snap the resolution control to a listed size; a resolution change needs
+        // a full rebuild.
+        let idx = (self.res.round().max(0.0) as usize).min(RESOLUTIONS.len() - 1);
+        self.res = idx as f32;
+        let target_n = RESOLUTIONS[idx];
         if target_n != self.n {
             self.pending_base = true;
         }
@@ -1864,28 +2005,30 @@ impl Application for TerrainDemo {
         let mut dirty = outcome.rebuild;
         if !dragging && (self.pending_base || self.pending_erode) {
             if self.pending_base {
+                // Carry the camera across the change of scale: the viewer was
+                // looking at the map from some fraction of its width away, and
+                // should still be after it grows.
+                self.distance *= span(target_n) / span(self.n);
                 self.n = target_n;
                 self.regenerate_base();
             } else {
-                // An erosion constant changed, so every stored pass was computed
-                // under the old one. The axis is rebuilt from the base rather than
-                // patched — see `reset_history`.
-                self.reset_history();
+                // An erosion constant changed, so everything carved so far was
+                // carved under the old one. The world starts again from the base
+                // rather than being patched — see `restart_bake`.
+                self.restart_bake();
             }
             self.pending_base = false;
             self.pending_erode = false;
             dirty = true;
         }
 
-        // Fill the render buffers for the instant this frame lands on. `resolve`
-        // is a no-op unless the pass or the sub-pass fraction actually moved, so a
-        // paused demo costs no mesh work at all — and a playing one at 75 fps
-        // against 8 passes a second rebuilds for nine frames it would otherwise
-        // have drawn identically, which is the point.
-        let alpha = renderer.time().alpha();
-        let was = self.resolved;
-        self.resolve(alpha);
-        if self.resolved != was {
+        // Rebuild the meshes only for a pass they have not been built for. Once
+        // the bake finishes that is never again, which is the point: a finished
+        // world at 2048² is four million vertices, and rebuilding it every frame
+        // to draw the identical picture would cost more than everything else in
+        // the demo put together.
+        if self.resolved != Some(self.pass) {
+            self.resolved = Some(self.pass);
             dirty = true;
         }
 
@@ -1905,6 +2048,7 @@ impl Application for TerrainDemo {
         });
 
         self.drive_camera(renderer, outcome.wants_pointer);
+        self.baked_this_frame = false;
     }
 }
 
@@ -1925,9 +2069,32 @@ struct UiOutcome {
     wants_pointer: bool,
 }
 
-/// Height/slope color palette: green lowlands → tan slopes → gray rock → snow,
-/// with steep faces biased toward bare rock regardless of altitude.
-fn palette(t: f32, slope: f32) -> [f32; 3] {
+/// Height/slope color palette: seabed → green lowlands → tan slopes → gray rock →
+/// snow, with steep faces biased toward bare rock regardless of altitude.
+///
+/// `t` is the normalized height and `sea` the level below which the ground is
+/// under the ocean. **The seabed stops are not decoration.** The land palette
+/// starts at valley green, so before they existed the whole drowned shelf — which
+/// is most of the map once there is a coastline — was painted as meadow, showing
+/// as a bright green ring glowing through the shallows and as a hard green line
+/// wherever the ocean's edge and the terrain's edge did not project to the same
+/// place. Ground under water is sand and then silt, and painting it that way is
+/// both what it looks like and what stops it drawing attention to itself.
+fn palette(t: f32, slope: f32, sea: f32) -> [f32; 3] {
+    // Below the waterline: sand at the shore, darkening into the deep. Squeezed
+    // into `[0, sea]` so the land ramp keeps the whole range above it and looks
+    // exactly as it always did.
+    if t < sea {
+        let f = (t / sea.max(1e-4)).clamp(0.0, 1.0);
+        let deep = [0.16, 0.22, 0.30];
+        let sand = [0.55, 0.52, 0.40];
+        return [
+            deep[0] + (sand[0] - deep[0]) * f,
+            deep[1] + (sand[1] - deep[1]) * f,
+            deep[2] + (sand[2] - deep[2]) * f,
+        ];
+    }
+    let t = ((t - sea) / (1.0 - sea).max(1e-4)).clamp(0.0, 1.0);
     // Altitude stops.
     let stops = [
         (0.00, [0.20, 0.42, 0.24]), // valley green

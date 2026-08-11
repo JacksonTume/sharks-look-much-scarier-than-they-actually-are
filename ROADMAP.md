@@ -1985,6 +1985,86 @@ wants one texture rewritten, and terrain's is a **fixed** 160² with the heightm
 resampled into it precisely because its grid moves between 32 and 256 and a
 per-resolution image would leak one texture per drag of the slider.
 
+## Slice 22 — a continent, and the sea its rivers reach ✅ done
+
+*Roadblock, and it was a viewer's rather than a builder's:* the drainage network
+looked clean and looked like it was **going somewhere**, and it wasn't. Every
+boundary cell was seeded as an outlet, so the map border was a magic drain and
+the answer to "where does this river end" was "it falls off the world". The demo
+was a 128² square of one valley system, and no amount of polishing the water
+would change what it was a picture of.
+
+So: **sixteen times the land, sixteen times the cells, and a sea.** The three are
+one change, because two of them are pointless without the third.
+
+**The sea is the part that answers the question.** `ErosionParams::sea_level` is
+base level: a cell at or below it routes to itself, never incises, never takes
+sediment, and reports `sea_level - z` of standing water. The Priority-Flood is
+seeded from it as well as from the border, so the flood grows *inland from the
+coastline* and a basin spills toward the nearest shore. Almost nothing else had
+to change to draw it — `depth` already meant "how much water is standing here",
+so taking `max(filled, sea)` instead of `filled` made one field describe a
+puddle, a lake and an ocean, and the wetness field, the surface mesh, the
+absorption and the minimap all drew the third without knowing it existed.
+`NoiseParams::coast` cuts the landmass out by drowning the rim, so what is left
+is an island with bays, headlands and offshore rocks.
+
+**The rewind paid for the size.** Slice 13's stored time axis is `4·n²` bytes a
+pass — 9.6 MB at 128², **2.4 GB** at 2048². It was the wall, and it was a real
+trade rather than a cleanup: erosion has no inverse, so a scrub that runs
+backwards is either stored or impossible. What replaced it is a bake that runs
+once, in front of you, keeping one pass ahead so the pair on screen is always a
+landscape and its own water at one flow routing per pass.
+
+**Growing a map is not the same as scaling one, and the first attempt got it
+backwards.** Sampling `span` times as much noise keeps a hill the same size and
+gives the map more of them — which is exactly what was asked for and was wrong on
+screen: sixteen times the land arrived as sixteen times as many identical hills
+with nothing larger than a hill anywhere on it, and from the only view that can
+see the whole map it read as **fur**. A continent is structure at every scale. So
+the lowest octave always spans the map and growing it adds octaves at the *fine*
+end, two per doubling — self-similar, so a 2048² continent has the same texture
+as the 128² one with four times the range of feature sizes in it. That single
+change is the difference between the hedgehog and a landmass with a mountain
+core, lowland plains and a river network that reaches the coast.
+
+Everything else is quoted against `span`: world extent, vertical scale, the river
+drawing threshold and width (both counted in *cells*, and a cell stopped being a
+fixed amount of ground), the camera's orbit distance and wheel step, and the
+length of the run. That last one is the model's own arithmetic rather than a
+concession to the clock — `A` is counted in cells, so four times the cells per
+unit of ground multiplies the cut per pass by four at `m = 0.5`, and the same
+landscape arrives in a quarter of the passes.
+
+*Two hard walls, both found by running it rather than by reasoning about it:*
+
+- **wgpu refused the biggest world outright.** The water mesh gave every clipped
+  polygon its own corners, which is unavoidable on a shoreline and pure waste in
+  open water; an all-ocean 2048² map asked for a **780 MB** vertex buffer against
+  a 256 MB `max_buffer_size` and the demo would not start. Sharing the interior's
+  vertices — the overwhelming majority — takes the same geometry to 168 MB.
+- **The camera was standing between two peaks.** Orbit distance and its clamps
+  were in world units and fixed, so the outer stop sat inside the mountains of a
+  1024² map. The first screenshot of the big continent is a photograph of that
+  bug.
+
+*Cost, measured on this machine:* a pass is 3.6 ms at 128², 64 ms at 512², 275 ms
+at 1024² and 1.6 s at 2048², and the bake takes at most one pass per frame (the
+clock will ask for eight when it is behind, and obeying it at 2048² is a
+twelve-second frame). The default is 512² — four times the land, a bake of a few
+seconds. 2048² takes minutes, which is the deal the size came with.
+
+*And one artifact the size created:* the ripple normal has no mip chain, so on the
+first genuinely large flat surface it drew its own aliasing as a fixed lattice.
+Faded below two pixels a wavelength off `fwidth` — see ARCHITECTURE.md.
+
+*Proof:* `cargo run --example terrain` bakes an island with a mountain core,
+inland lakes that silt up over the run, a dendritic network draining to a ragged
+coast, and offshore rocks. `cargo xtask shoot terrain --script
+capture/terrain-plot.script` still passes — its coordinates survived, and the
+Bake section draws every row unconditionally so the panel does not reflow under
+them when the bake finishes.
+
 ## The UI split (post-Slice 6)
 
 Slice 5 delivered a UI framework as a side effect of the terrain demo needing
