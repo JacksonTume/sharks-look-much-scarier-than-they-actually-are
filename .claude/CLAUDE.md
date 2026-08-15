@@ -68,6 +68,13 @@ cargo xtask shoot terrain --script capture/terrain-plot.script  # UI Slice 10's
 # Type-check the wasm target without packaging
 cargo build --target wasm32-unknown-unknown --lib
 
+# Enter the WebGL2 fallback deliberately, instead of waiting for a browser
+# without WebGPU. `limits` needs no GL driver and works on any machine; it is
+# how the 16-vertex-attribute ceiling gets checked. On the web these are query
+# parameters instead: ?backend=gl&limits=webgl2
+SLMSTTAA_LIMITS=webgl2 cargo run --example scene   # the browser's ceilings
+SLMSTTAA_BACKEND=gl    cargo run --example scene   # a real GL adapter
+
 # Re-bake the font atlas. Runs by hand, roughly never; its output
 # (slmsttaa-ui/src/font/{atlas.bin,metrics.rs}) is committed and reviewed.
 cargo run -p fontbake --release
@@ -134,11 +141,12 @@ To confirm a change works:
   update — `ui_pointer`, most obviously — is stale while it is parked: move the
   pointer on an earlier frame than you click or scroll with it. Panel
   coordinates are stable in logical points but **reflow**, so a click that opens a
-  section moves everything under it. And **a script cannot move a slider**: `click`
-  is a press and a release with no update between them, so `Response::held` is
-  never true for a frame, and every drag widget reads `held`. Buttons, checkboxes
-  and the wheel work; sliders have to be worked around (UI Slice 10's script
-  advances the erosion by *playing* rather than by scrubbing).
+  section moves everything under it. And **a drag is `press` / `move` / `release`,
+  not `click`**: `click` delivers both edges inside one frozen frame, so
+  `Response::held` is never true for a frame and every drag widget reads `held`.
+  Spread the three verbs over separate checkpoints and real frames run in
+  between, which is what makes a slider follow the cursor
+  (`capture/terrain-drag.script`).
 
   It does **not** replace looking: it proves pixels did not move, which is a
   different claim from "this is right", and every bug in the list above was found
@@ -190,6 +198,12 @@ To confirm a change works:
   control). The web half of the Definition of Done is therefore a *build and
   boot* check there — say so in the roadmap rather than implying a picture was
   looked at.
+- **"Checked in a browser" is not the same as "checked on both web paths."**
+  Chrome serves WebGPU whenever it can, so five slices' worth of browser checks
+  never once entered the WebGL2 fallback — and a `textureLoad` on a depth texture
+  that GLSL cannot express sat there undetected from Slice 16. Use
+  `SLMSTTAA_LIMITS=webgl2` (any machine) and `SLMSTTAA_BACKEND=gl` (needs a GL
+  driver) when touching shaders, bind groups, or the instance buffer.
 
 ## Gotchas (quick reference)
 

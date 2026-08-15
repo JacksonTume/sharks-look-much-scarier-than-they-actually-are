@@ -172,7 +172,9 @@ On Linux it starts its own `Xvfb`, runs the example against it (lavapipe answers
 as a software Vulkan adapter), and photographs the window with ImageMagick's
 `import` at frame numbers the engine announces. On Windows it parks the window
 off the desktop and asks the compositor for it instead. A script adds
-`move`/`click`/`wheel`/`key` steps keyed to those same frames.
+`move`/`click`/`press`/`release`/`wheel`/`key` steps keyed to those same frames —
+`press` and `release` being separate is what lets one *drag*, since a button held
+across two checkpoints is a button held across real frames.
 
 ### The two things that made this worth building
 
@@ -218,10 +220,14 @@ failure mode here is well understood and is the one `slmsttaa-ui/README.md` was
 written to prevent: the tooling becoming the project.
 
 - **Committed golden images, and `shoot --check`.** Everything needed is here —
-  captures are exact now — but a golden is only worth its review cost if
-  something runs it unprompted, and this repo has no CI. The `.gitignore` keeps
-  `capture/*.script` and drops the PNGs, so the shape is ready when the answer
-  changes.
+  captures are exact now — and the half that was missing has arrived: there is CI
+  (`.github/workflows/ci.yml`), so "something runs it unprompted" is no longer the
+  blocker it was. What still argues for waiting is the *review* cost rather than
+  the running cost, plus one measured limit: a shot taken after an input step is
+  stable within a build and not across one (see the synthetic-input entry below),
+  so a golden of a scripted click would fail on an unrelated commit. The two
+  input-free shots are already exact and are what a first golden should be. The
+  `.gitignore` keeps `capture/*.script` and drops the PNGs, so the shape is ready.
 - **Engine-side readback** (`copy_texture_to_buffer` plus an image writer), so a
   capture needs no X server at all and grabs the surface rather than a window.
   That would also make a capture callable from a `#[test]`, which is the real
@@ -243,18 +249,30 @@ written to prevent: the tooling becoming the project.
   a build and not guaranteed across one, which is precisely the exactness this
   entry promises. Until it lands, a golden image taken after an input step is a
   same-build comparison, not a same-commit one.
-- **A press and a release, so a script can drag.** Found writing
-  `capture/terrain-plot.script` for UI Slice 10, and it is the wheel's story
+- ~~**A press and a release, so a script can drag**~~ — **done.** Found writing
+  `capture/terrain-plot.script` for UI Slice 10, and it was the wheel's story
   again: `Action::Click` is a press *and* release with no update in between, so
-  `Response::held` is never true for a single frame — and **every drag widget in
-  the toolkit acts on `held`**. A button can be clicked; a slider cannot be moved
-  at all, which means the transport's scrub, both erosion `log_slider`s, and every
-  numeric knob in every demo are unreachable by the harness. The script worked
-  around it by letting the demo *play* to the pass it wanted, which happens to be
-  available here and will not always be. The fix is small — split `Click` into
-  `press`/`release` steps, or add a `drag` that holds across a frame — and it is
-  listed rather than done because the workaround cost nothing this time and the
-  grammar is worth changing once, deliberately.
+  `Response::held` was never true for a single frame — and **every drag widget in
+  the toolkit acts on `held`**. A button could be clicked; a slider could not be
+  moved at all, which put the transport's rate, both erosion `log_slider`s and
+  every numeric knob in every demo out of the harness's reach. That is the one
+  entry on this list that was blocking verification of code *already shipped*
+  rather than enabling something new, which is why it went first.
+
+  The grammar gained `press` and `release` as separate steps, and `click` became
+  the pair — defined once in `Harness`, not re-implemented per platform, so a
+  scripted click and a scripted drag cannot drift apart. `mouse_move` on Windows
+  now carries `MK_LBUTTON` while the button is down, because the button flags
+  ride every mouse message and a move that does not set them is a jump rather
+  than a drag.
+
+  *Proof:* `capture/terrain-drag.script` grabs the `passes/sec` knob and pulls it
+  across the track — 8, then **18 photographed mid-drag with the button still
+  down**, then 27. The control matters as much as the result: the identical
+  script with `click` in place of `press`/`move`/`release` leaves the readout at
+  8 and the knob where it started. Two runs are still byte-identical, including
+  the shots taken during the drag, so the reproducibility this section advertises
+  survived a new input verb.
 - **Web capture.** Headless Chrome here photographs a blank canvas from a WebGPU
   surface — verified against *unmodified* code as a control, so it is
   environmental rather than a defect. Until it moves, the web half of the
@@ -992,6 +1010,34 @@ count, which is monotone and is the number the frame-rate claim is actually
 about. `Timeline::steps_last_frame` was then deleted rather than left unread — a
 public accessor with no caller is the speculative build principle 2 forbids, and
 the cap biting is already visible as sim time falling behind wall time.
+
+**The sweep this slice made was not as complete as it reads, and that was found
+later.** The text above says the demos carrying the defect were `cube.rs` and
+`gallery.rs`, "in the two places nobody had looked" — and both were fixed. What
+nobody looked at was the **camera**. Every demo that orbits from the arrow keys
+carried `const KEY_STEP: f32 = 0.03` applied per *frame* (`grid.rs`, `scene.rs`,
+`editor.rs`, `terrain.rs`), and `gallery.rs`'s idle drift added a flat `0.004` per
+frame as well — so this slice took the defect out of five demos' *scenes* and left
+it in six demos' *viewpoints*, where it had exactly the same shape and the same
+cause. `grid.rs` still carried the comment "a real frame clock is a later slice",
+pointing at `cube.rs` as a fellow offender, two slices after the clock landed and
+`cube.rs` was fixed.
+
+They are rates now — 1.8 radians a second, and 0.24 for the drift — scaled by
+`Renderer::dt`. The mouse path deliberately keeps its bare constant, because
+`mouse_delta` is *already* this frame's motion: a drag is distance, a held key is
+duration, and multiplying the first by `dt` would be the same error mirrored.
+
+The conversion is exact by construction (1.8 = 0.03 × 60), which made the fix
+checkable rather than merely plausible: under `cargo xtask shoot`'s pinned 1/60
+clock, `gallery` at frame 120 is **byte-identical** before and after. The picture
+at 60 Hz does not move and everything away from 60 Hz does, which is the same
+shape of evidence Slices 9 & 10 used when terrain's CPU shading bake was deleted.
+
+*The lesson is about the sweep, not the arithmetic.* A defect that was named,
+understood and written down still survived in six files, because the search was
+for the *symptom* this slice was about — a spinning object — rather than for the
+*shape* of the bug, which is any state advanced by a constant per frame.
 
 *On the parity risk.* `Timeline` sits entirely above `Clock`, so it needed no
 `#[cfg]` and adds no vertex attribute, draw call, or shader edit — there is no
@@ -2064,6 +2110,161 @@ coast, and offshore rocks. `cargo xtask shoot terrain --script
 capture/terrain-plot.script` still passes — its coordinates survived, and the
 Bake section draws every row unconditionally so the panel does not reflow under
 them when the bake finishes.
+
+## Slice 23 — the viewpoint six demos agreed on ✅ done
+
+*Roadblock:* **none, and that is the first thing to say about it.** Every slice
+above was pulled into existence by something a demo could not do. This one was
+pulled by something six demos had all done *separately* — and it only got noticed
+because a frame-rate bug had to be fixed in it six times in a row.
+
+`grid.rs`, `gallery.rs`, `scene.rs`, `editor.rs`, `workspace.rs` and `terrain.rs`
+each carried the same spherical-coordinate block: the same `yaw`/`pitch`/
+`distance`, the same `mdx * 0.005`, the same four `is_key_held` calls, the same
+`clamp` pair, and the same six lines turning the three into an eye. Slice 3 had
+declined to push it down — *"a single consumer doesn't justify one yet"* — which
+was correct then and quietly stopped being correct somewhere around the fourth
+copy. Nobody re-asked the question, because the rule this project runs on asks
+*"what can't a demo do?"* and the answer stayed "nothing".
+
+- **`Orbit`** in `src/camera.rs`: pivot, yaw, pitch, distance, the two limit
+  ranges, and the three rates. All fields public, so anything the demos disagreed
+  on is a struct update rather than a constructor argument.
+- **`OrbitInput { drag, keys, zoom }`** — three gates, because all six demos gate
+  the three differently and `editor.rs` gates all three at once (the left button
+  belongs to the objects, the wheel to the panel under the pointer, and the keys
+  to whatever text field has focus).
+
+**What deliberately did *not* move, and it is most of the interesting part:**
+
+- **Aiming.** `Orbit::eye` returns a position and stops. Every one of the six
+  circles a pivot and looks somewhere *else* — `scene.rs` at `y = 0.9`,
+  `editor.rs` at `0.5`, `terrain.rs` at `vheight(n) * 0.35`, `workspace.rs` at
+  `0.6` while orbiting a pivot at `1.0`. A type that aimed the camera would have
+  had to grow a second point immediately, and `Camera::look_from_to` already
+  exists.
+- **Which button orbits, and who owns the pointer.** That is the consumer's, and
+  `OrbitInput` is how the answer arrives rather than a thing the engine decides.
+- **The limits.** `terrain.rs` quotes both distance limits against its map span
+  and re-applies them every frame, because the continent can be resized from the
+  panel; `workspace.rs` is the only one whose pitch floor is *negative*, because
+  looking up at the props from slightly below is a workspace-y thing to want.
+- **`gallery.rs`'s attract-mode drift**, which stays four lines in the demo. An
+  idle drift is that gallery's idea, not a property of orbiting — and the public
+  fields are exactly what make it expressible without an engine feature.
+
+*On the unprivileged rule.* Every line of `Orbit::drive` is written against the
+same public `Input` a consumer reads. Nothing here reaches for anything a demo
+could not, which is the test `slmsttaa-ui` already applies to its widgets, applied
+to the engine for the first time — and it is what makes this a convenience rather
+than a new privileged path.
+
+*Proof, and it is the strongest shape available for a refactor:* all six demos
+photographed at frame 120 before and after. **Four are byte-identical.**
+`editor.rs` differs in 96 pixels, all of them inside its own `ui 0.2x ms`
+profiling readout, which is the one number in that frame that is not a function
+of the frame index. `workspace.rs` differs in 904 pixels at a **maximum channel
+delta of 1** — float reassociation, because it wrote `sy * cp * d` where the
+other five wrote `d * cp * sy`, and one association order had to win. The four
+that match are the four that were already writing it the winning way.
+
+*And the frame-rate claim is finally testable.* The bug that exposed all this —
+a held key advancing by a flat step per frame — could only ever be checked by
+running two machines at two refresh rates. It is now six unit tests in
+`camera.rs`, the load-bearing one asserting that one 1-second step and a hundred
+10 ms steps land in the same place, with its mirror image asserting that a *drag*
+does **not** scale with `dt`. Getting the second one "consistent" with the first
+would be the same bug pointed the other way, which is the argument for both
+constants living on one type.
+
+*What it exposed.* That the demand-driven rule has a blind spot, and it is worth
+writing down rather than patching. "What can't a demo do?" finds missing
+capability and is silent about capability that exists six times. Nothing here was
+blocked; it was just written out repeatedly, and the cost only became visible as
+a bug that had to be fixed once per copy. The rule is still right — this is the
+twenty-third slice and the first exception to it — but *"what has every demo
+written out?"* is a second question worth asking occasionally, and it has now
+been asked once.
+
+## Parity, checked rather than reasoned about
+
+Two pieces of tooling that buy no capability and are here because a claim this
+file has repeated for five slices turned out to be false.
+
+**CI** (`.github/workflows/ci.yml`) runs the four commands the Definition of Done
+already names — both build targets, `cargo test --workspace`, `clippy -D
+warnings`, `fmt --check` — plus one that was prose until now: `cargo tree -p
+slmsttaa-ui` must print exactly **one line**. The zero-dependency rule is the
+toolkit's central design claim and the likeliest thing to be lost quietly, since
+a rasterizer could arrive as a build-dependency of a dependency and nothing would
+say so.
+
+**`SLMSTTAA_BACKEND` / `SLMSTTAA_LIMITS`** (`src/backend.rs`, and `?backend=gl` /
+`?limits=webgl2` on the web) make the fallback path reachable *on purpose*. Both
+are environment-driven and private, for the reason `capture.rs` already gives: a
+setter only a parity check calls would widen the surface `examples/triangle.rs`
+exists to measure.
+
+The `limits` half is the more useful and works everywhere — asking a desktop
+Vulkan adapter for `downlevel_webgl2_defaults` reproduces the browser fallback's
+*ceilings* with no browser involved. **All eight demos pass under it**, which is
+the first time the sixteen-attribute budget (of which the instance buffer spends
+fourteen) has been a result rather than an inspection.
+
+**And the `backend` half found the thing this was built to find, on its first
+run.** Forcing a GL adapter fails outright:
+
+```
+Internal error in ShaderStages(FRAGMENT) shader:
+WGSL `textureLoad` from depth textures is not supported in GLSL
+  In Device::create_render_pipeline, label = 'slmsttaa scene pipeline'
+```
+
+One call site — `depth_at` in `shader.wgsl`. It has been there since Slice 16,
+which means **the WebGL2 fallback this repo documents has been broken for seven
+slices** and every demo would refuse to start in a browser without WebGPU.
+Nothing caught it because Chrome always served WebGPU, and the roadmap's own note
+— "WebGL2 remains unexercised, now for the fifth slice running" — was recording
+the exposure without anyone acting on it.
+
+**Fixed**, and the fix is a one-word change to a binding: depth is bound
+`unfilterable-float` rather than `Depth`, which is the other sample type WebGPU
+allows a depth format. A `Depth` binding is a `sampler2DShadow` in GLSL and there
+is no way to read one without a comparison; as an ordinary float texture it is a
+`sampler2D` and `texelFetch` exists. The read is the same read — `terrain` at
+frame 200 is **byte-identical** across the change on the Vulkan path.
+
+**And behind it was a second one, which is not a defect and does not have a
+one-word fix.** With the pipelines finally compiling, the GL backend fails at the
+first frame instead:
+
+```
+Attempted to use Texture with 'scene depth' label with conflicting usages.
+Current usage TextureUses(RESOURCE) and new usage TextureUses(DEPTH_STENCIL_WRITE)
+```
+
+The blended pass attaches depth **read-only** so it can sample the texture it is
+testing against — the arrangement `ARCHITECTURE.md` describes as "the deliberate
+exception". The GL backend does not advertise
+`DownlevelFlags::READ_ONLY_DEPTH_STENCIL` (measured: `true` on Vulkan, `false` on
+GL), so that attachment does not exist there and wgpu refuses the pass rather
+than permit the aliasing. **Slice 16's water is not spelled differently on
+WebGL2; it is inexpressible on it.** The engine now warns when the flag is
+missing, so the failure names its own cause.
+
+Three ways out, none taken: a **second colour target** carrying linear depth from
+the opaque pass (portable, costs an attachment, touches the opaque pipeline); a
+**copy** of the depth texture before the blended pass (needs
+`DEPTH_TEXTURE_AND_BUFFER_COPIES`, which WebGL2 may also lack); or **degrade** —
+read the flag and drop refraction, absorption and reflection there, which keeps a
+WebGL2 browser running and looking worse. That is a decision about how much the
+fallback is worth, not a bug to be squashed, and it is recorded rather than
+guessed at.
+
+This is the strongest possible argument for the tool, and the least comfortable:
+five slices of "checked in a browser" meant checked on one of two paths, and the
+claim about the other was inference that had quietly become wrong — twice over,
+with the second problem hidden behind the first.
 
 ## The UI split (post-Slice 6)
 

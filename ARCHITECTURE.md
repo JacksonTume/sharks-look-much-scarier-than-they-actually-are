@@ -30,7 +30,10 @@ src/
 │                     and wall-clock seconds since start). look_from_to lets a
 │                     consumer aim it with plain [f32; 3] arrays. The last two
 │                     fields are there because the *fragment* stage needs them —
-│                     see Shading the 3D pass below.
+│                     see Shading the 3D pass below. Also Orbit/OrbitInput: the
+│                     spherical viewpoint six demos had each written out, moved
+│                     here in Slice 23. It produces an *eye*, not an aim — where
+│                     a camera looks is still the consumer's.
 ├── input.rs          Input: per-frame keyboard/mouse state, decoupled from
 │                     winit. Exposes engine Key/MouseButton/Modifiers types
 │                     (never winit's); the event loop feeds it, the consumer
@@ -126,8 +129,8 @@ examples/
 │                     buttons (web-sys) that drive the selection, on native it
 │                     auto-cycles.
 ├── grid.rs           Orbitable height-mapped terrain grid: proves the input +
-│                     camera seam (Slice 3). Keeps its own orbit state and aims
-│                     the camera from Renderer::input() each frame.
+│                     camera seam (Slice 3). Owns an Orbit, chooses its limits
+│                     and which button turns it, and aims the camera each frame.
 └── terrain.rs        The capstone and default web build: layered, iterative
     terrain/          terrain. A Perlin-noise base heightmap (heightmap.rs) is
     ├── heightmap.rs  carved by a stream-power landscape-evolution model
@@ -262,8 +265,12 @@ principle 1). Input is funneled instead:
    accumulate within a frame, and an ordered **event log**. Its public getters
    speak only in engine `Key`/`MouseButton`/`Modifiers` types.
 3. The consumer reads it in `update` via `Renderer::input()` and moves the camera
-   through `Renderer::camera_mut()`. The *control scheme lives in the consumer*
-   (e.g. `grid.rs`'s orbit math); the engine only exposes the input and the camera.
+   through `Renderer::camera_mut()`. The *control scheme lives in the consumer* —
+   which button orbits, whether the UI has first claim on the pointer, and where
+   the camera aims. Since Slice 23 the engine also ships `Orbit`, the spherical
+   arithmetic all six orbiting demos had independently written out; it reads the
+   same public `Input` a consumer does and produces an eye position, so it is a
+   convenience rather than a privileged path.
 4. After the frame is drawn, `Input::end_frame` zeroes the per-frame deltas, the
    press-edges and the event log (held state and modifiers survive), so the next
    `update` sees only that frame's motion.
@@ -400,6 +407,36 @@ it while reading it. Depth is the deliberate exception — the blended pass samp
 the same depth texture it tests against, which is legal precisely because it
 declares that it does not *write* it, and gets a read-only attachment as a result.
 
+**Two things about that depth binding are load-bearing for the GL backend, and
+both were found by forcing it** (`SLMSTTAA_BACKEND=gl`; see `src/backend.rs`).
+
+*Fixed:* depth is bound with sample type **`unfilterable-float`, not `Depth`**,
+and declared in WGSL as `texture_2d<f32>` rather than `texture_depth_2d`. Both
+are legal for a depth format under WebGPU, and only one survives translation to
+GLSL: a `Depth` binding becomes a `sampler2DShadow`, which has no non-comparison
+read at all — `textureLoad` is rejected by naga outright ("textureLoad from depth
+textures is not supported in GLSL") and `textureSampleLevel` compiles to a
+`textureLod(sampler2DShadow, vec2, int)` no driver implements. As
+`unfilterable-float` it is a plain `sampler2D`, `texelFetch` exists, and the read
+is bit-for-bit the one intended — verified by a capture that is byte-identical
+across the change. This had made **every** demo fail to create its pipelines on a
+WebGL2-only browser since Slice 16.
+
+*Not fixed, and it is a design question rather than a defect:* the GL backend
+does not advertise `DownlevelFlags::READ_ONLY_DEPTH_STENCIL` (Vulkan does), so
+the read-only attachment the paragraph above depends on **does not exist there**.
+wgpu correctly refuses the pass — `TextureUses(DEPTH_STENCIL_WRITE) is an
+exclusive usage` — which means the water's whole "test against depth while
+sampling it" arrangement is inexpressible on WebGL2, not merely spelled
+differently. The engine logs a warning naming this when the flag is absent. The
+three ways out, none taken yet: write linear depth to a **second colour target**
+from the opaque pass and sample that (portable, costs an attachment and touches
+the opaque pipeline); **copy** the depth texture before the blended pass (needs
+`DEPTH_TEXTURE_AND_BUFFER_COPIES`, which WebGL2 may also lack); or **degrade** —
+detect the flag and draw water without refraction, absorption or reflection,
+which keeps a WebGL2 browser running at a lower fidelity and is the smallest
+honest option.
+
 ### Where the scene goes (Slice 19)
 
 `Renderer::set_scene_rect` inserts a rectangle between the frame and the window,
@@ -489,7 +526,41 @@ things a material can layer on top:
   between them. Displacing in proportion to coverage means a surface that is
   barely there moves nothing.
 
-Two properties of that list matter more than the terms themselves:
+### Why these terms count as engine-shaped
+
+Worth setting down, because the list reads like water and only one consumer uses
+any of it. Seven of `Material`'s eleven fields — `fresnel`, `fresnel_tint`,
+`ripple_strength`, `ripple_scale`, `refraction`, `absorption`, `reflection` —
+appear in no demo but `terrain.rs`, and the Definition of Done says the engine
+contains **zero** consumer-specific content. That is a fair thing to point at, and
+the answer is that *one demander is not the same as consumer-specific*:
+
+- **None of them names water.** Specular, Fresnel, refraction, absorption and
+  screen-space reflection are properties of a *surface*, and the same seven
+  numbers describe wet stone, glass, a lacquered floor or ice. What makes
+  terrain's water look like water is the values it passes, which live in
+  `terrain.rs` as named constants — and the erosion model that decides where the
+  surface *is*, which the engine has never seen.
+- **The ripple is the one worth arguing about, and it is a normal perturbation
+  with two consumer-set parameters** — an amplitude and a spatial frequency. It
+  generates a field rather than sampling one, which is the part that could
+  reasonably live above the seam; the reason it does not is that Slice 14 put it
+  in the *mesh* first and it cost 10 ms a frame and banded (below). Per-fragment
+  is where it has to be evaluated, and per-fragment is the engine's side.
+- **The test is whether the engine knows what the objects mean**, which is the
+  same test that keeps the stream-power solver in the demo. `shader.wgsl` cannot
+  tell a river from a lacquered table; `erosion.rs` is the file that knows what a
+  river is, and it is 646 lines that have never been in the engine.
+
+**The recorded alternative, should this ever need revisiting:** move the ripple
+behind a consumer-supplied normal map. Slice 21 already ships `create_image`, so
+the seam exists — the engine would sample a texture instead of generating waves,
+and terrain would own its own wave field. It is not being done, because it would
+trade one attribute slot's worth of parameters for a texture upload and a
+bandwidth cost, to move code that names no consumer concept. Revisit if a second
+consumer wants a *different* wave model rather than different constants.
+
+Two properties of the list above matter more than the terms themselves:
 
 - **Everything defaults to zero, so the model is additive in the ledger sense.**
   A material that sets none of it produces the identical picture it did before
