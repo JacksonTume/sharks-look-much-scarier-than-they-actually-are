@@ -54,8 +54,8 @@ use slmsttaa::ui::{anim, font, Anchor, Rows, Theme, Ui, Variant};
 // than hidden, because the duplication is the design and not an accident.
 use slmsttaa::ui::Key as UiKey;
 use slmsttaa::{
-    run, Application, Instance, Key, Material, Mesh, MeshHandle, MouseButton, Ray, RenderMode,
-    Renderer, Transform,
+    run, Application, Instance, Key, Material, Mesh, MeshHandle, MouseButton, Orbit, OrbitInput,
+    Ray, RenderMode, Renderer, Transform,
 };
 
 /// Width of the inspector panel and the HUD, in logical points.
@@ -299,10 +299,8 @@ struct EditorDemo {
     /// What the scene list is filtered by. Empty shows everything.
     filter: String,
 
-    /// Orbit camera state (azimuth, elevation, range).
-    yaw: f32,
-    pitch: f32,
-    distance: f32,
+    /// The viewpoint.
+    orbit: Orbit,
 
     wireframe: bool,
     theme: Theme,
@@ -331,9 +329,12 @@ impl Default for EditorDemo {
             ui_pointer: false,
             ui_keyboard: false,
             filter: String::new(),
-            yaw: 0.7,
-            pitch: 0.45,
-            distance: 11.0,
+            orbit: Orbit {
+                pitch_range: (0.08, 1.4),
+                distance_range: (3.0, 34.0),
+                zoom_per_notch: 0.8,
+                ..Orbit::new(0.7, 0.45, 11.0)
+            },
             wireframe: false,
             theme: Theme::dark(),
             fps: 60.0,
@@ -780,7 +781,7 @@ impl EditorDemo {
     /// Add an object of `shape`, placed in front of the camera so it lands where
     /// the user is looking rather than behind them.
     fn spawn(&mut self, shape: Shape) {
-        let (sin, cos) = self.yaw.sin_cos();
+        let (sin, cos) = self.orbit.yaw.sin_cos();
         let mut object = Object {
             name: format!("{} {}", shape.label(), self.objects.len() + 1),
             shape,
@@ -837,53 +838,30 @@ impl EditorDemo {
     /// belongs to the objects — so an orbit drag is one that *started* on empty
     /// space, or any drag of the right button.
     fn drive_camera(&mut self, renderer: &mut Renderer) {
-        let input = renderer.input();
-        let orbiting = self.grab == Grab::Orbit || input.is_mouse_held(MouseButton::Right);
-        let (mdx, mdy) = input.mouse_delta();
-        let scroll = if self.ui_pointer {
-            0.0
-        } else {
-            input.scroll_delta()
-        };
-        // The keys are the UI's first. Without this guard, typing a name flies
-        // the camera — and because a camera reads *held* keys rather than press
-        // edges, it would keep flying for as long as the key was down.
-        let keys = !self.ui_keyboard;
-        let left = keys && input.is_key_held(Key::Left);
-        let right = keys && input.is_key_held(Key::Right);
-        let up = keys && input.is_key_held(Key::Up);
-        let down = keys && input.is_key_held(Key::Down);
+        let orbiting =
+            self.grab == Grab::Orbit || renderer.input().is_mouse_held(MouseButton::Right);
+        let dt = renderer.dt();
 
-        if orbiting {
-            self.yaw -= mdx * 0.005;
-            self.pitch -= mdy * 0.005;
-        }
-        const KEY_STEP: f32 = 0.03;
-        if left {
-            self.yaw += KEY_STEP;
-        }
-        if right {
-            self.yaw -= KEY_STEP;
-        }
-        if up {
-            self.pitch += KEY_STEP;
-        }
-        if down {
-            self.pitch -= KEY_STEP;
-        }
-        self.distance -= scroll * 0.8;
+        // All three gates differ here, which is why they are three. The left
+        // button belongs to the objects, so an orbit drag is one that *started*
+        // on empty space or any right-drag. The wheel is the panel's while the
+        // pointer is over it. And the keys are the UI's first: without that
+        // guard, typing a name flies the camera — and because a camera reads
+        // *held* keys rather than press edges, it would keep flying for as long
+        // as the key was down.
+        self.orbit.drive(
+            renderer.input(),
+            dt,
+            OrbitInput {
+                drag: orbiting,
+                keys: !self.ui_keyboard,
+                zoom: !self.ui_pointer,
+            },
+        );
 
-        self.pitch = self.pitch.clamp(0.08, 1.4);
-        self.distance = self.distance.clamp(3.0, 34.0);
-
-        let (sp, cp) = self.pitch.sin_cos();
-        let (sy, cy) = self.yaw.sin_cos();
-        let eye = [
-            self.distance * cp * sy,
-            self.distance * sp,
-            self.distance * cp * cy,
-        ];
-        renderer.camera_mut().look_from_to(eye, [0.0, 0.5, 0.0]);
+        renderer
+            .camera_mut()
+            .look_from_to(self.orbit.eye(), [0.0, 0.5, 0.0]);
     }
 }
 

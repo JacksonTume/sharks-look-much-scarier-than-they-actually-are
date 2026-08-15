@@ -42,7 +42,8 @@ use std::f32::consts::TAU;
 
 use slmsttaa::ui::{Anchor, Theme, Variant};
 use slmsttaa::{
-    run, Application, Instance, Material, Mesh, MeshHandle, MouseButton, Renderer, Transform,
+    run, Application, Instance, Material, Mesh, MeshHandle, MouseButton, Orbit, OrbitInput,
+    Renderer, Transform,
 };
 
 /// Width of the left-hand control panel, in points.
@@ -95,10 +96,9 @@ struct Workspace {
     turning: bool,
     /// When false the scene fills the window, exactly as every earlier demo does.
     inset: bool,
-    /// Orbit camera state.
-    yaw: f32,
-    pitch: f32,
-    distance: f32,
+    /// The viewpoint. Its pivot is a metre off the floor rather than on it, so
+    /// the props sit in the middle of the pane at every elevation.
+    orbit: Orbit,
     theme: Theme,
     /// Whether the UI claimed the pointer this frame, so a drag on a panel does
     /// not also orbit the stage.
@@ -119,9 +119,16 @@ impl Default for Workspace {
             spin: 0.0,
             turning: true,
             inset: true,
-            yaw: 0.6,
-            pitch: 0.42,
-            distance: 8.5,
+            orbit: Orbit {
+                pivot: [0.0, 1.0, 0.0],
+                // The one demo whose floor is negative: you may look up at the
+                // props from slightly below, which is a workspace-y thing to want
+                // and a hill-shaped demo never does.
+                pitch_range: (-1.2, 1.35),
+                distance_range: (3.5, 20.0),
+                zoom_per_notch: 0.5,
+                ..Orbit::new(0.6, 0.42, 8.5)
+            },
             theme: Theme::dark(),
             ui_pointer: false,
             orbiting: false,
@@ -185,27 +192,25 @@ impl Workspace {
 
     /// Orbit and zoom, driven only by drags that belong to the scene.
     fn drive_camera(&mut self, renderer: &mut Renderer) {
-        let input = renderer.input();
-        let (mdx, mdy) = input.mouse_delta();
-        let scroll = if self.ui_pointer {
-            0.0
-        } else {
-            input.scroll_delta()
-        };
-        if self.orbiting {
-            self.yaw -= mdx * 0.005;
-            self.pitch = (self.pitch - mdy * 0.005).clamp(-1.2, 1.35);
-        }
-        self.distance = (self.distance - scroll * 0.5).clamp(3.5, 20.0);
+        let dt = renderer.dt();
+        // No arrow-key orbit in this demo, and the drag gate is `orbiting` rather
+        // than "is the button down": a drag that *began* on the scene keeps
+        // turning even when the cursor wanders onto a panel.
+        self.orbit.drive(
+            renderer.input(),
+            dt,
+            OrbitInput {
+                drag: self.orbiting,
+                keys: false,
+                zoom: !self.ui_pointer,
+            },
+        );
 
-        let (sy, cy) = self.yaw.sin_cos();
-        let (sp, cp) = self.pitch.sin_cos();
-        let eye = [
-            sy * cp * self.distance,
-            sp * self.distance + 1.0,
-            cy * cp * self.distance,
-        ];
-        renderer.camera_mut().look_from_to(eye, [0.0, 0.6, 0.0]);
+        // Orbiting a metre up and aiming slightly below it: the pivot frames the
+        // props, the aim keeps the horizon where it looks right.
+        renderer
+            .camera_mut()
+            .look_from_to(self.orbit.eye(), [0.0, 0.6, 0.0]);
     }
 
     /// Build this frame's draw-list: ground, props, and the selection cage.

@@ -34,8 +34,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use slmsttaa::{
-    run, Application, Instance, Material, Mesh, MeshHandle, MouseButton, Renderer, Transform,
-    Vertex,
+    run, Application, Instance, Material, Mesh, MeshHandle, MouseButton, Orbit, OrbitInput,
+    Renderer, Transform, Vertex,
 };
 
 /// The scenes the gallery can show, in button order.
@@ -232,10 +232,8 @@ struct GalleryDemo {
     current: usize,
     /// Rotation accumulator for animated scenes.
     angle: f32,
-    /// Orbit state for the camera-driven grid scene (azimuth, elevation, range).
-    yaw: f32,
-    pitch: f32,
-    distance: f32,
+    /// Viewpoint for the camera-driven grid scene. The flat scenes ignore it.
+    orbit: Orbit,
     /// Native-only frame counter driving the auto-cycle.
     #[cfg(not(target_arch = "wasm32"))]
     frames: u32,
@@ -248,9 +246,12 @@ impl GalleryDemo {
             meshes: Vec::new(),
             current: 0,
             angle: 0.0,
-            yaw: 0.7,
-            pitch: 0.6,
-            distance: 6.0,
+            orbit: Orbit {
+                pitch_range: (0.08, 1.5),
+                distance_range: (2.0, 20.0),
+                zoom_per_notch: 0.5,
+                ..Orbit::new(0.7, 0.6, 6.0)
+            },
             #[cfg(not(target_arch = "wasm32"))]
             frames: 0,
         }
@@ -267,31 +268,38 @@ impl GalleryDemo {
             return;
         }
 
-        // Read input out first (ends the immutable borrow before `camera_mut`).
-        let input = renderer.input();
-        let dragging = input.is_mouse_held(MouseButton::Left);
-        let (mdx, mdy) = input.mouse_delta();
-        let scroll = input.scroll_delta();
+        let dragging = renderer.input().is_mouse_held(MouseButton::Left);
+        let dt = renderer.dt();
 
-        if dragging {
-            self.yaw -= mdx * 0.005;
-            self.pitch -= mdy * 0.005;
-        } else {
-            // Idle: drift slowly so the grid stays lively on native too.
-            self.yaw += 0.004;
+        // No arrow keys in this demo — the web build's controls are DOM buttons,
+        // and the keyboard is not spoken for. Drag and wheel only.
+        self.orbit.drive(
+            renderer.input(),
+            dt,
+            OrbitInput {
+                drag: dragging,
+                keys: false,
+                zoom: true,
+            },
+        );
+
+        // Idle: drift slowly so the grid stays lively on native too — at a rate
+        // in radians a second, not a step per frame. Slice 12 took the
+        // flat-per-frame defect out of this demo's *scene* and left it here in
+        // its *camera*, where the drift ran at twice the speed on a 144 Hz
+        // machine.
+        //
+        // It stays in the demo rather than becoming an `Orbit` field: an
+        // attract-mode drift is this gallery's idea, not a property of orbiting,
+        // and the public fields are what make it expressible without one.
+        if !dragging {
+            const DRIFT_RATE: f32 = 0.24;
+            self.orbit.yaw += DRIFT_RATE * dt;
         }
-        self.distance -= scroll * 0.5;
-        self.pitch = self.pitch.clamp(0.08, 1.5);
-        self.distance = self.distance.clamp(2.0, 20.0);
 
-        let (sp, cp) = self.pitch.sin_cos();
-        let (sy, cy) = self.yaw.sin_cos();
-        let eye = [
-            self.distance * cp * sy,
-            self.distance * sp,
-            self.distance * cp * cy,
-        ];
-        renderer.camera_mut().look_from_to(eye, [0.0, 0.0, 0.0]);
+        renderer
+            .camera_mut()
+            .look_from_to(self.orbit.eye(), [0.0, 0.0, 0.0]);
     }
 }
 
@@ -339,10 +347,12 @@ impl Application for GalleryDemo {
             // Scene changed (button click or auto-cycle): point at another handle.
             self.current = sel;
             self.angle = 0.0;
-            // Start the orbit scene from a pleasant three-quarter view.
-            self.yaw = 0.7;
-            self.pitch = 0.6;
-            self.distance = 6.0;
+            // Start the orbit scene from a pleasant three-quarter view. Only the
+            // three coordinates are reset; the limits and rates are the demo's
+            // configuration and outlive a scene change.
+            self.orbit.yaw = 0.7;
+            self.orbit.pitch = 0.6;
+            self.orbit.distance = 6.0;
         }
 
         let scene = SCENES[self.current];

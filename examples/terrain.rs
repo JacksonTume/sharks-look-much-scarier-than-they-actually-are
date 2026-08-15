@@ -104,8 +104,8 @@
 
 use slmsttaa::ui::{font, Anchor, Color, Rect, Response, Size, Theme, Ui, Variant};
 use slmsttaa::{
-    run, Application, ImageId, Instance, Key, Material, Mesh, MeshHandle, MouseButton, RenderMode,
-    Renderer, Vertex,
+    run, Application, ImageId, Instance, Material, Mesh, MeshHandle, MouseButton, Orbit,
+    OrbitInput, RenderMode, Renderer, Vertex,
 };
 
 #[path = "terrain/erosion.rs"]
@@ -762,10 +762,10 @@ struct TerrainDemo {
     pending_base: bool,
     pending_erode: bool,
 
-    /// Orbit camera state (azimuth, elevation, range).
-    yaw: f32,
-    pitch: f32,
-    distance: f32,
+    /// The viewpoint. Alone among the demos its distance limits are not
+    /// constants: they are quoted against the map span and re-applied per frame,
+    /// because the continent can be resized from the panel.
+    orbit: Orbit,
 
     /// Smoothed frames-per-second for the HUD.
     fps: f32,
@@ -825,9 +825,12 @@ impl TerrainDemo {
             theme: Theme::dark(),
             pending_base: false,
             pending_erode: false,
-            yaw: 0.7,
-            pitch: 0.62,
-            distance: 6.5 * span(n),
+            // The distance limits and the zoom rate are set from the map span in
+            // `drive_camera`, every frame, because the map can change size.
+            orbit: Orbit {
+                pitch_range: (0.08, 1.5),
+                ..Orbit::new(0.7, 0.62, 6.5 * span(n))
+            },
             fps: 60.0,
             handles: None,
             minimap: None,
@@ -1863,58 +1866,36 @@ impl TerrainDemo {
 
     /// Orbit the camera from input (unless the pointer is over the UI panel).
     fn drive_camera(&mut self, renderer: &mut Renderer, wants_pointer: bool) {
-        let input = renderer.input();
-        let dragging = input.is_mouse_held(MouseButton::Left) && !wants_pointer;
-        let (mdx, mdy) = input.mouse_delta();
-        let scroll = if wants_pointer {
-            0.0
-        } else {
-            input.scroll_delta()
-        };
-        let (left, right, up, down) = (
-            input.is_key_held(Key::Left),
-            input.is_key_held(Key::Right),
-            input.is_key_held(Key::Up),
-            input.is_key_held(Key::Down),
+        let dragging = renderer.input().is_mouse_held(MouseButton::Left) && !wants_pointer;
+        let dt = renderer.dt();
+
+        // Everything the camera does is in world units, so all of it scales with
+        // the map — and it is re-applied here, every frame, because the map can
+        // change size under it. Left fixed, the wheel moved a sixteenth as far
+        // per notch on the big continent and the orbit's outer stop sat *inside*
+        // the mountains — the 1024² world's first screenshot was taken from
+        // between two peaks.
+        //
+        // The turn rates deliberately do **not** scale: an angle is an angle
+        // however big the continent is.
+        let span = span(self.n);
+        self.orbit.zoom_per_notch = 0.5 * span;
+        self.orbit.distance_range = (2.5 * span, 18.0 * span);
+
+        self.orbit.drive(
+            renderer.input(),
+            dt,
+            OrbitInput {
+                drag: dragging,
+                keys: true,
+                zoom: !wants_pointer,
+            },
         );
 
-        if dragging {
-            self.yaw -= mdx * 0.005;
-            self.pitch -= mdy * 0.005;
-        }
-        const KEY_STEP: f32 = 0.03;
-        if left {
-            self.yaw += KEY_STEP;
-        }
-        if right {
-            self.yaw -= KEY_STEP;
-        }
-        if up {
-            self.pitch += KEY_STEP;
-        }
-        if down {
-            self.pitch -= KEY_STEP;
-        }
-        // Everything the camera does is in world units, so all of it scales with
-        // the map. Left fixed, the wheel moved a sixteenth as far per notch on the
-        // big continent and the orbit's outer stop sat *inside* the mountains —
-        // the 1024² world's first screenshot was taken from between two peaks.
-        let span = span(self.n);
-        self.distance -= scroll * 0.5 * span;
-        self.pitch = self.pitch.clamp(0.08, 1.5);
-        self.distance = self.distance.clamp(2.5 * span, 18.0 * span);
-
-        let (sp, cp) = self.pitch.sin_cos();
-        let (sy, cy) = self.yaw.sin_cos();
-        let eye = [
-            self.distance * cp * sy,
-            self.distance * sp,
-            self.distance * cp * cy,
-        ];
         // Aim slightly above the base so the framed terrain sits centered.
         renderer
             .camera_mut()
-            .look_from_to(eye, [0.0, vheight(self.n) * 0.35, 0.0]);
+            .look_from_to(self.orbit.eye(), [0.0, vheight(self.n) * 0.35, 0.0]);
     }
 }
 
@@ -2008,7 +1989,7 @@ impl Application for TerrainDemo {
                 // Carry the camera across the change of scale: the viewer was
                 // looking at the map from some fraction of its width away, and
                 // should still be after it grows.
-                self.distance *= span(target_n) / span(self.n);
+                self.orbit.distance *= span(target_n) / span(self.n);
                 self.n = target_n;
                 self.regenerate_base();
             } else {

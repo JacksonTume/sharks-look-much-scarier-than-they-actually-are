@@ -6,10 +6,16 @@
 //! - **Input, winit-free:** the engine funnels mouse/keyboard events into an
 //!   [`Input`] snapshot the demo reads via [`Renderer::input`] — no `winit` in
 //!   sight (engine principle 1).
-//! - **A consumer-driven camera:** the demo keeps its own orbit state
-//!   (`yaw`/`pitch`/`distance`) and writes the eye position through
-//!   [`Renderer::camera_mut`] each frame. The *orbit math lives here*, not in the
-//!   engine — the engine only exposes input and the camera.
+//! - **A consumer-driven camera:** the demo owns an [`Orbit`] — its viewpoint,
+//!   its limits, and the decision of which button turns it — and writes the eye
+//!   through [`Renderer::camera_mut`] each frame.
+//!
+//!   *This used to say the orbit math lived here, and for nineteen slices it
+//!   did.* Slice 3 declined to push it down because there was one consumer; by
+//!   the time there were six, all six had the same spherical-coordinate block
+//!   and the same frame-rate bug in it. What moved into the engine is only the
+//!   arithmetic they agreed on. What is still the demo's is everything below:
+//!   where the camera aims, which button orbits, and what the limits are.
 //!
 //! The geometry is a static height-mapped grid (a gentle hill), uploaded once: the
 //! scene is interesting precisely because you move the *camera*, not the mesh.
@@ -23,7 +29,9 @@
 //!   web    — build for wasm and run `wasm-bindgen` (see `README.md`), substituting
 //!            `grid` for `triangle`.
 
-use slmsttaa::{run, Application, Instance, Key, Mesh, MouseButton, Renderer, Vertex};
+use slmsttaa::{
+    run, Application, Instance, Mesh, MouseButton, Orbit, OrbitInput, Renderer, Vertex,
+};
 
 /// Vertices per side of the grid. `N * N` vertices, `(N-1)^2 * 2` triangles.
 const N: usize = 64;
@@ -98,23 +106,24 @@ fn grid_mesh() -> Mesh {
     Mesh::new(vertices, indices)
 }
 
-/// The orbit-camera consumer. Holds the viewpoint as spherical coordinates around
-/// a fixed target and rebuilds the eye position from input every frame.
+/// The orbit-camera consumer. The viewpoint is an [`Orbit`]; the limits and the
+/// gating are this demo's to choose.
 struct GridDemo {
-    /// Azimuth around the target, in radians.
-    yaw: f32,
-    /// Elevation above the ground plane, in radians (clamped away from the poles).
-    pitch: f32,
-    /// Distance from the target to the eye.
-    distance: f32,
+    orbit: Orbit,
 }
 
 impl Default for GridDemo {
     fn default() -> Self {
         Self {
-            yaw: 0.7,
-            pitch: 0.6,
-            distance: 6.0,
+            // The defaults happen to be exactly this demo's: it is where they were
+            // read off. Written out anyway, because a demo that relied on the
+            // engine's taste would stop being a statement of what it wants.
+            orbit: Orbit {
+                pitch_range: (0.08, 1.5),
+                distance_range: (2.0, 20.0),
+                zoom_per_notch: 0.5,
+                ..Orbit::new(0.7, 0.6, 6.0)
+            },
         }
     }
 }
@@ -128,57 +137,25 @@ impl Application for GridDemo {
     }
 
     fn update(&mut self, renderer: &mut Renderer) {
-        // Read everything we need out of the input snapshot first; that ends the
-        // immutable borrow of `renderer` before we take the mutable `camera_mut`
-        // borrow below. (`Input`'s getters all return `Copy` values.)
-        let input = renderer.input();
-        let mouse_held = input.is_mouse_held(MouseButton::Left);
-        let (mdx, mdy) = input.mouse_delta();
-        let scroll = input.scroll_delta();
-        let left = input.is_key_held(Key::Left);
-        let right = input.is_key_held(Key::Right);
-        let up = input.is_key_held(Key::Up);
-        let down = input.is_key_held(Key::Down);
+        // Nothing overlays the scene here, so the keys and the wheel are always
+        // the camera's. Only the drag is a decision: it turns while the left
+        // button is held and not otherwise.
+        let dragging = renderer.input().is_mouse_held(MouseButton::Left);
+        let dt = renderer.dt();
+        self.orbit.drive(
+            renderer.input(),
+            dt,
+            OrbitInput {
+                drag: dragging,
+                ..OrbitInput::ALL
+            },
+        );
 
-        // Mouse drag: only orbit while the left button is held.
-        if mouse_held {
-            self.yaw -= mdx * 0.005;
-            self.pitch -= mdy * 0.005;
-        }
-
-        // Arrow keys: the "with keys" path. Fixed per-frame step (frame-rate
-        // dependent, like `cube`); a real frame clock is a later slice.
-        const KEY_STEP: f32 = 0.03;
-        if left {
-            self.yaw += KEY_STEP;
-        }
-        if right {
-            self.yaw -= KEY_STEP;
-        }
-        if up {
-            self.pitch += KEY_STEP;
-        }
-        if down {
-            self.pitch -= KEY_STEP;
-        }
-
-        // Scroll to zoom.
-        self.distance -= scroll * 0.5;
-
-        // Keep the eye above the ground (out of the poles) and the zoom sane.
-        self.pitch = self.pitch.clamp(0.08, 1.5);
-        self.distance = self.distance.clamp(2.0, 20.0);
-
-        // Spherical → Cartesian around the origin target.
-        let target = [0.0, 0.0, 0.0];
-        let (sp, cp) = self.pitch.sin_cos();
-        let (sy, cy) = self.yaw.sin_cos();
-        let eye = [
-            self.distance * cp * sy,
-            self.distance * sp,
-            self.distance * cp * cy,
-        ];
-        renderer.camera_mut().look_from_to(eye, target);
+        // Where it aims is still the demo's: this grid is centred on the origin,
+        // so it looks straight at it.
+        renderer
+            .camera_mut()
+            .look_from_to(self.orbit.eye(), [0.0, 0.0, 0.0]);
     }
 }
 

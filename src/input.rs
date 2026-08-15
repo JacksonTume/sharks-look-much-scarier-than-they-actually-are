@@ -612,6 +612,25 @@ impl Input {
     }
 }
 
+/// A snapshot assembled by hand, for tests elsewhere in the crate that need
+/// input without a window or a `winit` event.
+///
+/// [`Orbit`](crate::Orbit)'s tests are what this exists for: the whole point of
+/// that type is that a held key advances by *time* rather than by frames, and
+/// asserting it needs an `Input` with a key held and nothing else in the world.
+#[cfg(test)]
+impl Input {
+    pub(crate) fn for_test(keys: &[Key], mouse_delta: (f32, f32), scroll: f32) -> Self {
+        let mut input = Self::default();
+        for &key in keys {
+            input.keys[key.index()] = true;
+        }
+        input.mouse_delta = mouse_delta;
+        input.scroll_delta = scroll;
+        input
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

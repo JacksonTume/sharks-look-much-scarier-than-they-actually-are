@@ -29,8 +29,8 @@
 
 use slmsttaa::ui::{Anchor, Theme, Variant};
 use slmsttaa::{
-    run, Application, Instance, Key, Material, Mesh, MeshHandle, MouseButton, RenderMode, Renderer,
-    Transform,
+    run, Application, Instance, Material, Mesh, MeshHandle, MouseButton, Orbit, OrbitInput,
+    RenderMode, Renderer, Transform,
 };
 
 /// Width of the parameter panel and the HUD, in logical points.
@@ -104,10 +104,9 @@ struct SceneDemo {
     /// is derived from it every frame.
     time: f32,
 
-    /// Orbit camera state (azimuth, elevation, range).
-    yaw: f32,
-    pitch: f32,
-    distance: f32,
+    /// The viewpoint. Its limits are this demo's — a stage you want to see the
+    /// whole of wants a shallower floor and a much longer leash than a hill does.
+    orbit: Orbit,
 
     /// Seconds of *wall* time since start, for the HUD row beside `time`. The
     /// two agreeing at any frame rate is this demo's proof; they part only when
@@ -131,9 +130,12 @@ impl Default for SceneDemo {
             theme: Theme::dark(),
             time: 0.0,
             wall: 0.0,
-            yaw: 0.7,
-            pitch: 0.35,
-            distance: 12.0,
+            orbit: Orbit {
+                pitch_range: (0.05, 1.4),
+                distance_range: (3.0, 40.0),
+                zoom_per_notch: 0.8,
+                ..Orbit::new(0.7, 0.35, 12.0)
+            },
             fps: 60.0,
         }
     }
@@ -461,49 +463,25 @@ impl SceneDemo {
 
     /// Orbit the stage: drag to turn, arrow keys likewise, scroll to zoom.
     fn drive_camera(&mut self, renderer: &mut Renderer, ui_has_pointer: bool) {
-        let input = renderer.input();
-        let dragging = input.is_mouse_held(MouseButton::Left) && !ui_has_pointer;
-        let (mdx, mdy) = input.mouse_delta();
-        let scroll = if ui_has_pointer {
-            0.0
-        } else {
-            input.scroll_delta()
-        };
-        let left = input.is_key_held(Key::Left);
-        let right = input.is_key_held(Key::Right);
-        let up = input.is_key_held(Key::Up);
-        let down = input.is_key_held(Key::Down);
+        // The panel has first claim on the pointer; the keyboard is never spoken
+        // for here, because this demo has no text field to type into.
+        let dragging = renderer.input().is_mouse_held(MouseButton::Left) && !ui_has_pointer;
+        let dt = renderer.dt();
+        self.orbit.drive(
+            renderer.input(),
+            dt,
+            OrbitInput {
+                drag: dragging,
+                keys: true,
+                zoom: !ui_has_pointer,
+            },
+        );
 
-        if dragging {
-            self.yaw -= mdx * 0.005;
-            self.pitch -= mdy * 0.005;
-        }
-        const KEY_STEP: f32 = 0.03;
-        if left {
-            self.yaw += KEY_STEP;
-        }
-        if right {
-            self.yaw -= KEY_STEP;
-        }
-        if up {
-            self.pitch += KEY_STEP;
-        }
-        if down {
-            self.pitch -= KEY_STEP;
-        }
-        self.distance -= scroll * 0.8;
-
-        self.pitch = self.pitch.clamp(0.05, 1.4);
-        self.distance = self.distance.clamp(3.0, 40.0);
-
-        let (sp, cp) = self.pitch.sin_cos();
-        let (sy, cy) = self.yaw.sin_cos();
-        let eye = [
-            self.distance * cp * sy,
-            self.distance * sp,
-            self.distance * cp * cy,
-        ];
-        renderer.camera_mut().look_from_to(eye, [0.0, 0.9, 0.0]);
+        // Aimed a little above the pivot so the figures sit centred rather than
+        // the floor — the reason `Orbit` hands over an eye and stops.
+        renderer
+            .camera_mut()
+            .look_from_to(self.orbit.eye(), [0.0, 0.9, 0.0]);
     }
 }
 

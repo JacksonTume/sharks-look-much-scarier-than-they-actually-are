@@ -52,7 +52,7 @@ pub use slmsttaa_ui as ui;
 
 pub use app::App;
 pub use application::Application;
-pub use camera::{Camera, Ray};
+pub use camera::{Camera, Orbit, OrbitInput, Ray};
 pub use config::Config;
 pub use input::{Input, Key, MouseButton};
 pub use renderer::{Instance, Material, Mesh, MeshHandle, RenderMode, Renderer, Transform, Vertex};
