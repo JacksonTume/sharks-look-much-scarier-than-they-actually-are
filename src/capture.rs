@@ -63,6 +63,14 @@
 //! that orbits by it. Press edges and the **wheel** deliberately survive that:
 //! both are input a script asked for rather than a side effect of aiming.
 //!
+//! **The absolute cursor survives too, which is what makes a scripted drag
+//! work.** A harness that presses on one checkpoint, moves on the next and
+//! releases on a third leaves the button *held* across the real frames in
+//! between — button state is a level, not an edge, so nothing here clears it —
+//! and a widget that follows `cursor_position` while held therefore tracks it.
+//! Only the delta is discarded, which is exactly right: a slider wants to know
+//! where the pointer *is*, and a camera wants to know how far it moved.
+//!
 //! # The one thing a script author has to know
 //!
 //! A frozen frame runs no `update`, so **anything a consumer derives from the

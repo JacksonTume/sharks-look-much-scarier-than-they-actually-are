@@ -30,10 +30,15 @@
 # This file used to have to *pause* the demo before its last two shots, because
 # the timeline ran forever and a moving landscape cannot be diffed. It does not
 # any more: the bake reaches its last pass and stops, so the world is already
-# still. The note is kept because the constraint behind it has not gone — **a
-# script cannot move a slider** (`Action::Click` is a press and a release with no
-# update between them, so `Response::held` is never true), and the reason this
-# file is now simpler is that it no longer needs to work around it.
+# still.
+#
+# It also used to be shaped by a limit that has since gone: `click` alone cannot
+# move a slider (it delivers both edges inside one frozen frame, so
+# `Response::held` is never true), so this file reached the pass it wanted by
+# letting the demo *play* to it rather than by scrubbing. The harness now has
+# `press` and `release` as separate steps — see `capture/terrain-drag.script` —
+# but the playing route is kept here, because it is the shorter script and the
+# thing this file is about is the plot, not the transport.
 
 # Frame 200: about pass 26. Lakes still standing inland, both curves climbing
 # away from the origin, and the minimap wet. The reference shot, and where the

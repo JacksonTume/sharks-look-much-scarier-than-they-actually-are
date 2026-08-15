@@ -1,0 +1,55 @@
+# The harness dragging a slider — the thing it could not do until now.
+#
+# `Action::Click` is a press and a release delivered inside one frozen frame, so
+# the demo never runs an update with the button down and `Response::held` is
+# never true. Every drag widget in the toolkit acts on `held` and nothing else
+# (see `slmsttaa-ui/src/widgets/slider.rs`), so a click on a slider track did
+# exactly nothing — which meant the transport's rate, both erosion `log_slider`s
+# and every numeric knob in every demo were unreachable by a capture script.
+# `capture/terrain-plot.script` still records the workaround it had to use: it
+# advanced the bake by *playing* to the pass it wanted, because it could not
+# scrub to one.
+#
+# `press` and `release` are separate steps, so the button stays down across
+# checkpoints and real frames run in between. This file is the check.
+#
+# Run it:  cargo xtask shoot terrain --script capture/terrain-drag.script
+#
+# Coordinates are physical pixels from the window's top-left, read off `shot
+# rest` at the default 1280x800. The `passes/sec` track spans x 22..331 at
+# y 190, and the panel does not reflow under any step here: the Bake section
+# draws every row unconditionally, and pausing only swaps a button's label.
+
+# Frame 200: about pass 26, still baking, `passes/sec` at its default 8 with the
+# knob a quarter of the way along. The reference shot.
+200  shot  rest
+
+# Pause, so the only thing that changes between the shots below is the slider.
+# The move is on an earlier frame than the click on purpose — a frozen frame
+# runs no update, so the demo has to be let run once with the pointer in its new
+# place before anything is aimed there. Getting this wrong looks exactly like the
+# click missing.
+220  move  97 109
+240  click
+260  shot  paused
+
+# The drag. Onto the knob first, and again with a gap before the press so hover
+# is established by a real frame.
+280  move  97 190
+300  press
+
+# Button still down. The cursor moves to the middle of the track and the knob
+# has to come with it — this is the frame that could not exist before, and the
+# shot is taken while the button is *still held*.
+320  move  200 190
+330  shot  midway
+
+# On to the right-hand end, then let go.
+340  move  300 190
+360  release
+
+# Frame 380: `passes/sec` reads 27 instead of 8, the knob is at the far end, and
+# the pass counter has not moved because the demo is paused. A click at the same
+# coordinates leaves this picture identical to `paused`, which is the negative
+# result this file exists to distinguish itself from.
+380  shot  dragged

@@ -164,8 +164,12 @@ pub fn mouse_move(inner: &mut Inner, root: &Path, x: u32, y: u32) {
     );
 }
 
-pub fn click(inner: &mut Inner, root: &Path) {
-    xdo(root, &inner.display, &["click", "1"]);
+pub fn press(inner: &mut Inner, root: &Path) {
+    xdo(root, &inner.display, &["mousedown", "1"]);
+}
+
+pub fn release(inner: &mut Inner, root: &Path) {
+    xdo(root, &inner.display, &["mouseup", "1"]);
 }
 
 /// X11 spells the wheel as buttons 4 (up) and 5 (down), one press per notch.

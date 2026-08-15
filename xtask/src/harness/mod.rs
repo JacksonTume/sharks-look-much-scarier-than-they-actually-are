@@ -23,7 +23,7 @@
 //!   so the window is a real one; see [`win32`] for what is done to keep that
 //!   from being anyone's problem.
 //!
-//! Both present the same four verbs, so [`shoot`] contains no `#[cfg]` at all.
+//! Both present the same verbs, so [`shoot`] contains no `#[cfg]` at all.
 
 use std::path::{Path, PathBuf};
 
@@ -88,9 +88,30 @@ impl Harness {
         platform::mouse_move(&mut self.inner, &self.root, x, y);
     }
 
+    /// Hold the left button down wherever the pointer is.
+    ///
+    /// Paired with [`Harness::release`], and the pair is what lets a script
+    /// *drag*. A press and a release delivered inside one frozen frame — which is
+    /// what [`Harness::click`] is — never gives the demo a frame with the button
+    /// down, so `Response::held` is never true and every drag widget in the
+    /// toolkit ignores it. Split across two checkpoints, real frames run in
+    /// between and a slider moves.
+    pub fn press(&mut self) {
+        platform::press(&mut self.inner, &self.root);
+    }
+
+    /// Let the left button back up.
+    pub fn release(&mut self) {
+        platform::release(&mut self.inner, &self.root);
+    }
+
     /// Press and release the left button wherever the pointer is.
+    ///
+    /// Defined as the pair rather than implemented again per platform, so a
+    /// click and a scripted press/release cannot drift apart.
     pub fn click(&mut self) {
-        platform::click(&mut self.inner, &self.root);
+        self.press();
+        self.release();
     }
 
     /// Turn the wheel by `notches`, negative to scroll down.

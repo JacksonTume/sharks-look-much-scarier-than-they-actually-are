@@ -153,8 +153,11 @@ fn print_help() {
     println!("       then serves web/ at http://localhost:<port> (default 8080).\n");
     println!("shoot  Runs <example> and photographs it at exact frame numbers,");
     println!("       writing PNGs to <DIR> (default: capture/). A --script drives");
-    println!("       clicks, keys and the wheel between shots. On Linux it needs");
-    println!("       Xvfb, ImageMagick's `import` and xdotool; on Windows, nothing.");
+    println!("       clicks, drags, keys and the wheel between shots. On Linux it");
+    println!("       needs Xvfb, ImageMagick's `import` and xdotool; on Windows,");
+    println!("       nothing.\n");
+    println!("       Script verbs: shot [name] | move X Y | click | press | release");
+    println!("                     | wheel <notches> | key <name>");
 }
 
 /// Build the example natively and for the web, then serve `web/`.
@@ -205,8 +208,23 @@ enum Action {
     Shot(String),
     /// Warp the pointer, in physical pixels from the window's top-left.
     Move(u32, u32),
-    /// Press and release the left button wherever the pointer is.
+    /// Press and release the left button wherever the pointer is, both inside
+    /// this one frozen frame.
+    ///
+    /// Fine for a button or a checkbox, which act on the press edge. **Not** for
+    /// anything that drags — see [`Action::Press`].
     Click,
+    /// Hold the left button down, and leave it down.
+    ///
+    /// The half of a click that was missing, and the reason a script could not
+    /// move a slider: `click` never leaves the button down across a frame
+    /// boundary, so `Response::held` — which every drag widget in the toolkit
+    /// acts on — is never true for a single frame. A `press` on one checkpoint,
+    /// a `move` on a later one and a `release` after that is a real drag, with
+    /// real frames running in between for the widget to follow.
+    Press,
+    /// Let the left button back up.
+    Release,
     /// Turn the wheel, in notches: negative scrolls down, the way a scroll area
     /// reads it.
     ///
@@ -388,6 +406,8 @@ fn shoot(
                 }
                 Action::Move(x, y) => stage.mouse_move(*x, *y),
                 Action::Click => stage.click(),
+                Action::Press => stage.press(),
+                Action::Release => stage.release(),
                 Action::Wheel(notches) => stage.wheel(*notches),
                 Action::Key(key) => stage.key(key),
             }
@@ -424,6 +444,16 @@ fn shoot(
 /// Deliberately not a config format anyone has to learn. The frame number
 /// leading each line is the important part: it is what makes a click land on a
 /// known frame rather than "about a second in".
+///
+/// A drag is the same idea spread over several of them — the button stays down
+/// between the checkpoints, so the demo gets real frames with it held:
+///
+/// ```text
+/// 200  move    120 300
+/// 220  press
+/// 240  move    260 300
+/// 260  release
+/// ```
 fn read_script(path: &Path) -> Vec<Step> {
     let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("error: cannot read {}: {e}", path.display());
@@ -452,6 +482,8 @@ fn read_script(path: &Path) -> Vec<Step> {
                 _ => bad("move needs X and Y"),
             },
             Some("click") => Action::Click,
+            Some("press") => Action::Press,
+            Some("release") => Action::Release,
             Some("wheel") => match words.next().map(str::parse) {
                 Some(Ok(notches)) => Action::Wheel(notches),
                 _ => bad("wheel needs a notch count, negative to scroll down"),

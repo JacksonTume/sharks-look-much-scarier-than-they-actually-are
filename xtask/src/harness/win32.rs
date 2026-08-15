@@ -210,6 +210,9 @@ pub struct Inner {
     /// Where the pointer is *as far as the demo is concerned*. The real cursor
     /// is never touched, so this is the only record of it.
     cursor: (u32, u32),
+    /// Whether the left button is down, so a move made between a `press` and a
+    /// `release` carries `MK_LBUTTON` the way a real dragged move does.
+    held: bool,
     /// Set once the polite capture has been shown not to work, so the fallback
     /// is not re-litigated on every shot of the same run.
     force_screen: bool,
@@ -223,6 +226,7 @@ pub fn start(w: u32, h: u32) -> Inner {
         window: 0,
         size: (w, h),
         cursor: (0, 0),
+        held: false,
         force_screen: false,
     }
 }
@@ -450,18 +454,29 @@ fn coords(x: u32, y: u32) -> isize {
 
 pub fn mouse_move(inner: &mut Inner, _root: &Path, x: u32, y: u32) {
     inner.cursor = (x, y);
-    post(inner, WM_MOUSEMOVE, 0, coords(x, y));
+    // The button flags ride every mouse message, so a move made while the button
+    // is down has to say so — that is the difference between a drag and a jump
+    // with a coincidentally-held button.
+    let buttons = if inner.held { MK_LBUTTON } else { 0 };
+    post(inner, WM_MOUSEMOVE, buttons, coords(x, y));
 }
 
-pub fn click(inner: &mut Inner, _root: &Path) {
+pub fn press(inner: &mut Inner, _root: &Path) {
     let (x, y) = inner.cursor;
-    // A move first, in case nothing has moved the pointer yet: a click carries a
+    // A move first, in case nothing has moved the pointer yet: a press carries a
     // position, but the demo tracks hover from motion and would otherwise see a
     // press at a place it never saw the cursor reach.
-    post(inner, WM_MOUSEMOVE, 0, coords(x, y));
+    post(inner, WM_MOUSEMOVE, MK_LBUTTON, coords(x, y));
     post(inner, WM_LBUTTONDOWN, MK_LBUTTON, coords(x, y));
+    inner.held = true;
     thread::sleep(Duration::from_millis(30));
+}
+
+pub fn release(inner: &mut Inner, _root: &Path) {
+    let (x, y) = inner.cursor;
     post(inner, WM_LBUTTONUP, 0, coords(x, y));
+    inner.held = false;
+    thread::sleep(Duration::from_millis(10));
 }
 
 pub fn wheel(inner: &mut Inner, _root: &Path, notches: i32) {

@@ -1028,6 +1028,13 @@ recorded in the [engine roadmap's harness
 list](../ROADMAP.md#waiting-on-a-roadblock) beside the wheel, which exists because
 of the same class of discovery.
 
+**That gap has since been closed**, and it is worth saying what it cost to state
+it: the harness grew `press` and `release` as separate script steps, so a button
+held across two checkpoints is held across real frames and a slider follows the
+cursor. `capture/terrain-drag.script` photographs one mid-drag. Nothing in this
+crate changed — the widgets were always right, and what was missing was a way to
+*ask* them the question a person asks with a mouse.
+
 ---
 
 ## Nothing is scheduled
