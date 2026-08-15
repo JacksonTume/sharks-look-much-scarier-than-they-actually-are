@@ -1,0 +1,89 @@
+# The four commands the Definition of Done already names, run by something other
+# than the person who made the change.
+#
+# There is deliberately no screenshot step. `cargo xtask shoot` needs a GPU (or
+# lavapipe) and the roadmap's golden-image entry is explicit that a golden is only
+# worth its review cost once something runs it unprompted — this workflow is the
+# "something", and committing goldens is the separate decision it unblocks rather
+# than one this file makes.
+#
+# `slmsttaa-ui`'s zero-dependency rule gets its own job, because it is a claim the
+# README makes in prose and nothing enforced.
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  # So the checks can be run against a branch without opening a PR first.
+  workflow_dispatch:
+
+# A second push to the same branch makes the first run's answer irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # A backtrace costs nothing until something panics, and a CI panic with no
+  # backtrace means running it again to learn what a machine already knew.
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: build, lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the channel and asks for rustfmt, clippy and the
+      # wasm target, so there is nothing to configure here — installing the
+      # toolchain the repo already declares is the whole step.
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Both targets, because they diverge via #[cfg] and one can break while the
+      # other compiles. This is the first line of the Definition of Done and the
+      # single most likely thing to be forgotten locally.
+      - name: Build (native)
+        run: cargo build --all-targets
+
+      - name: Build (wasm)
+        run: cargo build --target wasm32-unknown-unknown --lib
+
+      # --workspace matters: the engine is the root package, so a bare
+      # `cargo test` skips slmsttaa-ui entirely.
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # `cargo fmt --all`, not bare `cargo fmt`, which trips on examples/terrain/.
+      - name: Format
+        run: cargo fmt --all -- --check
+
+  leaf:
+    name: slmsttaa-ui has no dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+
+      # The crate's central design claim, and until now one that was only ever
+      # checked by hand: `cargo tree -p slmsttaa-ui` must print exactly one line.
+      # A rasterizer arriving as a build-dependency of a dependency is precisely
+      # the way this would be lost quietly.
+      - name: cargo tree -p slmsttaa-ui prints one line
+        run: |
+          lines=$(cargo tree -p slmsttaa-ui | wc -l)
+          cargo tree -p slmsttaa-ui
+          if [ "$lines" -ne 1 ]; then
+            echo "::error::slmsttaa-ui must have zero dependencies, but cargo tree printed $lines lines"
+            exit 1
+          fi
