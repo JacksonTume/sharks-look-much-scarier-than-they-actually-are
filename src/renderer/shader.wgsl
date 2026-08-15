@@ -30,10 +30,23 @@
 // attachment and a sampled input at once, so it gets a layout without this group.
 @group(1) @binding(0) var scene_color: texture_2d<f32>;
 @group(1) @binding(1) var scene_sampler: sampler;
-// Non-linear depth, exactly as the depth test wrote it. Sampled with
-// `textureLoad` rather than through a sampler: depth must not be filtered, since
-// the average of a near and a far surface is a distance where nothing is.
-@group(1) @binding(2) var scene_depth: texture_depth_2d;
+// Non-linear depth, exactly as the depth test wrote it, read with `textureLoad`:
+// depth must not be filtered, since the average of a near and a far surface is a
+// distance where nothing is.
+//
+// **Typed as an ordinary float texture, not `texture_depth_2d`, and that is the
+// whole fix for the GL backend.** A depth-typed binding becomes a
+// `sampler2DShadow` in GLSL, and every way of reading one without a comparison
+// is a function that does not exist: `texelFetch` is rejected by naga outright
+// ("textureLoad from depth textures is not supported in GLSL") and
+// `textureSampleLevel` compiles to a `textureLod(sampler2DShadow, vec2, int)`
+// the driver cannot find. Bound as `unfilterable-float` it is a plain
+// `sampler2D`, `texelFetch` exists, and the operation is bit-for-bit the one
+// that was wanted all along.
+//
+// This is why no demo could start in a browser without WebGPU from Slice 16
+// until `src/backend.rs` made the path reachable and it fell over immediately.
+@group(1) @binding(2) var scene_depth: texture_2d<f32>;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -164,10 +177,13 @@ fn world_from_depth(uv: vec2<f32>, depth: f32) -> vec3<f32> {
 }
 
 // Non-linear depth at a screen UV, read straight out of the depth attachment.
+//
+// `.x` because the binding is a float texture now rather than a depth one (see
+// above); a depth format has one channel and this is it.
 fn depth_at(uv: vec2<f32>) -> f32 {
     let dims = vec2<f32>(textureDimensions(scene_depth));
     let texel = vec2<i32>(clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * dims);
-    return textureLoad(scene_depth, texel, 0);
+    return textureLoad(scene_depth, texel, 0).x;
 }
 
 // How far outside the screen a UV is, as a 0..1 fade. Used to dissolve

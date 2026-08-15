@@ -285,11 +285,16 @@ fn create_instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffe
 /// The bind group layout for reading the opaque scene: colour, a sampler, and
 /// depth.
 ///
-/// Only the blended pipeline and the composite pass use it. Depth is bound as a
-/// depth texture (not a float one) because that is what WebGPU permits for a
-/// depth format, and it is read with `textureLoad` rather than through the
-/// sampler — filtering depth averages a near surface with a far one and produces
-/// a distance where no geometry is.
+/// Only the blended pipeline and the composite pass use it.
+///
+/// **Depth is bound as `unfilterable-float`, not as `Depth`**, which is the
+/// second sample type WebGPU allows a depth format and the one that keeps the GL
+/// backend able to compile the shader at all — a `Depth` binding is a
+/// `sampler2DShadow` in GLSL, and there is no way to read one of those without a
+/// comparison. It is read with `textureLoad` and never sampled, so the "cannot
+/// be filtered" half of `unfilterable` costs nothing: filtering depth averages a
+/// near surface with a far one and produces a distance where no geometry is,
+/// which is exactly what this binding must never do.
 fn create_scene_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("scene texture bind group layout"),
@@ -314,7 +319,7 @@ fn create_scene_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 binding: 2,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Depth,
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
                     view_dimension: wgpu::TextureViewDimension::D2,
                     multisampled: false,
                 },
@@ -613,17 +618,12 @@ impl Renderer {
         let width = size.width.max(1);
         let height = size.height.max(1);
 
-        // Native: the best primary backend (Vulkan/Metal/DX12).
-        // Web: prefer WebGPU, but allow the GL (WebGL2) fallback so browsers
-        // without WebGPU still run. `PRIMARY` alone excludes GL, which is why a
-        // WebGPU-less browser would otherwise find no adapter.
-        #[cfg(not(target_arch = "wasm32"))]
-        let backends = wgpu::Backends::PRIMARY;
-        #[cfg(target_arch = "wasm32")]
-        let backends = wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL;
-
+        // Which backends to consider, and (below) which limits to require. Both
+        // are overridable from outside the process so the WebGL2 path can be
+        // entered deliberately rather than only when a browser decides to —
+        // see `crate::backend`.
         let mut instance_desc = wgpu::InstanceDescriptor::new_without_display_handle();
-        instance_desc.backends = backends;
+        instance_desc.backends = crate::backend::backends();
         let instance = wgpu::Instance::new(instance_desc);
 
         let surface = instance
@@ -640,21 +640,28 @@ impl Renderer {
             .expect("no suitable GPU adapter found");
 
         log::info!("using adapter: {:?}", adapter.get_info());
+        // The blended pass attaches depth read-only *and* samples the same
+        // texture, which an adapter without this flag cannot express — wgpu
+        // refuses the pass rather than risking the aliasing. Worth a warning
+        // rather than a mystery, because the failure arrives one frame later as
+        // a validation error about conflicting usages. See ARCHITECTURE.md.
+        if !adapter
+            .get_downlevel_capabilities()
+            .flags
+            .contains(wgpu::DownlevelFlags::READ_ONLY_DEPTH_STENCIL)
+        {
+            log::warn!(
+                "adapter has no read-only depth/stencil: the water pass cannot \
+                 sample the depth it tests against on this backend"
+            );
+        }
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("slmsttaa device"),
                 required_features: wgpu::Features::empty(),
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                // On the web fall back to the WebGL2 limit set so a GL adapter
-                // can satisfy the request; native uses the broader downlevel
-                // defaults.
-                #[cfg(target_arch = "wasm32")]
-                required_limits: wgpu::Limits::downlevel_webgl2_defaults()
-                    .using_resolution(adapter.limits()),
-                #[cfg(not(target_arch = "wasm32"))]
-                required_limits: wgpu::Limits::downlevel_defaults()
-                    .using_resolution(adapter.limits()),
+                required_limits: crate::backend::limits(&adapter),
                 memory_hints: wgpu::MemoryHints::Performance,
                 trace: wgpu::Trace::Off,
             })
@@ -919,6 +926,8 @@ impl Renderer {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        // Depth needs no sampler of its own: it is only ever `textureLoad`ed,
+        // which takes an integer texel and no sampler at all.
         let scene_bind_group = create_scene_bind_group(
             &device,
             &scene_layout,

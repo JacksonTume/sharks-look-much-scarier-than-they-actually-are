@@ -68,6 +68,9 @@ web-sys = { version = "0.3", features = [
     # the only route left; see `src/clipboard.rs`.
     "Clipboard",
     "Navigator",
+    # `location.search`, for the backend/limits overrides in `src/backend.rs` —
+    # the web's equivalent of an environment variable.
+    "Location",
 ] }
 # On the web, wgpu uses the WebGPU backend by default; the `webgl` feature adds
 # a WebGL2 fallback for browsers without WebGPU yet.

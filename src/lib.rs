@@ -32,6 +32,14 @@ pub mod input;
 pub mod renderer;
 pub mod time;
 
+/// Backend and limit overrides, for checking native/web parity on purpose.
+///
+/// Private and driven entirely from outside the process — an environment
+/// variable on native, a query parameter on the web — for the same reason
+/// [`capture`] is: a setter only a parity check calls would widen the public
+/// surface `examples/triangle.rs` exists to measure.
+mod backend;
+
 /// Frame-level capture control for the screenshot harness (`cargo xtask shoot`).
 ///
 /// Private and native-only, and driven entirely by environment variables, so it
