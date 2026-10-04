@@ -443,7 +443,7 @@ fn create_scene_pipeline(
             entry_point: Some("vs_main"),
             // Two buffers: the mesh's vertices, then the per-object instance
             // data that steps once per draw rather than once per vertex.
-            buffers: &[Vertex::layout(), InstanceRaw::layout()],
+            buffers: &[Some(Vertex::layout()), Some(InstanceRaw::layout())],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
@@ -635,6 +635,7 @@ impl Renderer {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             })
             .await
             .expect("no suitable GPU adapter found");
@@ -719,6 +720,9 @@ impl Renderer {
             // to `AutoNoVsync` to benchmark uncapped frame rates.
             present_mode: wgpu::PresentMode::AutoVsync,
             alpha_mode: surface_caps.alpha_modes[0],
+            // `Auto` is wgpu's historical behaviour: sRGB for the 8-bit formats
+            // this engine requests.
+            color_space: wgpu::SurfaceColorSpace::Auto,
             view_formats: if render_format == surface_format {
                 vec![]
             } else {
@@ -1739,7 +1743,7 @@ impl Renderer {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
-        frame.present();
+        self.queue.present(frame);
     }
 
     /// Record the half of the draw-list that belongs to `kind`.

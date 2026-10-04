@@ -336,7 +336,7 @@ impl Application for GalleryDemo {
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.frames += 1;
-            if self.frames % NATIVE_CYCLE_FRAMES == 0 {
+            if self.frames.is_multiple_of(NATIVE_CYCLE_FRAMES) {
                 let next = (self.selected.get() + 1) % SCENES.len();
                 self.selected.set(next);
             }

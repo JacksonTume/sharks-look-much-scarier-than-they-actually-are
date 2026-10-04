@@ -2,7 +2,7 @@
 name = "slmsttaa"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.87"
 description = "Sharks Look Much Scarier Than They Actually Are — a small Rust 3D rendering engine."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Jackson-Tume/sharks-look-much-scarier-than-they-actually-are"
@@ -37,7 +37,7 @@ crate-type = ["rlib"]
 # engine implements `Painter` for its overlay and re-exports the crate as
 # `slmsttaa::ui`. See `slmsttaa-ui/README.md` § Dependency direction.
 slmsttaa-ui = { path = "slmsttaa-ui" }
-wgpu = "29"
+wgpu = "30"
 winit = "0.30"
 bytemuck = { version = "1.16", features = ["derive"] }
 glam = { version = "0.34", features = ["bytemuck"] }
@@ -74,7 +74,7 @@ web-sys = { version = "0.3", features = [
 ] }
 # On the web, wgpu uses the WebGPU backend by default; the `webgl` feature adds
 # a WebGL2 fallback for browsers without WebGPU yet.
-wgpu = { version = "29", features = ["webgl"] }
+wgpu = { version = "30", features = ["webgl"] }
 
 # Web-only example dependencies. The `gallery` example builds its scene-switch
 # buttons as real DOM elements, which needs a few more `web-sys` features than the

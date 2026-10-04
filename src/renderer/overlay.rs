@@ -371,7 +371,7 @@ impl Overlay {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[Vertex2D::layout()],
+                buffers: &[Some(Vertex2D::layout())],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
