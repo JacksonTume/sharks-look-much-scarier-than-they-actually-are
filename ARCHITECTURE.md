@@ -429,13 +429,22 @@ wgpu correctly refuses the pass — `TextureUses(DEPTH_STENCIL_WRITE) is an
 exclusive usage` — which means the water's whole "test against depth while
 sampling it" arrangement is inexpressible on WebGL2, not merely spelled
 differently. The engine logs a warning naming this when the flag is absent. The
-three ways out, none taken yet: write linear depth to a **second colour target**
+three ways out: write linear depth to a **second colour target**
 from the opaque pass and sample that (portable, costs an attachment and touches
 the opaque pipeline); **copy** the depth texture before the blended pass (needs
 `DEPTH_TEXTURE_AND_BUFFER_COPIES`, which WebGL2 may also lack); or **degrade** —
-detect the flag and draw water without refraction, absorption or reflection,
-which keeps a WebGL2 browser running at a lower fidelity and is the smallest
-honest option.
+detect the flag and draw water without the terms that read depth, which keeps a
+WebGL2 browser running at a lower fidelity and is the smallest honest option.
+
+**Degrade is the ruling**, sequenced as `ROADMAP.md` *Slice 25*; this section
+describes the code as it stands, which is still the warning and the failure. One
+correction to make when it lands: the sentence above used to say the degrade drops
+"refraction, absorption or reflection", and that is one term too many. Only
+`scene_depth` is both attached and sampled — `scene_color` is already de-aliased by
+the composite pass — so refraction keeps its sample and loses only the depth guard
+at `shader.wgsl:471` that stops a displaced sample smearing geometry standing in
+front of the surface. Absorption and reflection are the two that genuinely cannot
+survive without depth.
 
 ### Where the scene goes (Slice 19)
 

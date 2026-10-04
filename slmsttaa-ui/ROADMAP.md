@@ -1052,6 +1052,67 @@ virtualized container can extend**, so a long list is walkable by keyboard witho
 every row declaring itself. It is a roadblock a demo has met and no consumer has
 yet complained about, which is a weaker pedigree than any slice above has.
 
+**A demo has since been sequenced, and the sentence above is why it counts.** The
+engine roadmap's [*What comes
+next*](../ROADMAP.md#what-comes-next) orders three verticals, and the last of them
+— *a dossier beside a scene* — is a dense in-repo screen whose whole purpose is to
+hit this crate's remaining walls somewhere they can be photographed. The section
+below is what it is **expected** to pull.
+
+Nothing there is scheduled in the sense the slices above are. A demo that does not
+hit a wall does not create one, and the correct outcome for any entry below is
+that the screen gets built and the entry is deleted unread.
+
+## What the seventh vertical is expected to pull
+
+Predictions, in the engine roadmap's own idiom: **recognitions, not estimates.**
+Each already exists on *Waiting on a roadblock* or in
+[`WISHLIST.md`](WISHLIST.md) with its reason for waiting; what changes is that a
+demo is now aimed at them. They are ordered by how confident the prediction is,
+not by size.
+
+- **Splitters / resizable panes.** The least confident and the most important, and
+  the only one that reverses a stated "no". `WISHLIST.md` calls it *"the sharpest
+  conflict on the list"*: a multi-pane workspace is the native idiom of a
+  management-sim screen, not a luxury. *Waiting on a roadblock* still says no, and
+  says why — Slice 19 made it *tempting* rather than *blocking*, and this list has
+  held the line on exactly that distinction since Slice 3. The demo's job is to
+  turn one of those into the other. **If the screen is buildable with fixed panes,
+  the answer stays no**, and that is a real possible outcome rather than a
+  formality.
+- **`fit_text` / ellipsis.** The most confident, because the blocker was never
+  technical. Asked for twice, declined twice, and fully unblocked since Slice 5:
+  `…` is in the atlas by name and `font::text_width` is exact per-glyph, so
+  clamping a run is a `take_while` over advances plus one fallback glyph. What was
+  missing is a caller whose strings are **not its own to shorten** — both previous
+  cases were answered by picking shorter words, which worked and does not scale to
+  a roster of generated names. A dossier is that caller. The open question is
+  policy, not code: truncate where, middle-ellipsis, or wrap.
+- **A tab ring a virtualized container can extend.** The one item on any list found
+  by a demo rather than recognized in advance. Opened by Slice 9's own bargain —
+  the ring refills each frame from whatever called `focusable`, so it holds a
+  screenful rather than a list — and since **confirmed rather than aggravated** at
+  1,400 rows in the second consumer, which is why it has never gained urgency. A
+  screen that walks a roster by keyboard is what would give it some.
+- **A sort arrow.** Two codepoints × two weights. `fontbake`'s `EXTRAS` has `▶` and
+  neither `▲` nor `▼`, so every table built on this toolkit draws `^` and `v` and
+  every author spends the same minute finding out why. Found twice by the same
+  consumer without either time being enough to schedule it — *"which is the pattern
+  this file exists to catch before the third"*. This is the third.
+- **Whichever of dropdown / tooltip / tabs the screen actually needs**, and no
+  more. This is where the stopping rule does its real work: the shadcn roster is
+  the part most likely to become the project, and a dense screen is precisely the
+  thing that makes adding all of it feel reasonable. The test each must pass is the
+  one every widget here has passed — *a demo hit a wall*, not *a screen would look
+  more finished*.
+
+**One item is expected to land on the other side of the seam entirely.**
+*Reactive repaint* is filed in [`WISHLIST.md`](WISHLIST.md) as a toolkit concern
+and cannot be one: the engine owns the event loop, so declining to draw a frame is
+the engine's decision and this crate's only to inform. It is sequenced there, as
+engine Slice 32. The precedent is Slice 7 — the keyboard was filed here too, and
+the engine's half turned out to be the larger one.
+
 ## Waiting on a roadblock
 
 Recognized but **not** scheduled — listed so they're identified when a demo
