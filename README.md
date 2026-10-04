@@ -49,7 +49,7 @@ it's going and why.
 
 ## Requirements
 
-- Rust 1.80+ (a `rust-toolchain.toml` pins `stable` with the `wasm32-unknown-unknown`
+- Rust 1.87+ (a `rust-toolchain.toml` pins `stable` with the `wasm32-unknown-unknown`
   target, `clippy`, and `rustfmt`).
 - For the browser build:
   [`wasm-bindgen-cli`](https://crates.io/crates/wasm-bindgen-cli) (at a version
@@ -114,8 +114,10 @@ One command builds the example for the web and serves it — no Python, no manua
 `wasm-bindgen` step:
 
 ```sh
-# one-time — install the wasm-bindgen CLI (matched to the wasm-bindgen dependency)
-cargo install wasm-bindgen-cli
+# one-time, and again whenever Cargo.lock moves wasm-bindgen: the CLI must match
+# the locked version exactly. Read it, then install that version.
+grep -A1 '^name = "wasm-bindgen"$' Cargo.lock    # version = "0.2.x"
+cargo install wasm-bindgen-cli --locked --version 0.2.x
 
 cargo xtask serve              # builds + serves `terrain` at http://localhost:8080
 cargo xtask serve cube        # a different example
