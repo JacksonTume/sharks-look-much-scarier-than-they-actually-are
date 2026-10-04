@@ -83,8 +83,13 @@ impl Camera {
 
     /// The combined view-projection matrix, corrected for wgpu's clip space.
     pub fn view_projection(&self) -> Mat4 {
-        let view = Mat4::look_at_rh(self.eye, self.target, self.up);
-        let proj = Mat4::perspective_rh(self.fov_y, self.aspect, self.z_near, self.z_far);
+        let view = glam::camera::rh::view::look_at_mat4(self.eye, self.target, self.up);
+        let proj = glam::camera::rh::proj::directx::perspective(
+            self.fov_y,
+            self.aspect,
+            self.z_near,
+            self.z_far,
+        );
         OPENGL_TO_WGPU_MATRIX * proj * view
     }
 

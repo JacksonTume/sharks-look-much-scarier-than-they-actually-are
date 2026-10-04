@@ -183,7 +183,7 @@ impl Workspace {
             }
             // `is_none_or` would read better, but it is newer than the MSRV
             // clippy enforces here.
-            if best.map_or(true, |(bt, _)| t < bt) {
+            if best.is_none_or(|(bt, _)| t < bt) {
                 best = Some((t, i));
             }
         }

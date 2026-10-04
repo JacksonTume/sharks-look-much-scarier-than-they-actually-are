@@ -619,7 +619,7 @@ fn resolve_flats(filled: &[f32], n: usize, receiver: &mut [usize], dist: &mut [f
                 continue;
             }
             let depth = if level[nb] { from_rim[nb] } else { 0 };
-            if best.map_or(true, |(b, _)| depth > b) {
+            if best.is_none_or(|(b, _)| depth > b) {
                 best = Some((depth, nb));
                 receiver[c] = nb;
                 dist[c] = step;

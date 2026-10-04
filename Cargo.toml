@@ -2,7 +2,7 @@
 name = "slmsttaa"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.85"
 description = "Sharks Look Much Scarier Than They Actually Are — a small Rust 3D rendering engine."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Jackson-Tume/sharks-look-much-scarier-than-they-actually-are"
@@ -40,7 +40,7 @@ slmsttaa-ui = { path = "slmsttaa-ui" }
 wgpu = "29"
 winit = "0.30"
 bytemuck = { version = "1.16", features = ["derive"] }
-glam = { version = "0.28", features = ["bytemuck"] }
+glam = { version = "0.34", features = ["bytemuck"] }
 log = "0.4"
 
 # Native-only dependencies.
