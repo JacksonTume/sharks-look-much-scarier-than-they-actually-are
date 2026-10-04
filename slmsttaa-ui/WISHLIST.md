@@ -292,7 +292,7 @@ renderer's to correct.
 >
 > **Built, and this entry is closed.** [UI Slice
 > 7](ROADMAP.md#slice-7--keyboard-focus-and-text-entry-done) and [engine Slice
-> 18](../ROADMAP.md#slice-18--a-keyboard-that-reaches-the-consumer-done) landed
+> 18](../ROADMAP-DONE.md#slice-18--a-keyboard-that-reaches-the-consumer--done) landed
 > together: an ordered key/text event log on `UiInput`, Tab and Shift-Tab focus
 > traversal with `focusable`/`set_focus` public, Enter and Space activating every
 > existing button and checkbox, arrows nudging a focused slider, `wants_keyboard`
@@ -332,7 +332,7 @@ with no driver. This consumer supplies one, plus two more:
 
 > **All three built, as [UI Slice
 > 10](ROADMAP.md#slice-10--a-painter-that-can-draw-a-chart-done) and [engine Slice
-> 21](../ROADMAP.md#slice-21--pixels-a-consumer-supplies-done) — and the central
+> 21](../ROADMAP-DONE.md#slice-21--pixels-a-consumer-supplies--done) — and the central
 > claim below held exactly.** "If those three land, every chart above is writable
 > in the consumer with no widget roster growth here at all." The roster grew by
 > **nothing**. `slmsttaa-ui` gained three trait methods, three `DrawCmd` variants
@@ -461,7 +461,7 @@ Two more the same consumer has now hit, both small and both squarely the
 engine's:
 
 - ~~**A consumer cannot name its own window.**~~ **Done, as [engine Slice
-  20](../ROADMAP.md#slice-20--a-consumers-own-window--done).** `run(app)` still
+  20](../ROADMAP-DONE.md#slice-20--a-consumers-own-window--done).** `run(app)` still
   takes no configuration; the answer went on the trait instead, as a defaulted
   `Application::config()` returning a `Config` — the same inversion
   `quit_on_escape` already used, and a consumer that doesn't care writes
@@ -546,7 +546,7 @@ engine's:
 
 Since this file was written, the same consumer has asked the engine for a
 **renderer** for its simulation, which produced [engine Slices
-8–12](../ROADMAP.md#the-second-vertical--a-scene-demo-slices-812). Two knock-on
+8–12](../ROADMAP-DONE.md#the-second-vertical--a-scene-demo-slices-812). Two knock-on
 notes for this crate, neither of them scheduled work:
 
 - **Transport controls** for the engine's new fixed-step clock (play / pause /
@@ -632,7 +632,7 @@ planning in this file.
 > **The gutter fix has since landed too**, along with the `columns` note and the
 > window title — the three small, already-demanded items, taken together as [UI
 > Slice 8](ROADMAP.md#slice-8--a-header-that-lines-up-with-its-body--done) and
-> [engine Slice 20](../ROADMAP.md#slice-20--a-consumers-own-window--done). Two
+> [engine Slice 20](../ROADMAP-DONE.md#slice-20--a-consumers-own-window--done). Two
 > things about how they went are worth keeping:
 >
 > - **The gutter was answered by taking a number away, not by adding one.** The

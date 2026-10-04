@@ -930,7 +930,7 @@ before a line of `overlay.wgsl` changed.
   implicitly closed, indifferent to winding.
 - **`Painter::image(rect, ImageId, uv, tint)`** and a defaulted `image_full`, plus
   the `ImageId` the engine mints — the toolkit half of [engine Slice
-  21](../ROADMAP.md#slice-21--pixels-a-consumer-supplies-done).
+  21](../ROADMAP-DONE.md#slice-21--pixels-a-consumer-supplies--done).
 - **Three `DrawCmd` variants and three recorder accessors**, and eight tests in
   [`tests/shapes.rs`](tests/shapes.rs).
 
@@ -1163,7 +1163,7 @@ finally demands one, not as a to-build list:
 - **A transport / timeline scrubber** — play, pause, single-step, and seek along a
   time axis, with tick marks or event markers. **The driver arrived, and the
   prediction held.** Engine [Slice
-  12](../ROADMAP.md#slice-12--fixed-timestep-clock--time-control) shipped the
+  12](../ROADMAP-DONE.md#slice-12--fixed-timestep-clock--time-control--done) shipped the
   fixed-step clock, and `examples/scene.rs` drives it from a `Time` section built
   out of `button` + `slider` and nothing else — a play/pause button whose label
   swaps, a secondary `step`, and two sliders for speed and scrub. This crate cost
@@ -1179,7 +1179,7 @@ finally demands one, not as a to-build list:
 
   **A second consumer arrived and changed nothing, which is the useful part.**
   Engine [Slice
-  13](../ROADMAP.md#slice-13--erosion-as-a-scrubbable-time-axis-done) gave
+  13](../ROADMAP-DONE.md#slice-13--erosion-as-a-scrubbable-time-axis--done) gave
   `examples/terrain.rs` its own transport — play/pause, single-step, a passes-per-
   second slider and a scrub that genuinely rewinds — and it is the same
   `columns(2)` + `button` + `slider` composition `scene.rs` uses, written
@@ -1210,7 +1210,7 @@ finally demands one, not as a to-build list:
 - **A content region — `Ui::remaining()`** — the space a layout has left after its
   panels. **Asked for once, declined once, and the reason is that the demo's own
   arithmetic is better.** Engine [Slice
-  19](../ROADMAP.md#slice-19--the-scene-as-a-panel-among-panels--done) let a
+  19](../ROADMAP-DONE.md#slice-19--the-scene-as-a-panel-among-panels--done) let a
   consumer put the 3D scene in a rectangle, and `examples/workspace.rs` needs to
   know which rectangle. It computes one from `Theme::space.margin` and its own two
   panel widths — four lines, exact, no lag. A generic version would be worse in
@@ -1241,7 +1241,7 @@ names the roadblock.
 
 One item from that file has since **landed on the engine side**: a scene rendered
 into a UI rectangle, as [engine Slice
-19](../ROADMAP.md#slice-19--the-scene-as-a-panel-among-panels--done). It cost this
+19](../ROADMAP-DONE.md#slice-19--the-scene-as-a-panel-among-panels--done). It cost this
 crate nothing at all — no `Painter` method, no `UiInput` field, no widget — and
 nothing in the slices above moves. What it did surface is one new entry on
 *Waiting on a roadblock*, `Ui::remaining()`, filed there as declined with its
@@ -1249,7 +1249,7 @@ reason rather than as a gap.
 
 That consumer has since asked for a **renderer** as well as a UI, and the engine
 half of the answer is now sequenced: [engine Slices
-8–12](../ROADMAP.md#the-second-vertical--a-scene-demo-slices-812) (per-object
+8–12](../ROADMAP-DONE.md#the-second-vertical--a-scene-demo-slices-812) (per-object
 transforms, lighting, per-instance material, primitives, a fixed-step clock),
 driven by an engine demo of our own rather than by the request list. **It changes
 nothing here.** No slice below moves, and nothing graduates out of

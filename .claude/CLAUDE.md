@@ -18,9 +18,13 @@ selection, wgpu/spec drift) that are easy to reintroduce.
 Read [`ROADMAP.md`](../ROADMAP.md) before adding features — it records the goal (an
 easy API for cool 3D, with the engine hiding all GPU/windowing plumbing), the
 guiding principles (engine decoupled from consumers via inversion of control;
-demo-first/outside-in; push only generic plumbing into the engine; KISS), and the
-demand-driven slice sequence. New work should be pulled into existence by a demo
-roadblock, never added speculatively.
+demo-first/outside-in; push only generic plumbing into the engine; KISS), the
+slices written up but not yet built, and **What comes next** — the ordered forward
+plan, whose unit is a demo and whose capabilities are predictions to be deleted if
+the demo doesn't hit them. New work should be pulled into existence by a demo
+roadblock, never added speculatively. Finished slices — the precedent the roadmap
+argues from — are in [`ROADMAP-DONE.md`](../ROADMAP-DONE.md), indexed from
+`ROADMAP.md`'s *The slices*. A slice's write-up moves there when it ships.
 
 **UI work is a separate track.** The immediate-mode toolkit lives in its own
 zero-dependency crate, [`slmsttaa-ui`](../slmsttaa-ui/README.md), with its own
@@ -74,6 +78,9 @@ cargo build --target wasm32-unknown-unknown --lib
 # parameters instead: ?backend=gl&limits=webgl2
 SLMSTTAA_LIMITS=webgl2 cargo run --example scene   # the browser's ceilings
 SLMSTTAA_BACKEND=gl    cargo run --example scene   # a real GL adapter
+# BROKEN until ROADMAP.md Slice 25 lands: every demo panics on its first frame
+# under a GL adapter (the blended pass samples and attaches `scene depth` at
+# once). Delete this note when that slice ships.
 
 # Re-bake the font atlas. Runs by hand, roughly never; its output
 # (slmsttaa-ui/src/font/{atlas.bin,metrics.rs}) is committed and reviewed.
@@ -98,15 +105,19 @@ rules — the winit→engine translation is split from the accumulation precisel
 the accumulation half is reachable without a window). Everything else owns a
 surface or a device and is verified by building and looking at it.
 
-Tests constrain but do not replace looking at the screen: four separate bugs (UI
-Slices 1, 3, 5 and 7) passed the whole suite and were caught by running the demo.
-The last one is the sharpest argument for the habit — every test in the toolkit
-passed because the toolkit believed what the host told it, and the *host* was
-wrong (Windows reports `text: Some("a")` for `Ctrl+A`, so "select all" typed an
-`a`).
-The reverse also happens — two primitive bugs (an inverted pole degeneracy, a
-zero-length capsule emitting degenerate triangles) looked *fine* in a still frame
-and were caught by the outward-winding assertion.
+Tests constrain but do not replace looking at the screen: several bugs have passed
+the whole suite and been caught only by running the demo (the slice write-ups in
+`ROADMAP-DONE.md` and `slmsttaa-ui/ROADMAP.md` record each). The sharpest kind is a
+test suite that believes the host when the *host* is wrong — Windows reports
+`text: Some("a")` for `Ctrl+A`, so a toolkit that trusts `text` types an `a`
+instead of selecting all. The reverse also happens: primitive-mesh bugs (an
+inverted pole degeneracy, a zero-length capsule emitting degenerate triangles)
+look *fine* in a still frame and are caught by the outward-winding assertion.
+
+CI (`.github/workflows/ci.yml`) runs the native and wasm builds, `cargo test
+--workspace`, clippy with `-D warnings`, `cargo fmt --check`, and the
+`slmsttaa-ui` one-line `cargo tree` check on every push to `master` and every PR.
+It takes no screenshots — that is a planned roadmap slice, not an omission.
 
 There is one case where the recorder makes a claim no screen can: UI Slice 9's
 virtualized list. "Only these rows were built" is invisible by construction —
@@ -126,10 +137,11 @@ To confirm a change works:
   and/or rebuild the wasm package and hard-refresh the browser. The dev server
   serves `web/` live; no restart needed after a rebuild.
 - **`cargo xtask shoot <example>` when you cannot see a screen**, or when you want
-  a before/after you can diff. It pins the frame clock, so two runs of the same
-  commit are pixel-identical and `compare -metric AE a.png b.png` is a real
-  answer rather than noise — `terrain` differed by 0.6% between hand-taken
-  screenshots and by zero through the harness. A `--script` adds `move` / `click`
+  a before/after you can diff. It pins the frame clock, so two input-free runs of
+  the same commit are pixel-identical and a pixel diff is a real answer rather
+  than noise (`compare -metric AE a.png b.png` on Linux; ImageMagick is not assumed
+  on Windows, where a few lines of Python + PIL do the same). `--out <dir>` keeps a
+  before set and an after set apart. A `--script` adds `move` / `click`
   / `wheel` / `key` steps at exact frames; `capture/workspace.script` is Slice
   19's picking check written down and `capture/editor-list.script` is UI Slice
   9's. **It runs on Windows as well as Linux** — the demo's window is parked off
@@ -180,8 +192,8 @@ To confirm a change works:
   line.
 - **Text metrics have exactly one home.** `slmsttaa_ui::font` — never a `Painter`
   method, and never a widget's own arithmetic. Two implementations of "how wide is
-  this string" agreed for four slices only because the font was a monospace grid,
-  and would have diverged silently the moment it wasn't: the tests measure through
+  this string" once agreed only because the font was a monospace grid, and would
+  have diverged silently the moment it wasn't: the tests measure through
   `RecordingPainter`, so a divergence shows up as a green suite and a broken
   screen. Likewise, a run is **not** `px` tall — use `font::line_height` to size a
   row and `font::centered_top` to centre one, never `(h - px) / 2`.
@@ -199,11 +211,12 @@ To confirm a change works:
   boot* check there — say so in the roadmap rather than implying a picture was
   looked at.
 - **"Checked in a browser" is not the same as "checked on both web paths."**
-  Chrome serves WebGPU whenever it can, so five slices' worth of browser checks
-  never once entered the WebGL2 fallback — and a `textureLoad` on a depth texture
-  that GLSL cannot express sat there undetected from Slice 16. Use
+  Chrome serves WebGPU whenever it can, so browser checks can go a long time
+  without ever entering the WebGL2 fallback — a `textureLoad` on a depth texture
+  that GLSL cannot express once sat there undetected for several slices. Use
   `SLMSTTAA_LIMITS=webgl2` (any machine) and `SLMSTTAA_BACKEND=gl` (needs a GL
-  driver) when touching shaders, bind groups, or the instance buffer.
+  driver; see the BROKEN note under *Commands*) when touching shaders, bind
+  groups, or the instance buffer.
 
 ## Gotchas (quick reference)
 
