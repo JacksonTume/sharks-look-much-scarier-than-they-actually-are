@@ -343,12 +343,35 @@ Everything the entry was waiting on has arrived: captures are exact rather than
 merely close (0.6% RMSE by hand, zero through the harness), and CI exists, so
 "something runs it unprompted" is no longer the blocker.
 
+**Except that "exact" turned out to be "usually exact", and that is this slice's
+real first task.** During the October dependency upgrade, `terrain` — input-free,
+frame 120, identical binary — came back in **one of two states**: byte-identical
+to the reference in most runs, and in roughly one run in four exactly 88,096
+pixels off, every one of them on a water surface (sea, lakes, river fills) and
+none on land or UI. Two discrete outcomes rather than noise points at a race
+that settles one way or the other — something the water reads (ripple time, or
+which bake pass the lake surface reflects) is not fully on the pinned clock.
+The other seven demos were stable across five runs each. A golden of `terrain` would
+fail CI a quarter of the time on no change at all, and **a check that fails
+without cause gets ignored**, which is worse than no check. Find the race before
+committing the first golden, or leave `terrain` out of the first set and say so.
+
 - **`cargo xtask shoot <example> --check`** — capture, compare against a committed
   PNG, exit nonzero with the differing pixel count on a mismatch.
 - **A `capture/golden/` directory that is *not* gitignored**, unlike the rest of
   `capture/`, holding the input-free shots only.
 - **A CI job** running the check for those, beside the four Definition-of-Done
   commands already there.
+
+*Related, and worth deciding while depth is open:* `src/camera.rs` multiplies
+glam's projection by `OPENGL_TO_WGPU_MATRIX`, whose comment says glam targets
+OpenGL's `[-1, 1]` depth. It does not — the `rh` projection it calls is the
+`directx` one, already `[0, 1]` — so depth is remapped twice and lands in
+`[0.5, 1]`, spending half the depth range and feeding the water's depth
+reconstruction a narrower band than it thinks. Removing the matrix is a one-line
+fix that **moves every pixel the water touches**, which is exactly why it belongs
+just after the goldens land rather than before: the diff is then a deliberate,
+reviewed re-baseline instead of noise inside an unrelated change.
 
 **Open, and the slice's first decision: whose pixels are golden.** "Exact" has
 only ever been measured on one machine against itself. CI is `ubuntu-latest` with
@@ -390,11 +413,11 @@ answers it.
 
 The GL backend does not advertise `DownlevelFlags::READ_ONLY_DEPTH_STENCIL`, so
 the read-only depth attachment the blended pass rests on does not exist there, and
-wgpu refuses the pass rather than permit the aliasing. `src/renderer/mod.rs:648`
+wgpu refuses the pass rather than permit the aliasing. `src/renderer/mod.rs:649`
 warns about this and then walks straight into it.
 
 **And it is not terrain's problem, it is every demo's.** The blended pass is
-declared in the graph unconditionally (`src/renderer/mod.rs:892`) — `record_draws`
+declared in the graph unconditionally (`src/renderer/mod.rs:896`) — `record_draws`
 skips its *contents* when nothing is transparent, but the pass is still begun, and
 beginning it is what fails. So a demo with no water at all goes down with the
 ones that have it. This was first written as reasoning from the graph, and has
@@ -419,7 +442,7 @@ so the path that works subsidises the path that does not. Degrading spends nothi
 anywhere except where the capability is genuinely missing.
 
 There is already a template for it one screen up in the same function.
-`can_review_surface` (`src/renderer/mod.rs:696`) reads `SURFACE_VIEW_FORMATS` and
+`can_review_surface` (`src/renderer/mod.rs:697`) reads `SURFACE_VIEW_FORMATS` and
 falls back to a linear surface where it is absent — documented, visibly wrong on
 that one target, and fatal on none. This is the same shape, and the fallback being
 *visibly* worse rather than silently different is the property to preserve.
@@ -656,8 +679,9 @@ the block with the most confidence behind it:
   resource that the opaque pass reads — a genuinely new edge, and the first real
   test of whether "declared, not sequenced" holds.
 - **`Camera` cannot express the light's view, and this is verifiable today.**
-  `Camera::view_projection` is `Mat4::perspective_rh` (`src/camera.rs:87`), and a
-  directional sun wants an **orthographic** projection. `pointer_ray`'s own
+  `Camera::view_projection` is glam's `rh::proj::directx::perspective`
+  (`src/camera.rs:87`), and a directional sun wants an **orthographic** projection
+  (`directx::orthographic` sits beside it in the same glam module). `pointer_ray`'s own
   rustdoc already records the asymmetry — the eye position is not a valid ray
   origin under an orthographic projection — so the type has thought about this
   case once and declined it. Expect that to be the slice's actual shape.
@@ -727,7 +751,7 @@ the instrument comes first.
 
 *Roadblock:* predicted, and it is the one most likely to arrive early and hard.
 The terrain is **two meshes** covering the whole map, and `record_draws`
-(`src/renderer/mod.rs:1770`) iterates the entire draw list every frame with no
+(`src/renderer/mod.rs:1774`) iterates the entire draw list every frame with no
 per-object rejection anywhere in the engine — `Face::Back` in the pipelines is all
 the culling there is. From above that is fine. From inside it means the whole
 continent is submitted to draw a valley.
