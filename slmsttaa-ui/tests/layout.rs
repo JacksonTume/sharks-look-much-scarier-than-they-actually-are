@@ -264,6 +264,114 @@ fn a_narrow_panel_narrows_its_widgets() {
     assert_eq!(track.w, 200.0 - 2.0 * PAD);
 }
 
+/// Every Base-layer fill, in layer order — one per panel background.
+fn backgrounds(p: &RecordingPainter) -> Vec<Rect> {
+    p.in_layer_order()
+        .iter()
+        .filter_map(|c| match **c {
+            DrawCmd::Rect { rect, border, .. } if c.layer() == Layer::Base && border == 0.0 => {
+                Some(rect)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_placed_panel_pads_its_contents_like_an_anchored_one() {
+    let mut painter = RecordingPainter::default();
+    let mut state = UiState::default();
+    let mut value = 1.0_f32;
+    let input = UiInput {
+        viewport: VIEWPORT,
+        ..Default::default()
+    };
+    {
+        let mut ui = Ui::new(&mut painter, input, &mut state);
+        ui.panel_at("rail", [300.0, 40.0], 250.0, |ui| {
+            ui.slider("knob", &mut value, 0.0, 1.0).show();
+        });
+    }
+
+    let bg = backgrounds(&painter)[0];
+    assert_eq!((bg.x, bg.y, bg.w), (300.0, 40.0, 250.0));
+    // The width a consumer's golden files depend on: `width - 2 * pad`, the
+    // same as a corner panel of the same width.
+    let track = rects(&painter)[0];
+    assert_eq!(track.x, 300.0 + PAD);
+    assert_eq!(track.w, 250.0 - 2.0 * PAD);
+}
+
+#[test]
+fn a_corner_panel_draws_exactly_what_a_panel_placed_at_that_corner_does() {
+    // `panel` is a wrapper over `panel_at`'s body. If the wrapper computed its
+    // position differently, every existing consumer would move.
+    let mut value = 0.5_f32;
+    let mut draw = |placed: bool, right: bool| {
+        let mut painter = RecordingPainter::default();
+        let mut state = UiState::default();
+        let input = UiInput {
+            viewport: VIEWPORT,
+            ..Default::default()
+        };
+        let mut ui = Ui::new(&mut painter, input, &mut state);
+        let w = 170.0;
+        let contents = |ui: &mut Ui| {
+            ui.title("Terrain");
+            ui.section("Shape", |ui| {
+                ui.slider("knob", &mut value, 0.0, 1.0).show();
+            });
+            ui.label_value("fps", "60");
+        };
+        match (placed, right) {
+            (false, false) => ui.panel(Anchor::TopLeft, w, contents),
+            (false, true) => ui.panel(Anchor::TopRight, w, contents),
+            (true, false) => ui.panel_at("p", [MARGIN, MARGIN], w, contents),
+            (true, true) => ui.panel_at("p", [VIEWPORT.0 - MARGIN - w, MARGIN], w, contents),
+        }
+        drop(ui);
+        painter.cmds
+    };
+
+    assert_eq!(draw(false, false), draw(true, false));
+    assert_eq!(draw(false, true), draw(true, true));
+}
+
+#[test]
+fn three_placed_panels_sit_side_by_side_with_separate_scopes() {
+    let mut painter = RecordingPainter::default();
+    let mut state = UiState::default();
+    let input = UiInput {
+        viewport: (1440.0, 900.0),
+        ..Default::default()
+    };
+    let (screen, detail) = (880.0, 250.0);
+    let rail = 1440.0 - 4.0 * MARGIN - screen - detail;
+    let ids;
+    {
+        let mut ui = Ui::new(&mut painter, input, &mut state);
+        let a = ui.panel_at("rail", [MARGIN, MARGIN], rail, |ui| ui.next_id("row"));
+        let b = ui.panel_at("screen", [2.0 * MARGIN + rail, MARGIN], screen, |ui| {
+            ui.next_id("row")
+        });
+        let c = ui.panel(Anchor::TopRight, detail, |ui| ui.next_id("row"));
+        ids = [a, b, c];
+    }
+
+    // The same label in three panels is three widgets, not one re-hashed
+    // twice: each panel's contents are scoped under its own id.
+    assert_ne!(ids[0], ids[1]);
+    assert_ne!(ids[1], ids[2]);
+    assert_ne!(ids[0], ids[2]);
+
+    let bgs = backgrounds(&painter);
+    assert_eq!(bgs.len(), 3);
+    // Margin-separated, edge to edge, and the arithmetic closes on the far side.
+    assert_eq!(bgs[1].x - bgs[0].max_x(), MARGIN);
+    assert_eq!(bgs[2].x - bgs[1].max_x(), MARGIN);
+    assert_eq!(bgs[2].max_x(), 1440.0 - MARGIN);
+}
+
 #[test]
 fn a_bottom_anchored_panel_settles_on_the_second_frame() {
     let mut painter = RecordingPainter::default();

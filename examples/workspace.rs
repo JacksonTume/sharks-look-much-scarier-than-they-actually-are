@@ -23,6 +23,12 @@
 //! - **The transition.** "fill window" turns the rect off and back on, so the
 //!   `None` ↔ `Some` path and the texture re-allocation behind it both run at
 //!   runtime rather than only at startup.
+//! - **[`Ui::panel_at`]** (UI Slice 11) — the controls panel is placed rather
+//!   than anchored, at the position `TopLeft` would have chosen, so the panels
+//!   and the pane are laid out by one piece of arithmetic. It draws
+//!   pixel-identically to the anchored panel it replaced.
+//!
+//! [`Ui::panel_at`]: slmsttaa::ui::Ui::panel_at
 //!
 //! **The pane is deliberately not centred vertically** — there is more room below
 //! it than above. A vertically symmetric rect hides a flipped Y completely, and
@@ -370,7 +376,12 @@ impl Application for Workspace {
         let mut ui = renderer.ui();
         ui.set_theme(self.theme);
 
-        ui.panel(Anchor::TopLeft, CONTROLS_W, |ui| {
+        // Placed rather than anchored, at the corner `TopLeft` would pick. The
+        // pane's arithmetic in `pane()` and this panel's position now read from
+        // the same margin by the same hand, which is the layout a third column
+        // would extend.
+        let m = self.theme.space.margin;
+        ui.panel_at("controls", [m, m], CONTROLS_W, |ui| {
             ui.title("Workspace");
             ui.section("Layout", |ui| {
                 ui.checkbox("fill window", &mut fill_window);

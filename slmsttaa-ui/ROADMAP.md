@@ -1035,9 +1035,87 @@ cursor. `capture/terrain-drag.script` photographs one mid-drag. Nothing in this
 crate changed — the widgets were always right, and what was missing was a way to
 *ask* them the question a person asks with a mouse.
 
+## Slice 11 — a panel where the consumer puts it ✅ done
+
+*Roadblock:* [`WISHLIST.md` § Columns of unequal
+width](WISHLIST.md#columns-of-unequal-width--a-three-column-workspace). The second
+consumer's main screen is a navigation rail, an 880 pt screen and a 250 pt detail
+pane, side by side. A panel's position is one of four corners and the corner *is*
+its identity (`Anchor::key`), so a third column has nowhere to go; `columns`
+splits equally, and `Region` is private, so the consumer cannot build it on its
+side of the seam the way it built its tables.
+
+- **`Ui::panel_at(label, [x, y], width, contents)`** — a panel at an explicit
+  top-left position, identified by `label` because a position is not an identity.
+  Everything else is `panel`'s: background and hairline border painted into
+  `Layer::Base` on close, height fit to contents, its own id scope, its rect fed
+  to `wants_pointer`.
+- **`panel` is now a wrapper over the same private body**, computing `[x, y]`
+  from the anchor and keeping `anchor.key()` as the label, so every existing id —
+  and therefore every in-flight drag and focused widget — is unchanged. The
+  bottom anchors keep their last-frame-height lag inside the wrapper; `panel_at`
+  never has it, because `y` is given.
+
+**Decided, and why:**
+
+- **The consumer owns the arithmetic.** Not a strip container that packs widths
+  across the viewport, and not `columns` with weights. This is the
+  [`Ui::remaining()`](#waiting-on-a-roadblock) decline applied again: panels
+  reserve nothing, and the consumer's own four lines from `Theme::space.margin`
+  are exact and lag-free, which `examples/workspace.rs`' `pane()` already
+  demonstrates. Weighted columns were the smaller diff and the worse answer — one
+  background for three columns, `wants_pointer` true over the whole window, and a
+  consumer back-solving a share to land its screen column on exactly 860 pt.
+- **The golden-file constraint holds by construction.** `panel_at(.., 880.0, ..)`
+  has content width `880 − 2·pad`, identical to today's corner panel, because it
+  is the same padding code.
+- **Height fits contents**, as every panel's does. A full-height rail is a mockup
+  nicety with no roadblock behind it.
+- **No resizing, no docking.** This is the fixed-width first step the
+  [seventh vertical's splitter prediction](#what-the-seventh-vertical-is-expected-to-pull)
+  turns on: *"if the screen is buildable with fixed panes, the answer stays no"*.
+  `panel_at` is what makes fixed panes buildable at arbitrary widths, so it is as
+  likely to retire that prediction as to lead into it.
+
+*Proof:*
+
+- **`examples/workspace.rs` placed its controls panel with `panel_at([m, m], …)`**,
+  and `cargo xtask shoot workspace` is **pixel-identical** before and after — a
+  PIL difference with an empty bounding box. That is the claim that the wrapper
+  and the explicit path agree, made on a screen rather than in a recorder. The
+  demo is already a three-column layout — controls, scene, inspector — so this is
+  honest use rather than a contrivance; it is also, like Slice 8, a demo written to
+  check a fix rather than to find one, and should be read that way.
+- **Tests against the recording painter.** `tests/layout.rs`: a placed panel
+  pads its contents to `[x + pad, y + pad]` at `width − 2·pad`; three panels laid
+  out by the consumer's arithmetic close exactly on the far margin and scope the
+  same label three ways; and a corner panel and a panel placed at that corner
+  emit **equal draw lists** for `TopLeft` and `TopRight`. `tests/interaction.rs`:
+  `wants_pointer` covers a placed panel and nothing either side of it.
+
+**What shipped, and what it cost:**
+
+- **Nothing moved for an existing consumer**, and that is by construction rather
+  than by test: the wrapper still calls `next_id(anchor.key())`, so every anchored
+  panel keeps its id, and with it every in-flight drag, focused widget and
+  collapsed section. The full suite passed untouched.
+- **The equivalence test was checked by breaking it.** A first mutation — nudging
+  `y` by half a point in the shared call — shifted *both* paths and the test
+  stayed green, which is correct but proves nothing. Nudging only the wrapper
+  failed it, alongside three older layout tests. Recorded because a test that
+  compares two code paths only means something if the paths can diverge.
+- **The consumer's widths still have to be chosen.** `310 + 880 + 250` is the
+  whole window with no margins; at 12 pt margins the rail is 262 pt. The rustdoc
+  example on `panel_at` is that exact layout, so the arithmetic is written down
+  where the consumer will look for it.
+
 ---
 
 ## Nothing is scheduled
+
+> **Slice 11 has since shipped**, pulled by the second consumer's main screen —
+> a roadblock it could not build around, which is the bar everything below still
+> has to clear.
 
 Slices 7 through 10 answered every roadblock a second consumer has actually hit,
 the one this file's own wishlist argued would get more expensive to answer later,

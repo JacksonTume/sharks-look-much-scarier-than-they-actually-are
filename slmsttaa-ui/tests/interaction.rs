@@ -290,6 +290,36 @@ fn wants_pointer_covers_every_panel() {
 }
 
 #[test]
+fn wants_pointer_covers_a_placed_panel() {
+    let mut painter = RecordingPainter::default();
+    let mut state = UiState::default();
+
+    let asking = |painter: &mut RecordingPainter, state: &mut UiState, at: (f32, f32)| {
+        let input = UiInput {
+            cursor: Some(at),
+            viewport: (1280.0, 720.0),
+            ..Default::default()
+        };
+        let mut ui = Ui::new(painter, input, state);
+        ui.panel_at("middle", [500.0, 100.0], 200.0, |ui| {
+            ui.label("rail");
+        });
+        ui.wants_pointer()
+    };
+
+    assert!(asking(&mut painter, &mut state, (600.0, 110.0)));
+    // Either side of it is not, and neither is the corner an anchored panel
+    // would have occupied.
+    assert!(!asking(&mut painter, &mut state, (495.0, 110.0)));
+    assert!(!asking(&mut painter, &mut state, (705.0, 110.0)));
+    assert!(!asking(
+        &mut painter,
+        &mut state,
+        (MARGIN + 5.0, MARGIN + 5.0)
+    ));
+}
+
+#[test]
 fn every_widget_reports_where_it_landed() {
     let mut painter = RecordingPainter::default();
     let mut state = UiState::default();

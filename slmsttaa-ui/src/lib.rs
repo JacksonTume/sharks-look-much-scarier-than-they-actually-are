@@ -111,7 +111,8 @@ use std::collections::HashSet;
 /// Corners rather than edges: a panel is sized by its caller and grows downward
 /// to fit its contents, so "centered on the left edge" would need a height
 /// nothing knows yet. Four corners is what the demo needed and what the layout
-/// can answer honestly.
+/// can answer honestly. A panel anywhere else — a third column, say — is
+/// [`Ui::panel_at`], placed by the caller.
 ///
 /// **Top and bottom are not symmetric.** A top-anchored panel knows where its
 /// first row goes before it lays anything out. A bottom-anchored one does not —
@@ -715,13 +716,8 @@ impl<'a> Ui<'a> {
         let (margin, pad) = (theme.space.margin, theme.space.pad);
 
         let id = self.next_id(anchor.key());
-        self.scopes.push(Scope {
-            id,
-            used: HashSet::new(),
-        });
-
-        // Narrower than its own padding would be a panel with negative content
-        // width, which `place` would clamp to zero anyway — say so up front.
+        // Clamped here as well as in the body, because a right-anchored panel
+        // places itself from its width.
         let width = width.max(2.0 * pad);
         let (vw, vh) = self.input.viewport;
 
@@ -741,6 +737,69 @@ impl<'a> Ui<'a> {
         } else {
             margin
         };
+
+        self.panel_body(id, [x, y], width, add_contents)
+    }
+
+    /// Declare a panel whose top-left corner is at `[x, y]`, `width` points wide.
+    ///
+    /// Everything but the placement is [`Ui::panel`]'s: the background and
+    /// border land behind the contents, the height fits what was declared, the
+    /// contents get an id scope of their own, and the panel counts for
+    /// [`Ui::wants_pointer`]. The content width is `width - 2 * pad`, exactly as
+    /// for an anchored panel of the same width.
+    ///
+    /// A corner is an anchored panel's identity; a position cannot be, so this
+    /// one is identified by `label`. Keep it stable across frames, and do not
+    /// derive it from the position — a panel that moved would lose its state.
+    ///
+    /// **The arithmetic is yours.** Panels reserve nothing, so the toolkit has no
+    /// better idea than you of where the next one goes, and four lines from
+    /// [`Space::margin`](theme::Space::margin) are exact and lag-free. Here is a
+    /// rail, a fixed screen and a detail pane across the whole window:
+    ///
+    /// ```
+    /// # use slmsttaa_ui::{Anchor, RecordingPainter, Ui, UiInput, UiState};
+    /// # let (mut p, mut s) = (RecordingPainter::default(), UiState::default());
+    /// # let input = UiInput { viewport: (1440.0, 900.0), ..UiInput::default() };
+    /// # let mut ui = Ui::new(&mut p, input, &mut s);
+    /// let (vw, _) = ui.input().viewport;
+    /// let m = ui.theme().space.margin;
+    /// let (screen, detail) = (880.0, 250.0);
+    /// let rail = vw - 4.0 * m - screen - detail;
+    ///
+    /// ui.panel_at("rail", [m, m], rail, |ui| ui.label("navigation"));
+    /// ui.panel_at("screen", [2.0 * m + rail, m], screen, |ui| ui.title("Roster"));
+    /// ui.panel(Anchor::TopRight, detail, |ui| ui.label("detail"));
+    /// ```
+    pub fn panel_at<R>(
+        &mut self,
+        label: &str,
+        [x, y]: [f32; 2],
+        width: f32,
+        add_contents: impl FnOnce(&mut Ui<'a>) -> R,
+    ) -> R {
+        let id = self.next_id(label);
+        self.panel_body(id, [x, y], width, add_contents)
+    }
+
+    /// The body [`Ui::panel`] and [`Ui::panel_at`] share once each has decided
+    /// where the panel goes and what it is called.
+    fn panel_body<R>(
+        &mut self,
+        id: u64,
+        [x, y]: [f32; 2],
+        width: f32,
+        add_contents: impl FnOnce(&mut Ui<'a>) -> R,
+    ) -> R {
+        let theme = self.theme;
+        let pad = theme.space.pad;
+        self.push_scope(id);
+
+        // Narrower than its own padding would be a panel with negative content
+        // width, which `place` would clamp to zero anyway — say so up front.
+        let width = width.max(2.0 * pad);
+        let vh = self.input.viewport.1;
 
         let content = Rect::new(x + pad, y + pad, width - 2.0 * pad, (vh - y - pad).max(0.0));
         self.regions.push(Region::vertical(content));

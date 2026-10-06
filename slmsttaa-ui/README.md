@@ -35,8 +35,9 @@ of sliders:
 - **Painter capabilities** — rounded rects, strokes, and nesting clip regions
   that intersect rather than replace.
 - **Layout** — a stack of regions rather than a `y` cursor. Panels anchored to a
-  corner and sized by their caller, plus `horizontal` / `right` / `columns` /
-  `indent` / `sized`, all closure-scoped so the stack cannot desync.
+  corner or placed at a position (`panel_at`), and sized by their caller, plus
+  `horizontal` / `right` / `columns` / `indent` / `sized`, all closure-scoped so
+  the stack cannot desync.
 - **Theme tokens** — one `Theme` of semantic colors and four scales, plus
   `Variant` and `Size`. No widget anywhere names a literal color, and there is a
   test that says so.

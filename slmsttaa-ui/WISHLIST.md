@@ -8,6 +8,37 @@ the things already waiting on a roadblock; this file holds a *different* kind of
 list — the capabilities a second, non-terrain consumer will need, written down
 before it starts hitting walls.
 
+## How requests reach this repo — the formal process
+
+**This file is the only thing in this repository a consumer writes.** The Matchmaker's
+agents and contributors make no edits anywhere else in the engine or the toolkit (code,
+docs, roadmap or tests) without the maintainer's explicit permission. When a consumer
+needs something created or changed here, it adds an entry to this file and a row to the
+ordered backlog below. **The maintainer treats that backlog as their work queue**, decides
+what to build and how, and records the outcome in the entry the way the closed entries
+further down already do.
+
+A backlog row names the entry, the consumer screen or milestone it blocks, and what the
+consumer does meanwhile. The order is the consumer's priority. The maintainer is free to
+re-rank it, decline an item, or answer it differently than the entry suggests. The entries
+have always been allowed to be wrong about the shape, and the stopping rule still decides
+whether anything gets built.
+
+## Backlog — ordered
+
+Highest priority first. Closed items leave this table; their entries keep the record.
+
+| # | Request | Kind | Blocks | Meanwhile |
+|---|---|---|---|---|
+| 1 | [A sort arrow is not in the atlas](#a-sort-arrow-is-not-in-the-atlas) | toolkit (`fontbake`) | Nothing; every sortable table draws `^`/`v` | `^`/`v` |
+| 2 | [Photograph a running build, or a binary built elsewhere](#engine-side-not-this-crate) (the two harness bullets) | engine (`xtask`) | Visual verification of every consumer screen; today it rests on golden files alone | Golden files, and a human looking |
+| 3 | [A per-frame failure is logged every frame](#engine-side-not-this-crate) | engine | Nothing until a surface fails; then the failure is buried | Read the first line of the log |
+| 4 | A tab ring a virtualized container can extend ([Virtualization](#virtualization), and [adoption notes](#what-the-second-consumers-adoption-cost)) | toolkit | Nothing yet; Tab walks a screenful, arrows walk the list | Arrows |
+| 5 | `next_id`'s duplicate re-hash, documented on `scroll_area_virtual` ([adoption notes](#what-the-second-consumers-adoption-cost)) | toolkit (rustdoc) | Nothing; a trap for the next virtualized list | The consumer hoists its ids |
+| 6 | [Reactive repaint](#runtime-behavior--reactive-repaint) | toolkit + engine | Battery life on a handheld, before a Steam Deck build | Nothing needed yet |
+| 7 | [Mark-to-base positioning](#combining-marks-cannot-render-and-the-data-that-needs-them-is-correct) | toolkit (`fontbake`) | Six names in 150,502 | They draw `□` |
+| 8 | [Dockable / resizable panels](#open-conflicts-with-current-scope) | decision, then toolkit | Nothing yet; a decision rather than a build | Fixed columns, now buildable with `panel_at` (UI Slice 11) |
+
 ## Why this file exists at all
 
 Root principle 2 says build only what a real consumer demands, and the honest
@@ -57,6 +88,72 @@ this crate already made. Very few toolkits offer it.
 ## New demands
 
 Each names the screen that would pull it into existence.
+
+### Columns of unequal width — a three-column workspace
+
+> **Built, as [UI Slice
+> 11](ROADMAP.md#slice-11--a-panel-where-the-consumer-puts-it--done) — shape 2
+> below.** `Ui::panel_at(label, [x, y], width, contents)`: a panel at a position
+> the consumer computes, with `panel` rewritten as a wrapper over the same body so
+> no existing id moves. Shape 1 was the smaller diff and was declined: one
+> background for three columns, `wants_pointer` true over the whole window, and a
+> share back-solved to land the screen column on 860 pt. The consumer owns the
+> arithmetic, for the reason `Ui::remaining()` was declined — panels reserve
+> nothing, and four lines from `Theme::space.margin` are exact.
+>
+> **The specified widths do not fit, and the consumer has to choose.** 310 + 880 +
+> 250 is exactly 1440, which leaves nothing for `margin` (12 pt) at the two edges
+> or between the panels. With margins as `examples/workspace.rs` spaces them, the
+> rail gets `1440 − 4·12 − 880 − 250 = 262` pt. The 880 is pinned by the golden
+> files and the 250 by the existing panel, so the rail is the column that should
+> give — but that is the consumer's call, not this crate's. (The middle that is
+> empty today is likewise 286 pt, not 310: the two corner panels sit 12 pt in
+> from each edge.)
+
+*Roadblock:* The Matchmaker's main screen (its C12, plan package B0). The window is 1440
+points wide and the client draws two corner panels, an 880 pt screen on the left and a
+250 pt side panel on the right, so **the middle has been empty since its first
+screen**. The specified layout is the genre's native one: a **310 pt navigation
+rail**, the **880 pt screen**, and a **250 pt detail pane**, side by side.
+
+Nothing public can place it. A consumer has three ways to get widgets side by side, and
+none of them reaches:
+
+- **`panel` anchors to a corner, and the corner is its identity** (`Anchor::key`). A
+  second left-hand panel lands on top of the first — `next_id` re-hashes the duplicate
+  so their state stays apart, but nothing can move it — and there is no panel at an x
+  offset.
+- **`columns` splits the line equally.** 310 / 880 / 250 inside one wide panel is not
+  expressible, and its own docs (Slice 8) already say equal widths are its defining
+  property.
+- **A consumer cannot push a region.** `Region` is private, so a consumer can paint and
+  hit-test a rectangle (`allocate` / `interact` / `painter`) but cannot lay widgets out
+  inside one. That is why this cannot be written on the consumer's side of the seam the
+  way its tables were.
+
+What the consumer needs, without prescribing the shape:
+
+- Lay out three vertical stacks of widgets side by side at **widths the consumer
+  chooses**, each behaving like a `panel`'s body: widgets stack downward, `scroll_area`
+  works inside it, and focus and the tab ring behave as they do in a panel today.
+- **The screen column's content width must equal today's 880 pt panel's**
+  (`880 - 2 * pad`). The consumer's golden files render every screen at that width, and
+  this keeps the layout change from moving a single cell.
+- Separate backgrounds per column would match the mockup, but are not required.
+
+Two shapes that would answer it; the maintainer's call:
+
+1. **`columns` with per-column shares**, e.g. `columns_weighted(&[f32], cell)`: `columns`
+   with the equal split replaced by shares of the line. The consumer would draw one
+   full-width panel and split it. It is the smallest change, and it keeps `columns`'
+   column-major contract.
+2. **A panel at an x offset**, e.g. an anchor or `panel_at` with its own id, so three
+   panels sit side by side with their own backgrounds. It is closer to the mockup and to
+   the eventual dockable workspace ([*Open conflicts*](#open-conflicts-with-current-scope)),
+   whose fixed-width first step this is.
+
+**Not asked for:** resizing or docking. Three fixed columns is the consumer's v1 answer,
+and whether they become draggable is for the first time a player wants a different split.
 
 ### Tables — the keystone
 
