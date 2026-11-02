@@ -314,7 +314,7 @@ file keeps the method, the harness, the slices not yet built, and the plan.
 - [Slice 16 — An offscreen target, and the render graph that needed](ROADMAP-DONE.md#slice-16--an-offscreen-target-and-the-render-graph-that-needed--done)
 - [Slice 17 — Picking: letting the pointer reach the world](ROADMAP-DONE.md#slice-17--picking-letting-the-pointer-reach-the-world--done)
 - [Slice 18 — A keyboard that reaches the consumer](ROADMAP-DONE.md#slice-18--a-keyboard-that-reaches-the-consumer--done)
-- [Slice 19 — The scene as a panel among panels](ROADMAP-DONE.md#slice-19--the-scene-as-a-panel-among-panels--done)
+- [Slice 19 — The scene as a pane among panels](ROADMAP-DONE.md#slice-19--the-scene-as-a-pane-among-panels--done)
 - [Slice 20 — a consumer's own window](ROADMAP-DONE.md#slice-20--a-consumers-own-window--done)
 - [Slice 21 — pixels a consumer supplies](ROADMAP-DONE.md#slice-21--pixels-a-consumer-supplies--done)
 - [Slice 22 — a continent, and the sea its rivers reach](ROADMAP-DONE.md#slice-22--a-continent-and-the-sea-its-rivers-reach--done)
@@ -773,7 +773,7 @@ before this one is the instrument, and this slice starts by reading it.
 ## The seventh vertical — a dossier beside a scene
 
 **The demo:** an in-repo screen shaped like the second consumer's — a sortable
-roster, a dossier pane, a chart, and the 3D scene as one panel among them, with
+roster, a dossier pane, a chart, and the 3D scene as one pane among them, with
 panes the user can resize. `examples/workspace.rs` is the seed; this is that demo
 grown until it is genuinely dense.
 

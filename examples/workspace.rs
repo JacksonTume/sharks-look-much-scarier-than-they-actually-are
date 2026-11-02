@@ -1,10 +1,10 @@
-//! The scene as **a panel among panels** — an application layout, not a
+//! The scene as **a pane among panels** — an application layout, not a
 //! backdrop.
 //!
 //! Every demo before this one is the same shape: the 3D view fills the window
 //! and the UI floats on top of it. That is the right shape for a terrain toy and
 //! the wrong one for an application, where the rendered view is one pane in a
-//! workspace — a viewport beside an inspector beside a list. This demo is the
+//! workspace, beside an inspector and a list. This demo is the
 //! inversion, and the roadblock it hit is the whole of engine Slice 19: there was
 //! no way to say *where* the scene goes.
 //!

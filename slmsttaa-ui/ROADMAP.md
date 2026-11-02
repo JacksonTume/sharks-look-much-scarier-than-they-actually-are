@@ -1288,7 +1288,7 @@ finally demands one, not as a to-build list:
 - **A content region — `Ui::remaining()`** — the space a layout has left after its
   panels. **Asked for once, declined once, and the reason is that the demo's own
   arithmetic is better.** Engine [Slice
-  19](../ROADMAP-DONE.md#slice-19--the-scene-as-a-panel-among-panels--done) let a
+  19](../ROADMAP-DONE.md#slice-19--the-scene-as-a-pane-among-panels--done) let a
   consumer put the 3D scene in a rectangle, and `examples/workspace.rs` needs to
   know which rectangle. It computes one from `Theme::space.margin` and its own two
   panel widths — four lines, exact, no lag. A generic version would be worse in
@@ -1319,7 +1319,7 @@ names the roadblock.
 
 One item from that file has since **landed on the engine side**: a scene rendered
 into a UI rectangle, as [engine Slice
-19](../ROADMAP-DONE.md#slice-19--the-scene-as-a-panel-among-panels--done). It cost this
+19](../ROADMAP-DONE.md#slice-19--the-scene-as-a-pane-among-panels--done). It cost this
 crate nothing at all — no `Painter` method, no `UiInput` field, no widget — and
 nothing in the slices above moves. What it did surface is one new entry on
 *Waiting on a roadblock*, `Ui::remaining()`, filed there as declined with its
@@ -1332,6 +1332,6 @@ transforms, lighting, per-instance material, primitives, a fixed-step clock),
 driven by an engine demo of our own rather than by the request list. **It changes
 nothing here.** No slice below moves, and nothing graduates out of
 `WISHLIST.md` — the request was explicitly scoped to exclude UI, and the parts of
-it that touch this crate (a scene rendered as a *panel among panels*, transport
+it that touch this crate (a scene rendered as a *pane among panels*, transport
 controls for the new clock) were already recorded there and in *Waiting on a
 roadblock* above.

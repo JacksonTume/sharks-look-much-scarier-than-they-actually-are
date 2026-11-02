@@ -1445,7 +1445,7 @@ consumer attached — which is a coincidence worth noticing rather than a
 vindication of the list: the demo picked itself, and the entry happened to be
 sitting under it.
 
-### Slice 19 — The scene as a panel among panels ✅ done
+### Slice 19 — The scene as a pane among panels ✅ done
 
 *Roadblock:* there was no way to say **where** the scene goes. `Renderer` had
 `size()` and `resize()` and an unstated assumption underneath everything else

@@ -50,7 +50,7 @@ Rust — a parity-tested simulation kernel, a procedural fighter generator, and 
 front end. It is choosing its UI stack now, and this toolkit is a candidate. Its
 screens are the opposite of the terrain demo's: where terrain needs a parameter
 panel over a 3D scene, a management sim is mostly **tables, dossiers, charts, and
-tickers**, with the rendered scene as one panel among many.
+tickers**, with the rendered scene as one pane among many.
 
 That inversion is the value of this list. The terrain demo will never demand a
 virtualized table, so demand-driven development against a single consumer will
@@ -536,7 +536,7 @@ find the atlas has `▶` and stop there for a minute.
 
 One item that belonged in [`../ROADMAP.md`](../ROADMAP.md), noted here because the
 same consumer pulls it: **an offscreen render target composited into a UI rect**,
-so a 3D/2D scene is a *panel among panels* rather than a fullscreen background
+so a 3D/2D scene is a *pane among panels* rather than a fullscreen background
 with UI floating over it.
 
 **It landed, as engine Slice 19** — `Renderer::set_scene_rect` takes a rectangle

@@ -1120,7 +1120,7 @@ impl Renderer {
     /// the same orientation the UI toolkit lays out in, because that is where the
     /// rect comes from. `None` restores the default, which is the whole window.
     ///
-    /// This is what makes the scene *a panel among panels* rather than a
+    /// This is what makes the scene *a pane among panels* rather than a
     /// background with UI floating over it. The engine takes over three things
     /// the rect implies and a consumer should not have to redo: the size of every
     /// offscreen target the frame renders through, the camera's aspect ratio, and

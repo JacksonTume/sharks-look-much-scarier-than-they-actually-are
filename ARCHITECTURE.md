@@ -494,7 +494,7 @@ barrier insertion (wgpu does that), and **no way for a consumer to add a pass**:
 the module is `pub(crate)` and `PassKind` is a closed enum. The roadmap's trigger
 for a *public* graph is a second consumer wanting its own pass, and there still
 isn't one — what pulled this in was the engine's own fourth pass. The candidate
-that used to be named here, the UI wishlist's "3D scene as a panel", **landed in
+that used to be named here, the UI wishlist's "3D scene as a pane", **landed in
 Slice 19** and needed no such thing: it cost one resource, one `PassKind`, and one
 `set_viewport` call, all above a graph that did not move. A demand absorbed by
 declaring a pass rather than by opening the module is the best evidence so far
