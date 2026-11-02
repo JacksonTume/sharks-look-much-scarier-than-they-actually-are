@@ -1914,7 +1914,11 @@ been asked once.
 Two pieces of tooling that buy no capability and are here because a claim this
 file has repeated for five slices turned out to be false.
 
-**CI** (`.github/workflows/ci.yml`) runs the four commands the Definition of Done
+> **Superseded: CI has since been removed** and stays out until it is explicitly
+> re-added. The commands below are run by hand now; see `.claude/CLAUDE.md` under
+> *Verifying changes*.
+
+**CI** (`.github/workflows/ci.yml`) ran the four commands the Definition of Done
 already names — both build targets, `cargo test --workspace`, `clippy -D
 warnings`, `fmt --check` — plus one that was prose until now: `cargo tree -p
 slmsttaa-ui` must print exactly **one line**. The zero-dependency rule is the

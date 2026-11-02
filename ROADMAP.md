@@ -223,9 +223,10 @@ written to prevent: the tooling becoming the project.
   24](#slice-24--the-first-golden-images)**, and the driver is worth naming
   because it is not a demo: Slice 23 and Slice 25 both make their central claim by
   photographing every demo before and after and asserting nothing moved, and doing
-  that by hand twice is what promoted this. Everything needed was already here —
-  captures are exact, and CI (`.github/workflows/ci.yml`) supplies the "something
-  runs it unprompted" half that used to be the blocker. What argued for waiting was
+  that by hand twice is what promoted this. Captures are exact, which was the half
+  that mattered. *(This entry first said CI supplied the "something runs it
+  unprompted" half. CI has since been removed until it is explicitly re-added, so
+  the check is run by hand — see Slice 24.)* What argued for waiting was
   the *review* cost rather than the running cost, plus one measured limit: a shot
   taken after an input step is stable within a build and not across one (see the
   synthetic-input entry below), so a golden of a scripted click would fail on an
@@ -282,7 +283,8 @@ written to prevent: the tooling becoming the project.
   environmental rather than a defect. Until it moves, the web half of the
   Definition of Done stays a build-and-boot check, and slices should say so
   rather than implying a picture was looked at.
-- **Perf capture** from the same run. Slice 14 spent 10 ms a frame CPU-animating
+- **Perf capture** — **scheduled as [Slice
+  30](#slice-30--where-the-frame-actually-goes)**. From the same run: Slice 14 spent 10 ms a frame CPU-animating
   water and it was noticed as a feeling before it was measured; frame timings
   alongside the frames would have made it a number.
 
@@ -337,11 +339,15 @@ rather than assumed.
 **This slice was first written as Slice 25, after the degrade, and moved ahead of
 it.** The order contradicted *Block 0*'s own rule — goldens that land after the
 work they are meant to watch certify none of it — so they go first, and the
-degrade is the first change CI watches rather than the last one checked by hand.
+degrade is the first change a golden check watches rather than the last one
+compared by eye.
 
-Everything the entry was waiting on has arrived: captures are exact rather than
-merely close (0.6% RMSE by hand, zero through the harness), and CI exists, so
-"something runs it unprompted" is no longer the blocker.
+Captures are exact rather than merely close (0.6% RMSE by hand, zero through the
+harness), which is what the entry was waiting on. **There is no CI**: it was
+removed, and stays out until it is explicitly re-added. So `--check` is run by
+hand before a change that could move pixels, the same way the Definition of Done
+commands are. That is weaker than a check that runs unprompted, and the slice
+should say so rather than imply otherwise.
 
 **Except that "exact" turned out to be "usually exact", and that is this slice's
 real first task.** During the October dependency upgrade, `terrain` — input-free,
@@ -352,7 +358,7 @@ none on land or UI. Two discrete outcomes rather than noise points at a race
 that settles one way or the other — something the water reads (ripple time, or
 which bake pass the lake surface reflects) is not fully on the pinned clock.
 The other seven demos were stable across five runs each. A golden of `terrain` would
-fail CI a quarter of the time on no change at all, and **a check that fails
+fail a quarter of the time on no change at all, and **a check that fails
 without cause gets ignored**, which is worse than no check. Find the race before
 committing the first golden, or leave `terrain` out of the first set and say so.
 
@@ -360,8 +366,7 @@ committing the first golden, or leave `terrain` out of the first set and say so.
   PNG, exit nonzero with the differing pixel count on a mismatch.
 - **A `capture/golden/` directory that is *not* gitignored**, unlike the rest of
   `capture/`, holding the input-free shots only.
-- **A CI job** running the check for those, beside the four Definition-of-Done
-  commands already there.
+- **No CI job.** The check runs by hand (see above).
 
 *Related, and worth deciding while depth is open:* `src/camera.rs` multiplies
 glam's projection by `OPENGL_TO_WGPU_MATRIX`, whose comment says glam targets
@@ -373,14 +378,14 @@ fix that **moves every pixel the water touches**, which is exactly why it belong
 just after the goldens land rather than before: the diff is then a deliberate,
 reviewed re-baseline instead of noise inside an unrelated change.
 
-**Open, and the slice's first decision: whose pixels are golden.** "Exact" has
-only ever been measured on one machine against itself. CI is `ubuntu-latest` with
-no GPU, so it would render through lavapipe, and a lavapipe frame is not going to
-be byte-identical to one from a desktop GPU — rasterization rules, blending
-precision and texture filtering all leave the spec room. Either the goldens are
-lavapipe's (committed from a CI artifact, and a local `--check` on a real GPU is
-expected to fail), or they are per-platform, or the check tolerates a threshold —
-and a threshold reopens the question this slice exists to close.
+**Decided: the goldens are the developer's own GPU's.** "Exact" has only ever been
+measured on one machine against itself, and with no CI there is no second
+machine whose pixels could be golden. So the goldens are captured on the Windows
+workstation that runs the check, and a `--check` from any other machine
+(lavapipe under Xvfb in a cloud session, or a different GPU) is expected to fail,
+because rasterization rules, blending precision and texture filtering all leave
+the spec room. A pixel threshold was the other way out, and was declined because
+it reopens the question this slice exists to close.
 
 **Input-free shots only, and the limit is measured rather than cautious.** UI
 Slice 10 established that two runs of a scripted click are byte-identical *within*
@@ -389,8 +394,8 @@ unrelated commit. The two input-free shots are already exact and are what a firs
 golden should be. Extending to scripted shots waits on the synthetic input queue
 that same entry describes — this slice should not pretend to have solved it.
 
-*Proof (the target):* a deliberately broken commit — nudge a light constant — turns
-CI red, and the failure names the demo and the pixel count. A green run on an
+*Proof (the target):* a deliberately broken commit — nudge a light constant — makes
+`--check` exit nonzero, and the failure names the demo and the pixel count. A green run on an
 unrelated change is not proof of anything on its own, which is the trap this
 whole idea has to clear: **a check that cannot fail certifies nothing**, exactly
 as Slice 20's window title did.
@@ -475,12 +480,19 @@ and write another. **Only `scene_depth` is both attached and sampled**, so only
   buffer, and the shader takes paths it already has: `density = 0` makes
   `absorbed` zero so alpha falls back to the authored coverage, and
   `reflection = 0` skips the march and keeps the Fresnel edge reflecting sky.
-- **One shader branch, for refraction's occlusion guard** (`shader.wgsl:471`),
-  which is the single remaining `depth_at` call on the surviving path. It costs a
-  per-instance signal, and `location(13)`'s fourth channel is documented as "the
-  only spare per-instance float left anywhere in this buffer" — so the attribute
-  count stays at fourteen of WebGL2's sixteen and the budget
-  `ARCHITECTURE.md` tracks does not move.
+- **Refraction's occlusion guard still reads depth, and the dummy's value decides
+  what it does.** The surviving path calls `depth_at` twice (`shader.wgsl:471`, and
+  `:478` inside the guard), and `behind` also feeds `thickness` through
+  `world_from_depth` (`:484`), which still runs when density is zeroed. A dummy
+  texel of **1.0 — the far plane** — makes `behind < clip.z` never fire, so the
+  guard drops out by itself, and keeps `thickness` finite (`NaN * 0` is not 0, so
+  a non-finite one would poison `cover`). A dummy of 0.0 would fire the guard
+  everywhere and lose refraction's distortion entirely. The first draft planned a
+  shader branch for the guard, costing a per-instance signal on `location(13)`'s
+  fourth channel — "the only spare per-instance float left anywhere in this
+  buffer". With a far-plane dummy, check whether that branch is needed at all
+  before spending the float; either way the attribute count stays at fourteen of
+  WebGL2's sixteen.
 
 **Refraction survives, and that is the find.** Both this roadmap and
 `ARCHITECTURE.md` describe the degrade option as dropping "refraction, absorption
@@ -506,7 +518,9 @@ draws water. All eight demos start under a forced GL adapter, which is the claim
 the parity section could only make for `SLMSTTAA_LIMITS=webgl2`. And the load-
 bearing half: `cargo xtask shoot --check` ([Slice
 24](#slice-24--the-first-golden-images)) on the Vulkan path is **byte-identical
-across the change for all eight**, because an adapter with the flag must take
+across the change for every golden** — all eight, unless Slice 24 had to leave
+`terrain` out, in which case `terrain` gets a hand-run before/after pair —
+because an adapter with the flag must take
 exactly the path it took before — the same shape of proof Slice 23 used, and the same reason
 it is the right one for a change whose entire purpose is to not be visible where
 things already worked.
@@ -621,9 +635,11 @@ project cannot see what that consumer sees.**
   give `Renderer` a surface-health signal so a consumer can assert the state.
 
 *Also here, and it is a one-line coupling worth removing while the harness is
-open:* `shoot` finds the window by the exact name `SLMSTTAA`, so any demo that
-uses [Slice 20](ROADMAP-DONE.md#slice-20--a-consumers-own-window--done)'s `Config::title` breaks
-the harness. Resolve the window by process instead.
+open:* on Linux, `shoot` finds the window by the exact name `SLMSTTAA`
+(`xtask/src/harness/x11.rs`), so any demo that uses [Slice
+20](ROADMAP-DONE.md#slice-20--a-consumers-own-window--done)'s `Config::title`
+breaks the harness there. Resolve the window by process instead, as the Windows
+half already does (`find_window(pid)` in `win32.rs`).
 
 *Why this belongs in Block 0 rather than in the dossier vertical it serves:*
 [UI Slice 8](slmsttaa-ui/ROADMAP.md#slice-8--a-header-that-lines-up-with-its-body--done)
@@ -637,7 +653,9 @@ work than after them.
 
 ## The fifth vertical — light that moves
 
-**The demo:** the terrain island, or `scene.rs`'s stage, under a sun that travels.
+**The demo:** the terrain island under a sun that travels. (Chosen over
+`scene.rs`'s stage because a landscape's relief is legible almost entirely
+through what the sun cannot reach, which makes it the worst case for shadows.)
 Not a time-of-day *system* — a light with a direction the consumer sets, and the
 shadows that immediately become the obvious missing thing once it moves.
 
@@ -685,10 +703,14 @@ the block with the most confidence behind it:
   rustdoc already records the asymmetry — the eye position is not a valid ray
   origin under an orthographic projection — so the type has thought about this
   case once and declined it. Expect that to be the slice's actual shape.
-- **The depth binding work is done.** Slice 25 is about to establish depth bound
-  as `unfilterable-float` and readable as a plain `sampler2D` on both backends,
-  which is exactly what sampling a shadow map needs. That is a dependency, and it
-  is why this block sits after Block 0 rather than beside it.
+- **The depth binding work is done — earlier than this entry first said.** Depth
+  bound as `unfilterable-float`, readable as a plain `sampler2D` on both backends,
+  shipped in the parity work (`ARCHITECTURE.md`, *Fixed: depth is bound with
+  sample type `unfilterable-float`*), not in Slice 25, so this slice does not
+  depend on Slice 25 for it. A shadow map may want the opposite binding anyway: a
+  `Depth` sample type with a comparison sampler, which GLSL expresses as
+  `sampler2DShadow` — the one use GL supports natively. Decide in the slice. The
+  block still sits after Block 0, for the goldens rather than for this.
 
 *What it is expected to expose:* shadow acne and edge aliasing, which is the first
 thing that has ever argued for **MSAA** — carried in *Beyond* since that section
@@ -751,7 +773,7 @@ the instrument comes first.
 
 *Roadblock:* predicted, and it is the one most likely to arrive early and hard.
 The terrain is **two meshes** covering the whole map, and `record_draws`
-(`src/renderer/mod.rs:1774`) iterates the entire draw list every frame with no
+(`src/renderer/mod.rs`) iterates the entire draw list every frame with no
 per-object rejection anywhere in the engine — `Face::Back` in the pipelines is all
 the culling there is. From above that is fine. From inside it means the whole
 continent is submitted to draw a valley.
@@ -936,8 +958,9 @@ what pulls them into existence. Four have already landed there and been paid for
 here: ordered draw layers in `Overlay::flush` and a `scale_factor`-aware surface
 (UI Slice 1), then rounded-rect and clip support in `overlay.wgsl` and the wider
 `Vertex2D` that carries them (UI Slice 2), then a distance-field text mode plus a
-linear atlas sampler (UI Slice 5). The overlay is still a single `draw_indexed`. The next one the UI is likely to ask for is textured quads, which
-is the same shader work the "no texture support" entry above is waiting on.
+linear atlas sampler (UI Slice 5). The overlay is still a single `draw_indexed`. Textured quads, which this paragraph
+used to name as the next likely ask, landed with [Slice
+21](ROADMAP-DONE.md#slice-21--pixels-a-consumer-supplies--done).
 
 The trend since is the point: UI Slice 3 (layout) cost one field — `UiInput`
 gained `viewport`, filled by `Renderer::ui()` from the surface size over the scale

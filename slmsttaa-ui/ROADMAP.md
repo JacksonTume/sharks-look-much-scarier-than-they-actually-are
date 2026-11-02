@@ -1234,10 +1234,6 @@ finally demands one, not as a to-build list:
   the type scale distinguishes headings from body text. Nothing has asked for
   Medium, Bold, or an italic, and each is another atlas page in every wasm bundle
   (~185 KiB), so each waits for something that actually needs it.
-- **Draggable panel edges** — panel *width* is a parameter as of Slice 3, so a
-  consumer can already resize one by passing a different number. A grab handle
-  that lets the *user* do it at runtime is a separate thing, and stays under the
-  "no" below until something wants it.
 - **A transport / timeline scrubber** — play, pause, single-step, and seek along a
   time axis, with tick marks or event markers. **The driver arrived, and the
   prediction held.** Engine [Slice
@@ -1292,15 +1288,18 @@ finally demands one, not as a to-build list:
   consumer put the 3D scene in a rectangle, and `examples/workspace.rs` needs to
   know which rectangle. It computes one from `Theme::space.margin` and its own two
   panel widths — four lines, exact, no lag. A generic version would be worse in
-  three specific ways: panels here are corner-anchored floaters that reserve
-  nothing, so "what is left" is only a bounding-box guess; it could only answer
+  three specific ways: panels reserve nothing, whether anchored to a corner or
+  placed with `panel_at` (Slice 11), so "what is left" is only a bounding-box guess; it could only answer
   after every panel had closed; and a bottom-anchored panel's height carries the
   one-frame measurement lag documented under `Anchor`, which for a *scene* rect
   means a texture re-allocation on the settling frame. A second consumer wanting
   it — one whose panel set is dynamic enough that the arithmetic stops being
   writable — is what would move this.
 - **Draggable / resizable / dockable panels** — still no, and Slice 19 is the
-  closest anything has come to arguing otherwise. A workspace demo makes splitter
+  closest anything has come to arguing otherwise. (This absorbs the old
+  *draggable panel edges* entry: panel width has been a parameter since Slice 3,
+  so a consumer can already resize one by passing a different number, and only a
+  grab handle the *user* drags at runtime is missing.) A workspace demo makes splitter
   handles look like the obvious next thing, and `set_scene_rect` takes a new
   rectangle every frame for free, so the engine half is already there. The
   toolkit half is not, and this stays a "no" until a consumer is blocked rather

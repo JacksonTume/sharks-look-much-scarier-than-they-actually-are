@@ -114,10 +114,14 @@ instead of selecting all. The reverse also happens: primitive-mesh bugs (an
 inverted pole degeneracy, a zero-length capsule emitting degenerate triangles)
 look *fine* in a still frame and are caught by the outward-winding assertion.
 
-CI (`.github/workflows/ci.yml`) runs the native and wasm builds, `cargo test
---workspace`, clippy with `-D warnings`, `cargo fmt --check`, and the
-`slmsttaa-ui` one-line `cargo tree` check on every push to `master` and every PR.
-It takes no screenshots — that is a planned roadmap slice, not an omission.
+**There is no CI.** It was removed on purpose and comes back only when it is
+explicitly re-added — don't add a workflow on your own initiative. The Definition
+of Done commands (both builds, `cargo test --workspace`, `cargo clippy
+--all-targets -- -D warnings`, `cargo fmt --all -- --check`) and the
+`slmsttaa-ui` one-line `cargo tree` check are run by hand, which makes them easy
+to skip: run them before calling anything done. Golden images (ROADMAP.md
+Slice 24) are likewise a local `--check` against captures from the developer's
+own GPU.
 
 There is one case where the recorder makes a claim no screen can: UI Slice 9's
 virtualized list. "Only these rows were built" is invisible by construction —

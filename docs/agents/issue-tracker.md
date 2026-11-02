@@ -2,6 +2,14 @@
 
 Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
 
+## How issues relate to the roadmap
+
+- **An issue holds scope and acceptance criteria; `ROADMAP.md` holds the rationale.** An issue links to its slice's section instead of restating the argument, so there is one copy of the argument and it can't drift.
+- **Every roadmap block has a map issue** (Block 0, then one per vertical). Its slices are sub-issues. Order is expressed as blocked-by edges: each block is blocked by the one before it, because the plan is strictly ordered.
+- **Only scheduled slices get issues.** Entries under *Waiting on a roadblock*, *Beyond* and `slmsttaa-ui/WISHLIST.md`, and a vertical's predicted walls, are recognitions, not work. Each gets an issue only when a demo actually hits it. Filing them early turns the lists into the to-do list the roadmap exists to prevent.
+- **A predicted slice that its demo doesn't hit is closed as *not planned*,** with a line saying so in the roadmap, not built.
+- **When a slice ships,** its write-up moves to `ROADMAP-DONE.md` (as before) and the issue closes with a link to it.
+
 ## Conventions
 
 - **Create an issue**: `gh issue create --title "..." --body "..."`. Use a heredoc for multi-line bodies.
