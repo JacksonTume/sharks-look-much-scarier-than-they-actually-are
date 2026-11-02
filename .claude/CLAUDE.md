@@ -224,3 +224,18 @@ To confirm a change works:
   web throws a control-flow exception.
 - The web canvas backing size must be set explicitly and resynced when the async
   renderer arrives, or the surface is 1x1.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on this repo, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical roles under their default names (`needs-triage`, `needs-info`,
+`ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one root `GLOSSARY.md` and `docs/adr/`, both created lazily. See `docs/agents/domain.md`.
