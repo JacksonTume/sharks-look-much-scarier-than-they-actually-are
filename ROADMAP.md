@@ -591,6 +591,15 @@ rather than quietly dropped.
 [`slmsttaa-ui/ROADMAP.md`](slmsttaa-ui/ROADMAP.md), as always — this section names
 them in one line each where a block depends on them and does not restate them.
 
+**On the tracker.** Every slice below is a GitHub issue under its block's map
+issue — [#2](https://github.com/JacksonTume/sharks-look-much-scarier-than-they-actually-are/issues/2)
+Block 0, [#3](https://github.com/JacksonTume/sharks-look-much-scarier-than-they-actually-are/issues/3)
+the fifth vertical, [#4](https://github.com/JacksonTume/sharks-look-much-scarier-than-they-actually-are/issues/4)
+the sixth, [#5](https://github.com/JacksonTume/sharks-look-much-scarier-than-they-actually-are/issues/5)
+the seventh — with this file's order expressed as blocked-by edges. The issues
+carry scope, acceptance and status; this file keeps the argument. The rules for
+what gets an issue are in [`docs/agents/issue-tracker.md`](docs/agents/issue-tracker.md).
+
 ---
 
 ## Block 0 — the ground to stand on

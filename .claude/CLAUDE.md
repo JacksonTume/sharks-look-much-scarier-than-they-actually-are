@@ -234,6 +234,9 @@ To confirm a change works:
 ### Issue tracker
 
 GitHub Issues on this repo, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Every scheduled `ROADMAP.md` slice has an issue under its block's map issue: the
+issue holds scope and acceptance, the roadmap holds the rationale. The open
+issues are the backlog — start there, not from the roadmap's prose.
 
 ### Triage labels
 
